@@ -1,0 +1,8 @@
+accelerate
+colorama
+datasets
+numpy
+sentencepiece
+tokenizers
+torch
+transformers
