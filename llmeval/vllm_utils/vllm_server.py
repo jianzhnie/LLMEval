@@ -20,12 +20,14 @@ class ClientError(RuntimeError):
     pass
 
 
-def get_content(query: str, base_url: str, model_name: str) -> str:
+def get_content(query: str, system_prompt: str, base_url: str,
+                model_name: str) -> str:
     """
     Fetches content from the OpenAI API based on the provided query, base URL, and model name.
 
     Args:
         query (str): The user's input query.
+        system_prompt (str): The system prompt for the conversation.
         base_url (str): The base URL for the OpenAI API.
         model_name (str): The name of the model to use for generating the response.
 
@@ -38,6 +40,11 @@ def get_content(query: str, base_url: str, model_name: str) -> str:
     API_KEY = os.environ.get('OPENAI_API_KEY', 'EMPTY')
     API_REQUEST_TIMEOUT = int(os.getenv('OPENAI_API_REQUEST_TIMEOUT', '99999'))
 
+    messages = []
+    if system_prompt:
+        messages.append({'role': 'system', 'content': system_prompt})
+    messages.append({'role': 'user', 'content': query})
+
     if IS_OPENAI_V1:
         import httpx
 
@@ -49,10 +56,7 @@ def get_content(query: str, base_url: str, model_name: str) -> str:
         call_func = client.chat.completions.create
         call_args = {
             'model': model_name,
-            'messages': [{
-                'role': 'user',
-                'content': query
-            }],
+            'messages': messages,
             'temperature': 0.6,
             'top_p': 0.95,
             'max_tokens': 32768,
@@ -66,10 +70,7 @@ def get_content(query: str, base_url: str, model_name: str) -> str:
             'api_key': API_KEY,
             'api_base': base_url,
             'model': model_name,
-            'messages': [{
-                'role': 'user',
-                'content': query
-            }],
+            'messages': messages,
             'temperature': 0.6,
             'top_p': 0.95,
             'max_tokens': 32768,
