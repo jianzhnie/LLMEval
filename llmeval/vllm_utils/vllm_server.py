@@ -1,17 +1,17 @@
-import os
-import time
-import random
-import openai
 import logging
-from packaging.version import parse as parse_version
-from typing import Dict, Any
+import os
+import random
+import time
 
-IS_OPENAI_V1 = parse_version(openai.__version__) >= parse_version("1.0.0")
+import openai
+from packaging.version import parse as parse_version
+
+IS_OPENAI_V1 = parse_version(openai.__version__) >= parse_version('1.0.0')
 
 if IS_OPENAI_V1:
-    from openai import APIError, APIConnectionError, RateLimitError
+    from openai import APIConnectionError, APIError, RateLimitError
 else:
-    from openai.error import APIError, APIConnectionError, RateLimitError
+    from openai.error import APIConnectionError, APIError, RateLimitError
 
 
 class ClientError(RuntimeError):
@@ -35,8 +35,8 @@ def get_content(query: str, base_url: str, model_name: str) -> str:
     Raises:
         ClientError: If there are issues with the API request or response.
     """
-    API_KEY = os.environ.get("OPENAI_API_KEY", "EMPTY")
-    API_REQUEST_TIMEOUT = int(os.getenv("OPENAI_API_REQUEST_TIMEOUT", "99999"))
+    API_KEY = os.environ.get('OPENAI_API_KEY', 'EMPTY')
+    API_REQUEST_TIMEOUT = int(os.getenv('OPENAI_API_REQUEST_TIMEOUT', '99999'))
 
     if IS_OPENAI_V1:
         import httpx
@@ -48,58 +48,66 @@ def get_content(query: str, base_url: str, model_name: str) -> str:
         )
         call_func = client.chat.completions.create
         call_args = {
-            "model": model_name,
-            "messages": [{"role": "user", "content": query}],
-            "temperature": 0.6,
-            "top_p": 0.95,
-            "max_tokens": 32768,
-            "extra_body": {},
-            "timeout": API_REQUEST_TIMEOUT,
+            'model': model_name,
+            'messages': [{
+                'role': 'user',
+                'content': query
+            }],
+            'temperature': 0.6,
+            'top_p': 0.95,
+            'max_tokens': 32768,
+            'extra_body': {},
+            'timeout': API_REQUEST_TIMEOUT,
         }
-        call_args["extra_body"].update({"top_k": 40})
+        call_args['extra_body'].update({'top_k': 40})
     else:
         call_func = openai.ChatCompletion.create
         call_args = {
-            "api_key": API_KEY,
-            "api_base": base_url,
-            "model": model_name,
-            "messages": [{"role": "user", "content": query}],
-            "temperature": 0.6,
-            "top_p": 0.95,
-            "max_tokens": 32768,
-            "request_timeout": API_REQUEST_TIMEOUT,
+            'api_key': API_KEY,
+            'api_base': base_url,
+            'model': model_name,
+            'messages': [{
+                'role': 'user',
+                'content': query
+            }],
+            'temperature': 0.6,
+            'top_p': 0.95,
+            'max_tokens': 32768,
+            'request_timeout': API_REQUEST_TIMEOUT,
         }
-        call_args.update({"top_k": 40})
+        call_args.update({'top_k': 40})
 
     try:
         completion = call_func(**call_args)
         return completion.choices[0].message.content
     except AttributeError as e:
-        err_msg = getattr(completion, "message", "")
-        logging.warning(f"AttributeError encountered: {err_msg}")
+        err_msg = getattr(completion, 'message', '')
+        logging.warning(f'AttributeError encountered: {err_msg}')
         time.sleep(random.randint(25, 35))
         raise ClientError(err_msg) from e
     except (APIConnectionError, RateLimitError) as e:
         err_msg = e.message if IS_OPENAI_V1 else e.user_message
-        logging.warning(f"API connection error or rate limit exceeded: {err_msg}")
+        logging.warning(
+            f'API connection error or rate limit exceeded: {err_msg}')
         time.sleep(random.randint(25, 35))
         raise ClientError(err_msg) from e
     except APIError as e:
         err_msg = e.message if IS_OPENAI_V1 else e.user_message
-        if "maximum context length" in err_msg:
-            logging.warning(f"Maximum context length exceeded. Error: {err_msg}")
-            return {"gen": "", "end_reason": "max length exceeded"}
-        logging.warning(f"API error encountered: {err_msg}")
+        if 'maximum context length' in err_msg:
+            logging.warning(
+                f'Maximum context length exceeded. Error: {err_msg}')
+            return {'gen': '', 'end_reason': 'max length exceeded'}
+        logging.warning(f'API error encountered: {err_msg}')
         time.sleep(1)
         raise ClientError(err_msg) from e
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     conversation_history = []
-    user_input = "Hello!"
-    res = get_content(user_input, "http://10.77.249.36:8030/v1", "Qwen/QwQ")
-    print(f"Response: {res}")
+    user_input = 'Hello!'
+    res = get_content(user_input, 'http://10.77.249.36:8030/v1', 'Qwen/QwQ')
+    print(f'Response: {res}')
 
-    user_input = "How are you?"
-    res = get_content(user_input, "http://10.77.249.36:8030/v1", "Qwen/QwQ")
-    print(f"Response: {res}")
+    user_input = 'How are you?'
+    res = get_content(user_input, 'http://10.77.249.36:8030/v1', 'Qwen/QwQ')
+    print(f'Response: {res}')
