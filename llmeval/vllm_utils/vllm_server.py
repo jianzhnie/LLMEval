@@ -106,9 +106,19 @@ def get_content(query: str, system_prompt: str, base_url: str,
 if __name__ == '__main__':
     conversation_history = []
     user_input = 'Hello!'
-    res = get_content(user_input, 'http://10.77.249.36:8030/v1', 'Qwen/QwQ')
+    res = get_content(
+        user_input,
+        system_prompt=None,
+        base_url='http://10.77.249.36:8030/v1',
+        model_name='Qwen/QwQ',
+    )
     print(f'Response: {res}')
 
     user_input = 'How are you?'
-    res = get_content(user_input, 'http://10.77.249.36:8030/v1', 'Qwen/QwQ')
+    res = get_content(
+        user_input,
+        system_prompt=None,
+        base_url='http://10.77.249.36:8030/v1',
+        model_name='Qwen/QwQ',
+    )
     print(f'Response: {res}')

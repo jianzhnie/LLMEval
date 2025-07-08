@@ -37,14 +37,15 @@ def count_completed_samples(output_file: str) -> collections.defaultdict:
     return prompt_counts
 
 
-def process_item(item: dict, output_file: str, base_url: str,
-                 model_name: str) -> dict:
+def process_item(item: dict, system_prompt: str, output_file: str,
+                 base_url: str, model_name: str) -> dict:
     """
     Processes an individual item by fetching content from the OpenAI API and
     appending it to the output file.
 
     Args:
         item (dict): The input item containing the prompt.
+        system_prompt (str): The system prompt to use for generating the response.
         output_file (str): Path to the output JSONL file.
         base_url (str): Base URL for the OpenAI API.
         model_name (str): Name of the model to use for generating the response.
@@ -54,7 +55,7 @@ def process_item(item: dict, output_file: str, base_url: str,
     """
     result = copy.deepcopy(item)
 
-    response = get_content(item['prompt'], base_url, model_name)
+    response = get_content(item['prompt'], system_prompt, base_url, model_name)
 
     if 'gen' not in result:
         result['gen'] = []
@@ -99,6 +100,12 @@ def main():
         default='Qwen/QwQ-32B',
         help='Model name of VLLM server',
     )
+    parser.add_argument(
+        '--system_prompt',
+        type=str,
+        default=None,
+        help='System prompt for VLLM server',
+    )
     args = parser.parse_args()
 
     with open(args.input_file, 'r', encoding='utf-8') as f:
@@ -127,8 +134,14 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=args.max_workers) as executor:
         future_to_item = {
-            executor.submit(process_item, item, args.output_file,
-                            args.base_url, args.model_name): i
+            executor.submit(
+                process_item,
+                item,
+                args.system_prompt,
+                args.output_file,
+                args.base_url,
+                args.model_name,
+            ): i
             for i, item in enumerate(expanded_data)
         }
 
