@@ -172,3 +172,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+data/
+output/
+kernel_meta/
+available_nodes.txt

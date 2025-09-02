@@ -59,7 +59,6 @@ def get_content(query: str, system_prompt: str, base_url: str,
             'messages': messages,
             'temperature': 0.6,
             'top_p': 0.95,
-            'max_tokens': 32768,
             'extra_body': {},
             'timeout': API_REQUEST_TIMEOUT,
         }
@@ -73,7 +72,6 @@ def get_content(query: str, system_prompt: str, base_url: str,
             'messages': messages,
             'temperature': 0.6,
             'top_p': 0.95,
-            'max_tokens': 32768,
             'request_timeout': API_REQUEST_TIMEOUT,
         }
         call_args.update({'top_k': 40})

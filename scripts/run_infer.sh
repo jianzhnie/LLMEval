@@ -15,28 +15,31 @@ mkdir -p "${output_dir}"
 # --- Run Inference Tasks ---
 
 # aime24 (repeated sample 64 times)
-python ./generate_api_answers/infer_multithread.py \
+python ./llmeval/vllm_utils/infer_multithread.py \
     --input_file "./data/aime24.jsonl" \
     --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
-    --n_samples "${n_samples}"
+    --n_samples "${n_samples}" \
+    --max_workers 8 
 
 # aime25 (repeated sample 64 times)
-python ./generate_api_answers/infer_multithread.py \
+python ./llmeval/vllm_utils/infer_multithread.py \
     --input_file "./data/aime25.jsonl" \
     --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
-    --n_samples "${n_samples}"
+    --n_samples "${n_samples}" \
+    --max_workers 8 
 
 # math500
-python llmeval/vllm_utils/infer_multithread.py \
+python ./llmeval/vllm_utils/infer_multithread.py \
     --input_file "./data/math500.jsonl" \
     --output_file "${output_dir}/math500_bz${n_samples}.jsonl" \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
-    --n_samples "${n_samples}"
+    --n_samples "${n_samples}" \
+    --max_workers 8 
 
 
 echo "🎉 All inference tasks completed successfully!"
