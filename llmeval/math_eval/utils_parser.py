@@ -40,12 +40,12 @@ def parse_ground_truth(example: Dict[str, Any],
             'aimo12',
             'cnmo24',
             'aime25',
-            'math500box',
+            'math500',
     ]:
         answer = example.get('answer', '')
         if not answer:
             raise ValueError(f"{data_name} 缺失 'answer' 字段: {example}")
-        return None, answer.strip()
+        return None, answer
 
     else:
         raise NotImplementedError(f'不支持的数据集: `{data_name}`')

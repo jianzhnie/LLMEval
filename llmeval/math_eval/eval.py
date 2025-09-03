@@ -13,7 +13,7 @@ def get_after_think(text):
         return text
 
 
-def process_item(item, task_name):
+def process_item(item: dict, task_name: str):
     item['task'] = task_name
     return item
 
@@ -28,6 +28,10 @@ def main():
                         type=str,
                         required=True,
                         help='Path to save cache results')
+    parser.add_argument('--max_workers',
+                        type=int,
+                        default=128,
+                        help='Maximum number of worker threads')
     parser.add_argument(
         '--task_name',
         type=str,
@@ -45,7 +49,7 @@ def main():
     data = [process_item(item.copy(), args.task_name) for item in data]
 
     if 'math_opensource' in args.task_name:
-        acc = compute_scores(data, args.cache_path)
+        acc = compute_scores(data, args.max_workers, args.cache_path)
         print(f'Task: {args.task_name}, Accuracy: {acc}')
     else:
         print(f'No evaluation function found for task name: {args.task_name}')

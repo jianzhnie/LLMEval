@@ -17,9 +17,9 @@ except ImportError:
     )
 
 
-def process_answers(index: int,
-                    input_data: dict) -> Tuple[int, float, Any, Any]:
+def process_answers(args) -> Tuple[int, float, Any, Any]:
     """Process each answer through the sympy extraction workflow and compare with gold using math_verify."""
+    index, input_data = args
 
     data_name = input_data['task'].split('/')[1]
     cot_answer, answer = parse_ground_truth(input_data, data_name)
@@ -51,11 +51,12 @@ def process_answers(index: int,
         return index, 0.0, f'Error: {str(e)}', None
 
 
-def compute_scores(jobs: List[dict], cache_path: str) -> float:
+def compute_scores(jobs: List[dict], max_workers: int,
+                   cache_path: str) -> float:
     results = []
     total = len(jobs)
     with tqdm(total=total) as pbar:
-        with ProcessPool(max_workers=20) as pool:
+        with ProcessPool(max_workers=max_workers) as pool:
             future = pool.map(process_answers,
                               list(enumerate(jobs)),
                               timeout=10)
