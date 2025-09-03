@@ -1,8 +1,14 @@
-accelerate
-colorama
 datasets
+latex2sympy2==1.9.1
+math-verify
 numpy
-sentencepiece
+openai
+Pebble
+# math_eval
+sympy==1.12
+timeout-decorator
 tokenizers
 torch
+tqdm
 transformers
+word2number

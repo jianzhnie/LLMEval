@@ -3,4 +3,4 @@ install_path=/usr/local/Ascend
 source $install_path/ascend-toolkit/set_env.sh
 source $install_path/nnal/atb/set_env.sh
 
-source /root/llmtuner/miniconda3/bin/activate vllm_073
+source /home/jianzhnie/llmtuner/software/miniconda3/bin/activate vllm_073

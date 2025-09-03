@@ -176,3 +176,4 @@ data/
 output/
 kernel_meta/
 available_nodes.txt
+run.sh
