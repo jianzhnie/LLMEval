@@ -1,51 +1,87 @@
-from typing import Any, Dict, Optional, Tuple
+"""
+This module provides a utility function to parse ground truth data
+from various datasets, extracting the chain-of-thought (CoT) and
+the final answer.
+"""
+from typing import Any, Dict, List, Optional, Tuple
+
+# A constant mapping dataset names to their answer field names.
+# This makes the code more scalable and easier to update.
+DATASET_ANSWER_FIELDS: Dict[str, str] = {
+    'gsm8k': 'answer',
+    'olympiadbench': 'final_answer',
+    'aime24': 'answer',
+    'amc23': 'answer',
+    'cmath': 'answer',
+    'imo2024': 'answer',
+    'aimo12': 'answer',
+    'cnmo24': 'answer',
+    'aime25': 'answer',
+    'math500': 'answer',
+}
 
 
 def parse_ground_truth(example: Dict[str, Any],
                        data_name: str) -> Tuple[Optional[str], str]:
     """
-    从示例中解析出思维链 (CoT) 和最终答案 (Answer)。
+    Parses the ground truth data from an example dictionary based on the dataset name.
+
+    This function extracts the chain-of-thought (CoT) and the final answer. The CoT is
+    optional and will be returned as None if not present.
 
     Args:
-        example (Dict[str, Any]): 包含原始数据的字典。
-        data_name (str): 数据集名称，用于决定解析方式。
+        example (Dict[str, Any]): A dictionary containing the raw data for a single example.
+        data_name (str): The name of the dataset (e.g., 'gsm8k', 'olympiadbench').
 
     Returns:
-        Tuple[Optional[str], str]: 返回 (CoT, Answer)，若无 CoT 则为 (None, Answer)。
+        Tuple[Optional[str], str]: A tuple containing two strings:
+                                   - The chain-of-thought (CoT), or None if not available.
+                                   - The final answer.
 
     Raises:
-        ValueError: 如果无法提取到答案。
-        NotImplementedError: 如果不支持该数据集。
+        ValueError: If the required fields for the specified dataset are missing or
+                    in an unexpected format.
+        NotImplementedError: If the provided `data_name` is not supported.
     """
+    # Check if the dataset is supported by looking up the constant dictionary
+    if data_name not in DATASET_ANSWER_FIELDS:
+        raise NotImplementedError(f'Unsupported dataset: `{data_name}`')
+
+    # Get the name of the field that contains the answer
+    answer_field_name = DATASET_ANSWER_FIELDS[data_name]
+    answer_field = example.get(answer_field_name)
+
+    # Handle cases where the required answer field is missing
+    if answer_field is None:
+        raise ValueError(
+            f"Required field '{answer_field_name}' not found for dataset '{data_name}'."
+        )
+
+    # --- Dataset-specific parsing logic ---
     if data_name == 'gsm8k':
-        answer_field = example.get('answer', '')
+        # GSM8K's answer field contains both CoT and the final answer separated by '####'
         if '####' not in answer_field:
-            raise ValueError(f"GSM8K 示例缺失 '####' 分隔符: {example}")
-        parts = answer_field.split('####')
+            raise ValueError(
+                f"GSM8K example is missing the '####' separator: {example}")
+
+        parts = answer_field.split('####', 1)  # Use maxsplit for robustness
         gt_cot = parts[0].strip()
         gt_ans = parts[1].strip()
         return gt_cot, gt_ans
 
     elif data_name == 'olympiadbench':
-        final_answer = example.get('final_answer', [])
-        if not final_answer or not isinstance(final_answer, list):
-            raise ValueError(f'olympiadbench 缺失或格式错误的 final_answer: {example}')
-        return None, final_answer[0].strip('$')
+        # OlympiadBench's final answer is in a list and may contain '$'
+        if not isinstance(answer_field, List) or not answer_field:
+            raise ValueError(
+                f"OlympiadBench 'final_answer' is missing or has an invalid format: {example}"
+            )
 
-    elif data_name in [
-            'aime24',
-            'amc23',
-            'cmath',
-            'imo2024',
-            'aimo12',
-            'cnmo24',
-            'aime25',
-            'math500',
-    ]:
-        answer = example.get('answer', '')
-        if not answer:
-            raise ValueError(f"{data_name} 缺失 'answer' 字段: {example}")
-        return None, answer
+        # Access the first element of the list and strip any leading/trailing '$'
+        gt_ans = str(answer_field[0]).strip('$').strip()
+        return None, gt_ans
 
+    # For all other datasets, the answer is a simple string in the 'answer' field
     else:
-        raise NotImplementedError(f'不支持的数据集: `{data_name}`')
+        # These datasets do not have a separate CoT field
+        gt_ans = str(answer_field).strip()
+        return None, gt_ans
