@@ -11,4 +11,5 @@ tokenizers
 torch
 tqdm
 transformers
+vllm >=0.7.3
 word2number
