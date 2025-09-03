@@ -8,7 +8,8 @@ import threading
 
 from tqdm import tqdm
 
-from llmeval.vllm_utils.vllm_server import get_content
+from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
+from llmeval.vllm.vllm_server import get_content
 
 file_lock = threading.Lock()
 
@@ -132,13 +133,15 @@ def main():
 
     completed_count = 0
 
+    system_prompt = SYSTEM_PROMPT_FACTORY[args.system_prompt]
+
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=args.max_workers) as executor:
         future_to_item = {
             executor.submit(
                 process_item,
                 item,
-                args.system_prompt,
+                system_prompt,
                 args.output_file,
                 args.base_url,
                 args.model_name,
