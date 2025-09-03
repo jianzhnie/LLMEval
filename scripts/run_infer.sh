@@ -3,11 +3,11 @@
 set -euo pipefail
 
 # --- Configuration ---
-output_dir="./output/Qwen/Qwen2.5-7B"
-model_name="Qwen/Qwen2.5-7B"
+output_dir="./output/Qwen/QwQ-32B"
+model_name="Qwen/QwQ-32B"
 
 base_url="http://127.0.0.1:8090/v1"
-n_samples=1  # Default sample size for aime24 and aime25
+n_samples=64  # Default sample size for aime24 and aime25
 
 # Create output directory if it doesn't exist
 mkdir -p "${output_dir}"
@@ -21,7 +21,7 @@ python ./llmeval/vllm_utils/infer_multithread.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
-    --max_workers 8 
+    --max_workers 8
 
 # aime25 (repeated sample 64 times)
 python ./llmeval/vllm_utils/infer_multithread.py \
@@ -30,7 +30,7 @@ python ./llmeval/vllm_utils/infer_multithread.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
-    --max_workers 8 
+    --max_workers 8
 
 # math500
 python ./llmeval/vllm_utils/infer_multithread.py \
@@ -39,7 +39,7 @@ python ./llmeval/vllm_utils/infer_multithread.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
-    --max_workers 8 
+    --max_workers 8
 
 
 echo "🎉 All inference tasks completed successfully!"

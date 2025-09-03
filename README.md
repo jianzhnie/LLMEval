@@ -1,24 +1,59 @@
 # LLM Evaluation
 
-## Benchmark
+We are able to reproduce many open source  model  reported results on the AIME 2024  &  AIME 2025 benchmark.
 
-Currently, this repository contains the code to reproduce the following scores.
+## Reproducing Model’s evaluation results
 
-| Datasets                 | QwQ-32B |
-|--------------------------|---------|
-| AIME24                   | 79.5    |
-| AIME25                   | 69.5    |
+The DeepSeek-R1 paper uses sampling with 4-64 responses per query to estimate `pass@1` accuracy, but does not specify the specific number of responses per benchmark. In the tables below, we estimate `pass@1` accuracy with the following number of responses per query:
+
+| Benchmark | Number of responses per query |
+| --------- | ----------------------------- |
+| AIME 2024 | 64                            |
+| AIME 2025 | 64                            |
+
+Note that for benchmarks like AIME24, it is important to sample many responses as there are only 30 problems and this can introduce high variance across repeated runs. The choice of how many responses to sample per prompt likely explains the small differences between our evaluation results and those reported by DeepSeek.
 
 
 
+### DeepSeek-R1-Distill-Qwen-32B
 
+| Datasets | (🤗 LLMEval) | DeepSeek-R1-Distill-Qwen-32B（Reported） |
+| -------- | ----------- | ---------------------------------------- |
+| AIME24   | 70.625      | 72.6                                     |
+| AIME25   | 55.052      | 59.0                                     |
+| MATH-500 | 93.2        | 94.3                                     |
+
+
+
+### QwQ-32B
+
+| Datasets | (🤗 LLMEval) | QwQ-32B（Reported） |
+| -------- | ----------- | ------------------- |
+| AIME24   | 78.65       | 79.5                |
+| AIME25   | 67.22       | 69.5                |
+
+
+
+### Skywork-OR1-32B
+
+| Datasets | (🤗 LLMEval) | Skywork-OR1-32B（Reported） |
+| -------- | ----------- | --------------------------- |
+| AIME24   | 81.25       | 82.2                        |
+| AIME25   | 72.66       | 73.3                        |
+
+
+
+### OpenThinker3-7B
+
+| Datasets | (🤗 LLMEval) | OpenThinker3-7B（Reported） |
+| -------- | ----------- | --------------------------- |
+| AIME24   | 0.7041      | **69.0**                    |
+| AIME25   | 0.5916      | **53.3**                    |
 
 
 ## Evaluation
 
 ### Step 0: Requirements
-
-Ensure you have Python >= 3.9 installed along with GPU devices totaling at least 100GB of memory (for bf16 inference with enough context length).
 
 Install the dependencies using:
 
@@ -31,42 +66,62 @@ pip install -f requirements.txt
 First, start the vLLM server with the following command:
 
 ```bash
-model_path="Qwen/QwQ-32B" # or path to your local checkpoint
+model_path="Qwen/QwQ-32B"  # or model to the path where the model is located
 model_name="Qwen/QwQ-32B"
-num_gpus=4
+
+num_gpus=8
+max_model_len=32768  # ✅ 支持 32k 上下文
+gpu_memory_utilization=0.9  # ✅ 提高内存利用率
 
 python -m vllm.entrypoints.openai.api_server \
     --model $model_path \
     --trust-remote-code \
     --served-model-name $model_name \
     --tensor-parallel-size $num_gpus \
+    --gpu-memory-utilization $gpu_memory_utilization \
+    --max-model-len $max_model_len  \
     --enforce-eager \
-    --port 8030
+    --port 8090
 ```
 Adjust the `tensor_parallel_size` parameter based on your available devices.
-### Optional : Start SGLang server/router
+Please refer to the [script](./scripts/model_server.sh) for more details.
 
-Since the evaluation could takes days, we also suggest using SGLang with data parallelism to accelerate the evaluation. Refer to [SGLang documentation](https://docs.sglang.ai/router/router.html) for more details.
-```bash
-# Use router to support better data parallelism
-python -m sglang_router.launch_server --model-path Qwen/QwQ-32B --dp-size 4 --host=0.0.0.0 --port=30000
-
-```
-Adjust the `dp_size` parameter based on your available devices. Also adjust the port in following commands.
 
 ### Step 2: Run Inference
 
 After starting the vLLM service, run the inference script to generate responses.
 
 ```bash
-mkdir -p output
+output_dir="./output/Qwen/QwQ-32B"
+model_name="Qwen/QwQ-32B"
 
+base_url="http://127.0.0.1:8090/v1"
+n_samples=64  # Default sample size for aime24 and aime25
+
+# Create output directory if it doesn't exist
+mkdir -p "${output_dir}"
+
+# --- Run Inference Tasks ---
 # aime24 (repeated sample 64 times)
-python ./generate_api_answers/infer_multithread.py --input_file "./data/aime24.jsonl" --output_file "./output/aime24_bz64.jsonl"  --base_url "http://127.0.0.1:8030/v1" --model_name "Qwen/QwQ-32B"
+python ./llmeval/vllm_utils/infer_multithread.py \
+    --input_file "./data/aime24.jsonl" \
+    --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
+    --base_url "${base_url}" \
+    --model_name "${model_name}" \
+    --n_samples "${n_samples}" \
+    --max_workers 8
 
 # aime25 (repeated sample 64 times)
-python ./generate_api_answers/infer_multithread.py --input_file "./data/aime25.jsonl" --output_file "./output/aime25_bz64.jsonl"  --base_url "http://127.0.0.1:8030/v1" --model_name "Qwen/QwQ-32B"
+python ./llmeval/vllm_utils/infer_multithread.py \
+    --input_file "./data/aime25.jsonl" \
+    --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
+    --base_url "${base_url}" \
+    --model_name "${model_name}" \
+    --n_samples "${n_samples}" \
+    --max_workers 8
 ```
+Please refer to the [script](./scripts/run_infer.sh) for more details.
+
 
 **Note:** We apply repeated sampling to reduce evaluation variance, but it may take a long time to complete (more than 8 hours depending on your device).
 
@@ -76,11 +131,13 @@ python ./generate_api_answers/infer_multithread.py --input_file "./data/aime25.j
 - `--model_name`: Must match the model name used in Step 1
 - `--n_samples`: Number of samples per prompt
   - AIME24 / AIME 25: Recommended 64 samples
-  - LiveCodeBench: Recommended 8 samples
-  - IFEval: Recommended 1 sample
 - `--input_file`: Input data file path
 - `--output_file`: Output result file path, model responses will be stored in the `gen` field
 - `--max_workers`: Maximum number of concurrent threads to control inference speed and resource usage
+
+
+
+
 
 #### Sampling Parameters
 
@@ -95,19 +152,33 @@ If the inference process is interrupted, simply rerun the same command to resume
 After completing the inference, use the following commands for scoring:
 
 ```bash
-mkdir -p eval_res
+output_dir="./output/Qwen/QwQ-32B"
+n_samples=64  # Default sample size for aime24 and aime25
 
-python  ./eval/eval.py --input_path ./output/aime24_bz64.jsonl --cache_path ./eval_res/aime24_bz64.jsonl  --task_name "math_opensource/aime24" > ./eval_res/aime24_bz64_res_result.txt
+# Evaluation output directory
+reval_dir="${output_dir}/eval_score"
+# Create evaluation directory if it doesn't exist
+mkdir -p "${reval_dir}"
 
-python  ./eval/eval.py --input_path ./output/aime25_bz64.jsonl --cache_path ./eval_res/aime25_bz64.jsonl  --task_name "math_opensource/aime25" > ./eval_res/aime25_bz64_res_result.txt
+# --- Evaluate Each Task ---
+# Evaluate aime24
+python ./llmeval/math_eval/eval.py \
+    --input_path "${output_dir}/aime24_bz${n_samples}.jsonl" \
+    --cache_path "${reval_dir}/aime24_bz${n_samples}.jsonl" \
+    --task_name "math_opensource/aime24" \
+    --max_workers 16 \
+    > "${reval_dir}/aime24_bz${n_samples}_res_result.txt"
 
-# download all test cases
-python ./data/process_data.py
-# Note: running all code test cases can be very slow (more than 4 hours)
-python  ./eval/eval.py --input_path ./output/livecodebench_v5_bz8.jsonl --cache_path ./eval_res/livecodebench_v5_bz8.jsonl  --task_name "livecodebench" > ./eval_res/livecodebench_v5_bz8_res_result.txt
-
-python  ./eval/eval.py --input_path ./output/ifeval_bz1.jsonl --cache_path ./eval_res/ifeval_bz1.jsonl  --task_name "ifeval" > ./eval_res/ifeval_bz1_res_result.txt
+# Evaluate aime25
+python ./llmeval/math_eval/eval.py \
+    --input_path "${output_dir}/aime25_bz${n_samples}.jsonl" \
+    --cache_path "${reval_dir}/aime25_bz${n_samples}.jsonl" \
+    --task_name "math_opensource/aime25" \
+    --max_workers 16 \
+    > "${reval_dir}/aime25_bz${n_samples}_res_result.txt"
 ```
+Please refer to the [script](./scripts/get_scores.sh) for more details.
+
 
 ### Parameter Description
 
@@ -119,5 +190,5 @@ python  ./eval/eval.py --input_path ./output/ifeval_bz1.jsonl --cache_path ./eva
 - `--task_name`: Evaluation task name, must be one of the following options:
   - `math_opensource/aime24`
   - `math_opensource/aime25`
-  - `livecodebench`
-  - `ifeval`
+- `max_workers`: Maximum number of concurrent threads to control evaluation speed and resource usage
+Please refer to the [script](./scripts/run_infer.sh) for more details.
