@@ -75,13 +75,14 @@ export COMPILE_CUSTOM_KERNELS=1
 python setup.py install
 ```
 
-### llmeval Requirement
+### llmeval
 
-Install the dependencies using.
+Install the `llmeval` package by cloning the repository and then using `pip` to install it in editable mode. This will also install all the necessary dependencies.
 
 ```bash
-git clone https://gitee.com/jianzhnie/LLMEval
-pip install -r requirements.txt
+git clone https://gitee.com/jianzhnie/LLMEval.git
+cd LLMEval
+pip install -e .
 ```
 
 ## Evaluation
