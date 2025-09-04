@@ -1,17 +1,9 @@
 # LLM Evaluation
 
-We are able to reproduce many open source  model  reported results on the AIME 2024  &  AIME 2025 benchmark.
+## Overview
+We have successfully reproduced various open-source model results on the AIME 2024 & AIME 2025 benchmarks.
 
-## Reproducing Model’s evaluation results
-
-The DeepSeek-R1 paper uses sampling with 4-64 responses per query to estimate `pass@1` accuracy, but does not specify the specific number of responses per benchmark. In the tables below, we estimate `pass@1` accuracy with the following number of responses per query:
-
-| Benchmark | Number of responses per query |
-| :-------: | :---------------------------: |
-| AIME 2024 |              64               |
-| AIME 2025 |              64               |
-
-Note that for benchmarks like AIME24, it is important to sample many responses as there are only 30 problems and this can introduce high variance across repeated runs. The choice of how many responses to sample per prompt likely explains the small differences between our evaluation results and those reported by DeepSeek.
+For benchmarks like AIME24, which contains only 30 problems, it is crucial to sample multiple responses as this can introduce high variance across repeated runs. The number of responses sampled per prompt likely accounts for the slight differences between our evaluation results and those reported by DeepSeek.
 
 ### DeepSeek-R1-Distill-Qwen-32B
 
@@ -20,7 +12,6 @@ Note that for benchmarks like AIME24, it is important to sample many responses a
 |  AIME24  |   70.625    |                   72.6                   |
 |  AIME25  |   55.052    |                   59.0                   |
 | MATH-500 |    93.2     |                   94.3                   |
-
 
 
 ### QwQ-32B
