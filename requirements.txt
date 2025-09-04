@@ -7,4 +7,3 @@ tokenizers
 torch
 tqdm
 transformers
-word2number
