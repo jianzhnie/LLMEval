@@ -1,15 +1,10 @@
 datasets
-latex2sympy2==1.9.1
 math-verify
 numpy
 openai
 Pebble
-# math_eval
-sympy==1.12
-timeout-decorator
 tokenizers
 torch
 tqdm
 transformers
-vllm >=0.7.3
 word2number

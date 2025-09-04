@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pebble import ProcessPool
 from tqdm import tqdm
 
-from llmeval.math_eval.utils_parser import parse_ground_truth
+from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
 
 # Attempt to import necessary components from math-verify.
 # If the package is not installed, it provides instructions to the user.

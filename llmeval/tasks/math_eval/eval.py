@@ -11,7 +11,7 @@ import os
 import sys
 from typing import Any, Dict, List
 
-from llmeval.math_eval.math_score import compute_scores
+from llmeval.tasks.math_eval.math_score import compute_scores
 
 
 def _get_after_think(text: str) -> str:
