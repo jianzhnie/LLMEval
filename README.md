@@ -184,7 +184,7 @@ mkdir -p "${reval_dir}"
 
 # --- Evaluate Each Task ---
 # Evaluate aime24
-python ./llmeval/math_eval/eval.py \
+python ./llmeval/tasks/math_eval/eval.py \
     --input_path "${output_dir}/aime24_bz${n_samples}.jsonl" \
     --cache_path "${reval_dir}/aime24_bz${n_samples}.jsonl" \
     --task_name "math_opensource/aime24" \
@@ -192,7 +192,7 @@ python ./llmeval/math_eval/eval.py \
     > "${reval_dir}/aime24_bz${n_samples}_res_result.txt"
 
 # Evaluate aime25
-python ./llmeval/math_eval/eval.py \
+python ./llmeval/tasks/math_eval/eval.py \
     --input_path "${output_dir}/aime25_bz${n_samples}.jsonl" \
     --cache_path "${reval_dir}/aime25_bz${n_samples}.jsonl" \
     --task_name "math_opensource/aime25" \
