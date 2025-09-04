@@ -47,8 +47,8 @@ Note that for benchmarks like AIME24, it is important to sample many responses a
 
 | Datasets | (🤗 LLMEval) | OpenThinker3-7B（Reported） |
 | -------- | ----------- | --------------------------- |
-| AIME24   | 0.7041      | **69.0**                    |
-| AIME25   | 0.5916      | **53.3**                    |
+| AIME24   | 70.41      | 69.0                    |
+| AIME25   | 59.16      | 53.3                    |
 
 
 ## Evaluation
