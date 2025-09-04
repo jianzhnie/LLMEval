@@ -1,4 +1,4 @@
-## LLM Evaluation
+# LLM Evaluation
 
 We are able to reproduce many open source  model  reported results on the AIME 2024  &  AIME 2025 benchmark.
 
@@ -35,9 +35,9 @@ Note that for benchmarks like AIME24, it is important to sample many responses a
 ### Skywork-OR1-32B
 
 | Datasets | (🤗 LLMEval) | Skywork-OR1-32B（Reported） |
-| :------: | ----------- | :-------------------------: |
-|  AIME24  | 81.25       |            82.2             |
-|  AIME25  | 72.66       |            73.3             |
+| :------: | :---------: | :-------------------------: |
+|  AIME24  |    81.25    |            82.2             |
+|  AIME25  |    72.66    |            73.3             |
 
 
 
@@ -49,15 +49,51 @@ Note that for benchmarks like AIME24, it is important to sample many responses a
 |  AIME25  |   0.5916    |          **53.3**           |
 
 
-## Evaluation
+## Installation
 
-### Step 0: Requirements
+### Basic Environment Setup
 
-Install the dependencies using:
+| software  | version    |
+| --------- | ---------- |
+| Python    | == 3.10    |
+| CANN      | == 8.1.RC1 |
+| torch     | == 2.5.1   |
+| torch_npu | == 2.5.1   |
+
+For basic environment setup, please refer to this [documentation](https://gitee.com/ascend/pytorch).
+
+### vllm & vllm-ascend
+
+To properly use vllm in verl, you need to compile and install vllm and vllm-ascend using the following commands. Please note the installation method varies depending on your machine type.
 
 ```bash
-pip install -f requirements.txt
+# vllm
+git clone -b v0.7.3 --depth 1 https://github.com/vllm-project/vllm.git
+cd vllm
+pip install -r requirements-build.txt
+
+# for Atlas 200T A2 Box16
+VLLM_TARGET_DEVICE=empty pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
+
+# for Atlas 900 A2 PODc
+VLLM_TARGET_DEVICE=empty pip install -e .
+# vllm-ascend
+git clone -b v0.7.3.post1 --depth 1 https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+export COMPILE_CUSTOM_KERNELS=1
+python setup.py install
 ```
+
+### llmeval Requirement
+
+Install the dependencies using.
+
+```bash
+git clone https://gitee.com/jianzhnie/LLMEval
+pip install -r requirements.txt
+```
+
+## Evaluation
 
 ### Step 1: Start vLLM Server
 
@@ -82,6 +118,7 @@ python -m vllm.entrypoints.openai.api_server \
     --port 8090
 ```
 Adjust the `tensor_parallel_size` parameter based on your available devices.
+
 Please refer to the [script](./scripts/model_server.sh) for more details.
 
 
@@ -133,10 +170,6 @@ Please refer to the [script](./scripts/run_infer.sh) for more details.
 - `--output_file`: Output result file path, model responses will be stored in the `gen` field
 - `--max_workers`: Maximum number of concurrent threads to control inference speed and resource usage
 
-
-
-
-
 #### Sampling Parameters
 
 We use ``top_p=0.95``, ``temperature=0.6``, ``top_k=40``, ``max_tokens=32768`` for sampling.
@@ -145,7 +178,7 @@ We use ``top_p=0.95``, ``temperature=0.6``, ``top_k=40``, ``max_tokens=32768`` f
 
 If the inference process is interrupted, simply rerun the same command to resume. The script will automatically read the previous output file and process any prompts that haven't completed the required number of samples.
 
-## Scoring
+### Step 3: Scoring
 
 After completing the inference, use the following commands for scoring:
 
@@ -177,8 +210,7 @@ python ./llmeval/math_eval/eval.py \
 ```
 Please refer to the [script](./scripts/get_scores.sh) for more details.
 
-
-### Parameter Description
+#### Parameter Description
 
 - `--input_path`: Input file path, can directly use the output file from multi-threaded inference or other files with consistent format. Requirements:
   - JSONL format
@@ -188,5 +220,4 @@ Please refer to the [script](./scripts/get_scores.sh) for more details.
 - `--task_name`: Evaluation task name, must be one of the following options:
   - `math_opensource/aime24`
   - `math_opensource/aime25`
-- `max_workers`: Maximum number of concurrent threads to control evaluation speed and resource usage
-Please refer to the [script](./scripts/run_infer.sh) for more details.
+- `max_workers`: Maximum number of concurrent threads to control evaluation speed and resource usage.
