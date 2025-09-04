@@ -1,4 +1,4 @@
-# LLM Evaluation
+## LLM Evaluation
 
 We are able to reproduce many open source  model  reported results on the AIME 2024  &  AIME 2025 benchmark.
 
@@ -7,48 +7,46 @@ We are able to reproduce many open source  model  reported results on the AIME 2
 The DeepSeek-R1 paper uses sampling with 4-64 responses per query to estimate `pass@1` accuracy, but does not specify the specific number of responses per benchmark. In the tables below, we estimate `pass@1` accuracy with the following number of responses per query:
 
 | Benchmark | Number of responses per query |
-| --------- | ----------------------------- |
-| AIME 2024 | 64                            |
-| AIME 2025 | 64                            |
+| :-------: | :---------------------------: |
+| AIME 2024 |              64               |
+| AIME 2025 |              64               |
 
 Note that for benchmarks like AIME24, it is important to sample many responses as there are only 30 problems and this can introduce high variance across repeated runs. The choice of how many responses to sample per prompt likely explains the small differences between our evaluation results and those reported by DeepSeek.
-
-
 
 ### DeepSeek-R1-Distill-Qwen-32B
 
 | Datasets | (🤗 LLMEval) | DeepSeek-R1-Distill-Qwen-32B（Reported） |
-| -------- | ----------- | ---------------------------------------- |
-| AIME24   | 70.625      | 72.6                                     |
-| AIME25   | 55.052      | 59.0                                     |
-| MATH-500 | 93.2        | 94.3                                     |
+| :------: | :---------: | :--------------------------------------: |
+|  AIME24  |   70.625    |                   72.6                   |
+|  AIME25  |   55.052    |                   59.0                   |
+| MATH-500 |    93.2     |                   94.3                   |
 
 
 
 ### QwQ-32B
 
 | Datasets | (🤗 LLMEval) | QwQ-32B（Reported） |
-| -------- | ----------- | ------------------- |
-| AIME24   | 78.65       | 79.5                |
-| AIME25   | 67.22       | 69.5                |
+| :------: | :---------: | :-----------------: |
+|  AIME24  |    78.65    |        79.5         |
+|  AIME25  |    67.22    |        69.5         |
 
 
 
 ### Skywork-OR1-32B
 
 | Datasets | (🤗 LLMEval) | Skywork-OR1-32B（Reported） |
-| -------- | ----------- | --------------------------- |
-| AIME24   | 81.25       | 82.2                        |
-| AIME25   | 72.66       | 73.3                        |
+| :------: | ----------- | :-------------------------: |
+|  AIME24  | 81.25       |            82.2             |
+|  AIME25  | 72.66       |            73.3             |
 
 
 
 ### OpenThinker3-7B
 
 | Datasets | (🤗 LLMEval) | OpenThinker3-7B（Reported） |
-| -------- | ----------- | --------------------------- |
-| AIME24   | 0.7041      | **69.0**                    |
-| AIME25   | 0.5916      | **53.3**                    |
+| :------: | :---------: | :-------------------------: |
+|  AIME24  |   0.7041    |          **69.0**           |
+|  AIME25  |   0.5916    |          **53.3**           |
 
 
 ## Evaluation
