@@ -68,12 +68,14 @@ def process_answers(
 
     # Initialize the verification function from math_verify
     verify_func = math_metric(
-        # The gold answer is expected to be in LaTeX format
-        gold_extraction_target=(LatexExtractionConfig(), ),
-        # The predicted answer can be an expression or LaTeX
+        # The gold answer can be an expression or LaTeX.
+        # We use both parsers to be robust to different formats.
+        gold_extraction_target=(ExprExtractionConfig(),
+                                LatexExtractionConfig()),
+        # The predicted answer can also be an expression or LaTeX.
         pred_extraction_target=(ExprExtractionConfig(),
                                 LatexExtractionConfig()),
-        # Use max to select the best score if multiple extractions are successful
+        # Use max to select the best score if multiple extractions are successful.
         aggregation_function=max,
         precision=6,
     )
