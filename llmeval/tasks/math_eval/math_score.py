@@ -13,6 +13,10 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
+from llmeval.utils.logger import init_logger
+
+# Initialize a logger for better error handling and debugging.
+logger = init_logger(__name__)
 
 # Attempt to import necessary components from math-verify.
 # If the package is not installed, it provides instructions to the user.
@@ -20,7 +24,7 @@ try:
     from math_verify.metric import math_metric
     from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 except ImportError:
-    print(
+    logger.error(
         'To use Math-Verify, please install it first by running `pip install math-verify`.'
     )
     # Exiting the program here is crucial as the main functions will fail without it.
@@ -46,19 +50,21 @@ def process_answers(
         Returns None if an unexpected error occurs.
     """
     index, input_data = args
-    data_name = input_data['task'].split('/')[1]
+    data_name = input_data.get('task', '').split('/')[1]
 
     # Parse the ground truth answer from the input data
     # The first return value (cot_answer) is unused for this metric
     try:
+        # The first return value (cot_answer) is unused for this metric.
         _, gold_answer_text = parse_ground_truth(input_data, data_name)
     except (ValueError, NotImplementedError) as e:
-        print(f'❌ [Error] Parsing gold truth for job {index} failed: {e}')
+        logger.error(
+            f'❌ [Error] Parsing gold truth for job {index} failed: {e}')
         return index, 0.0, None, None
 
     # Get the generated text. Handles cases where 'gen' might be missing or empty.
-    generated_text = (input_data['gen'][0]
-                      if 'gen' in input_data and input_data['gen'] else '')
+    generated_text = input_data.get('gen', [])
+    generated_text = generated_text[0] if generated_text else ''
 
     # Initialize the verification function from math_verify
     verify_func = math_metric(
@@ -80,19 +86,21 @@ def process_answers(
         # Safely extract the predicted and gold answers from the returned tuple
         # The tuple will contain extracted answers in the order of `pred_extraction_target`
         # and `gold_extraction_target` respectively.
-        pred_ans = extracted_answers[1] if len(extracted_answers) > 1 else None
+        # Note: The order of `extracted_answers` is (gold_ans, pred_ans).
         gold_ans = extracted_answers[0] if len(extracted_answers) > 0 else None
+        pred_ans = extracted_answers[1] if len(extracted_answers) > 1 else None
 
         return index, float(grade), pred_ans, gold_ans
 
     except TimeoutError as te:
-        # This handles the case where the `math_verify` function times out
-        print(f'⏰ [Timeout] Job {index} failed: {te}')
-        return index, 0.0, 'Timeout', None
+        logger.warning(f'⏰ [Timeout] Job {index} timed out {te}')
+        return index, 0.0, 'Timeout', 'Timeout'
     except Exception as e:
-        # Catch any other unexpected errors during processing
-        print(f'❌ [Error] Job {index} failed: {e}')
-        return index, 0.0, f'Error: {str(e)}', None
+        # Catch any other unexpected errors during processing.
+        logger.error(
+            f'❌ [Error] An unexpected error occurred for job {index}: {e}',
+            exc_info=True)
+        return index, 0.0, f'Error: {e}', f'Error: {e}'
 
 
 def compute_scores(jobs: List[Dict[str, Any]], max_workers: int,
@@ -110,40 +118,57 @@ def compute_scores(jobs: List[Dict[str, Any]], max_workers: int,
         float: The overall accuracy score, averaged across all jobs.
     """
     total = len(jobs)
-    processed_indices = set()
+    if total == 0:
+        logger.info('No jobs to process. Returning 0.0 accuracy.')
+        return 0.0
 
-    with tqdm(total=total) as pbar:
+    processed_indices = set()
+    timeout_count = 0
+
+    with tqdm(total=total, desc='Processing jobs') as pbar:
         # Using ProcessPool to parallelize the evaluation
         with ProcessPool(max_workers=max_workers) as pool:
             # `pool.map` submits jobs and returns a future
             future = pool.map(process_answers,
                               list(enumerate(jobs)),
-                              timeout=10)  # Set a timeout for each task
+                              timeout=10)
 
-            # Iterate over the results as they become available
-            for result in future.result():
-                if result is not None:
-                    idx, is_correct, extracted_ans, gold_ans = result
-                    jobs[idx]['accuracy'] = is_correct
-                    jobs[idx]['extracted_answer'] = extracted_ans
-                    jobs[idx]['gold_answer'] = gold_ans
-                    processed_indices.add(idx)
-                pbar.update(1)
+            # Iterate over the results as they become available.
+            iterator = future.result()
+            while True:
+                try:
+                    result = next(iterator)
+                    if result is not None:
+                        idx, is_correct, extracted_answer, extracted_gold = result
+                        jobs[idx]['accuracy'] = is_correct
+                        jobs[idx]['extracted_gold'] = extracted_gold
+                        jobs[idx]['extracted_answer'] = extracted_answer
+                        processed_indices.add(idx)
+                        if is_correct == 0.0 and extracted_answer == 'Timeout':
+                            timeout_count += 1
+                except StopIteration:
+                    break
+                except Exception as e:
+                    # Catch exceptions from the iterator, e.g., if a worker fails.
+                    logger.error(
+                        f'❌ An error occurred while retrieving a result: {e}')
+                    # We can't identify the specific job, so we continue.
+                finally:
+                    pbar.update(1)
 
-    # Handle any jobs that were not processed (e.g., due to timeout)
+    # Handle any jobs that were not processed (e.g., due to a process crash or other unforeseen error).
     for idx in range(total):
         if idx not in processed_indices:
             jobs[idx]['accuracy'] = 0.0
-            jobs[idx]['extracted_answer'] = 'Timeout'
-            jobs[idx]['gold_answer'] = ''
-            jobs[idx]['timeout_cnt'] = jobs[idx].get('timeout_cnt', 0) + 1
+            jobs[idx]['extracted_gold'] = 'Error'
+            jobs[idx]['extracted_answer'] = 'Error'
 
-    # Save the results to the cache file
+    logger.info(f'Summary: {total} jobs processed. {timeout_count} timed out.')
+
+    # Save the results to the cache file.
     save_cache(jobs, cache_path)
 
-    # Calculate the average accuracy
-    if not jobs:
-        return 0.0
+    # Calculate the average accuracy.
     accuracy = mean(job['accuracy'] for job in jobs)
     return accuracy
 
@@ -156,7 +181,10 @@ def save_cache(jobs: List[Dict[str, Any]], cache_path: str) -> None:
         jobs (List[Dict[str, Any]]): The list of dictionaries to save.
         cache_path (str): The file path to save the data.
     """
-    with open(cache_path, 'w', encoding='utf-8') as g:
-        for job in jobs:
-            # Use json.dumps to write each dictionary as a JSON line
-            g.write(json.dumps(job, ensure_ascii=False) + '\n')
+    try:
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            for job in jobs:
+                f.write(json.dumps(job, ensure_ascii=False) + '\n')
+        logger.info(f'✅ Results successfully saved to {cache_path}')
+    except IOError as e:
+        logger.error(f'❌ Failed to save cache file to {cache_path}: {e}')
