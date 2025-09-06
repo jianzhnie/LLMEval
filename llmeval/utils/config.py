@@ -23,17 +23,17 @@ class DataArguments:
     Arguments for configuring the dataset and data loading.
 
     Attributes:
-        data_dir (str): Path to the directory containing dataset files.
-        data_name (str): The identifier for the specific dataset to use.
+        dataset_dir (str): Path to the directory containing dataset files.
+        dataset_name (str): The identifier for the specific dataset to use.
         split (DataSplit): The dataset split to load (e.g., 'train', 'test').
         cache_dir (str): Path to the directory for caching models and data.
         batch_size (int): The number of samples to process in each batch.
     """
-    data_dir: str = field(
+    dataset_dir: str = field(
         default='./data',
         metadata={'help': 'Directory containing the dataset.'})
-    data_name: str = field(default='math',
-                           metadata={'help': 'Dataset identifier.'})
+    dataset_name: str = field(default='math',
+                              metadata={'help': 'Dataset identifier.'})
     split: Literal['train', 'test', 'validation', 'dev'] = field(
         default='test',
         metadata={
@@ -165,6 +165,9 @@ class VLLMArguments:
         default=None, metadata={'help': 'Maximum tokens per batch.'})
     max_num_seqs: Optional[int] = field(
         default=128, metadata={'help': 'Maximum parallel sequences.'})
+    enforce_eager: bool = field(
+        default=False,
+        metadata={'help': 'Enforce eager execution for debugging purposes.'})
     seed: int = field(default=0,
                       metadata={'help': 'Random seed for initialization.'})
 
