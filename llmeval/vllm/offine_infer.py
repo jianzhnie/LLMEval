@@ -1,238 +1,287 @@
 import json
 import logging
 import os
+from typing import Dict, List, Tuple
 
 from tqdm import tqdm
+from transformers import HfArgumentParser
 from vllm import LLM, SamplingParams
 
 from llmeval.utils.config import EvaluationArguments
 from llmeval.utils.logger import init_logger
 
-logger = init_logger('vllm_infer', logging.INFO, None)
+# Initialize logger
+logger = init_logger('vllm_infer', logging.INFO)
 
 
-def load_dataset(dataset_path: str) -> list:
-    """Load dataset"""
+def load_dataset(dataset_path: str) -> List[Dict]:
+    """
+    Load dataset from a JSONL file.
+
+    Args:
+        dataset_path: The path to the JSONL dataset file.
+
+    Returns:
+        A list of dictionaries, where each dictionary is a data entry.
+    """
     data_list = []
-    logger.info(f'Loading dataset: {dataset_path}')
-    with open(dataset_path, 'r', encoding='utf-8') as f:
-        for line in tqdm(f, desc='Loading data'):
-            try:
-                data_list.append(json.loads(line))
-            except json.JSONDecodeError:
-                logger.warning(f'Unable to parse JSON line: {line}')
+    logger.info(f'🔄 Loading dataset from: {dataset_path}')
+    try:
+        with open(dataset_path, 'r', encoding='utf-8') as f:
+            for line_num, line in tqdm(enumerate(f, 1),
+                                       desc='Loading data',
+                                       unit=' lines'):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data_list.append(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.warning(
+                        f'⚠️ Unable to parse JSON on line {line_num}. Skipping. Snippet: "{line[:50]}..."'
+                    )
+    except FileNotFoundError:
+        logger.error(f'❌ Dataset file not found at: {dataset_path}')
+        raise
+    except Exception as e:
+        logger.error(
+            f'❌ An unexpected error occurred while loading the dataset: {e}')
+        raise
 
-    logger.info(f'Loaded {len(data_list)} entries')
+    logger.info(f'✅ Successfully loaded {len(data_list)} entries.')
     return data_list
 
 
-def main(args: EvaluationArguments):
-    # Load dataset
-    eval_dataset = load_dataset(args.dataset_dir, args.dataset_name)
-    # Repeat dataset n times
-    original_len = len(eval_dataset)
-    eval_dataset = eval_dataset * args.n_sampling
-    logger.info(
-        f'Dataset repeated {args.n_sampling} times, expanded from {original_len} entries to {len(eval_dataset)} entries'
-    )
+def setup_vllm_engine(args: EvaluationArguments) -> Tuple[LLM, SamplingParams]:
+    """
+    Initialize the vLLM engine and sampling parameters based on arguments.
 
-    # Ensure output and cache directories exist
-    os.makedirs(args.output_dir, exist_ok=True)
+    Args:
+        args: An instance of EvaluationArguments.
 
-    # Parse rope_scaling from string to dict if needed
-    rope_scaling = args.get('rope_scaling')
-    if isinstance(rope_scaling, str):
-        try:
-            rope_scaling = json.loads(rope_scaling)
-        except json.JSONDecodeError as e:
-            logger.error(f'Error parsing rope_scaling JSON: {e}')
-            rope_scaling = {
-                'rope_type': 'yarn',
-                'factor': 2.5,
-                'original_max_position_embeddings': 32768
-            }
-
-    # Print engine information
+    Returns:
+        A tuple containing the LLM instance and SamplingParams instance.
+    """
+    # Print engine initialization information
     logger.info('=' * 50)
-    logger.info('Initializing vLLM Engine')
-    logger.info(f"Model: {args.get('model_name_or_path', 'unknown')}")
-    logger.info(f"Max Model Length: {args.get('max_model_len', 'default')}")
-    logger.info(f'RoPE Scaling: {rope_scaling}')
-    logger.info(f"Tensor Parallel Size: {args.get('tensor_parallel_size', 1)}")
-    logger.info(
-        f"GPU Memory Utilization: {args.get('gpu_memory_utilization', 0.9)}")
+    logger.info('🚀 Initializing vLLM Engine')
+    logger.info(f'Model: {args.model_name_or_path}')
+    logger.info(f'Max Model Length: {args.max_model_len}')
+    logger.info(f'RoPE Scaling: {args.rope_scaling}')
+    logger.info(f'Tensor Parallel Size: {args.tensor_parallel_size}')
+    logger.info(f'GPU Memory Utilization: {args.gpu_memory_utilization}')
     logger.info(f'Batch Size: {args.batch_size}')
     logger.info('=' * 50)
 
-    # Create LLM instance using parsed arguments
+    # Set environment variable for vLLM sampler
     os.environ['VLLM_USE_FLASHINFER_SAMPLER'] = '0'
 
-    # Prepare hf_overrides with rope_scaling and max_model_len
+    # Prepare hf_overrides from arguments
     hf_overrides = {
-        'rope_scaling': rope_scaling,
-        'max_model_len': args.get('max_model_len', 81920)
+        'rope_scaling': args.rope_scaling,
+        'max_model_len': args.max_model_len,
     }
 
-    llm = LLM(
-        model=args.get('model_name_or_path', './KlearReasoner-8B'),
-        tensor_parallel_size=args.get('tensor_parallel_size', 8),
-        gpu_memory_utilization=args.get('gpu_memory_utilization', 0.9),
-        enable_prefix_caching=args.get('enable_prefix_caching', False),
-        max_num_seqs=args.get('max_num_seqs', 128),
-        hf_overrides=hf_overrides,
-        enforce_eager=args.get('enforce_eager', False),
-        seed=args.get('seed', 0),
+    try:
+        llm = LLM(
+            model=args.model_name_or_path,
+            tensor_parallel_size=args.tensor_parallel_size,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            enable_prefix_caching=args.enable_prefix_caching,
+            max_num_seqs=args.max_num_seqs,
+            hf_overrides=hf_overrides,
+            enforce_eager=args.enforce_eager,
+            seed=args.seed,
+        )
+    except Exception as e:
+        logger.error(f'❌ Failed to initialize vLLM engine: {e}')
+        raise
+
+    sampling_params = SamplingParams(
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        repetition_penalty=args.repetition_penalty,
     )
 
-    logger.info('vLLM engine initialization completed')
-
-    # Create sampling parameters
-    sampling_params = SamplingParams(max_tokens=args.max_tokens,
-                                     temperature=args.temperature,
-                                     top_p=args.top_p,
-                                     top_k=args.top_k,
-                                     repetition_penalty=1.05)
-    print(sampling_params)
-
-    # Process data and write results in real-time
-    process_data_batch(llm, eval_dataset, sampling_params)
+    logger.info('✅ vLLM engine initialization completed.')
+    return llm, sampling_params
 
 
-def process_data_batch(llm, eval_dataset, sampling_params,
-                       args: EvaluationArguments):
-    """Process data using batch processing and write results in real-time"""
+def process_and_write_batch(
+    llm: LLM,
+    batch_data: List[Dict],
+    sampling_params: SamplingParams,
+    results_file: str,
+    start_index: int,
+):
+    """
+    Processes a single batch of data and writes the results to a file.
+
+    Args:
+        llm: The vLLM instance.
+        batch_data: A list of data dictionaries for the current batch.
+        sampling_params: The sampling parameters for generation.
+        results_file: The path to the output results file.
+        start_index: The global starting index of this batch.
+    """
+    batch_messages = []
+    # Use a list to store original items in case of data issues
+    original_items = []
+
+    for item in batch_data:
+        original_items.append(item)
+        if 'messages' in item and isinstance(item['messages'], list):
+            batch_messages.append(item['messages'])
+        else:
+            logger.warning(
+                "⚠️ Invalid data item found (missing 'messages' or not a list). Skipping this entry."
+            )
+            batch_messages.append(None)  # Add a placeholder for a failed item
+
+    # Filter out invalid entries before passing to LLM
+    valid_batch_messages = [msg for msg in batch_messages if msg is not None]
+    if not valid_batch_messages:
+        logger.warning('No valid messages in this batch. Skipping.')
+        return
+
+    try:
+        outputs = llm.chat(valid_batch_messages,
+                           sampling_params,
+                           use_tqdm=True)
+
+        with open(results_file, 'a', encoding='utf-8') as f:
+            valid_output_index = 0
+            for i, original_item in enumerate(original_items):
+                # Check if this item was valid and has an output
+                if batch_messages[i] is None:
+                    # Log and write an error entry for the invalid item
+                    error_result = {
+                        'id': start_index + i,
+                        'meta': original_item,
+                        'messages': original_item.get('messages', []),
+                        'error':
+                        'Invalid data format (missing "messages" field).'
+                    }
+                    f.write(
+                        json.dumps(error_result, ensure_ascii=False) + '\n')
+                    continue
+
+                # Process the valid item and its corresponding output
+                output = outputs[valid_output_index]
+                ai_response = output.outputs[0].text
+                complete_messages = valid_batch_messages[
+                    valid_output_index].copy()
+                complete_messages.append({
+                    'role': 'assistant',
+                    'content': ai_response
+                })
+
+                result = {
+                    'id': start_index + i,
+                    'meta': original_item,
+                    'messages': complete_messages
+                }
+                f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                valid_output_index += 1
+            f.flush()
+
+    except Exception as e:
+        logger.error(
+            f'❌ Error during vLLM processing for this batch: {e}. Writing error entries.'
+        )
+        # If the whole batch fails, write error entries for all items in the batch
+        with open(results_file, 'a', encoding='utf-8') as f:
+            for i, original_item in enumerate(original_items):
+                error_result = {
+                    'id': start_index + i,
+                    'meta': original_item,
+                    'messages': original_item.get('messages', []),
+                    'error': f'Batch processing error: {str(e)}'
+                }
+                f.write(json.dumps(error_result, ensure_ascii=False) + '\n')
+            f.flush()
+
+
+def main(args: EvaluationArguments):
+    """
+    Main function to run the vLLM inference and evaluation process.
+    """
+    # Load and prepare dataset
+    eval_dataset = load_dataset(
+        os.path.join(args.dataset_dir, args.dataset_name))
+    original_len = len(eval_dataset)
+    if args.n_sampling > 1:
+        eval_dataset = eval_dataset * args.n_sampling
+        logger.info(
+            f'🔁 Dataset repeated {args.n_sampling} times, expanded from {original_len} entries to {len(eval_dataset)}.'
+        )
+
+    # Ensure output directory exists
+    os.makedirs(args.output_dir, exist_ok=True)
     results_file = os.path.join(args.output_dir, 'inference_results.jsonl')
-    # Track number of processed items
-    processed_count = 0
 
-    # Check for partial results
+    # Resume from previous progress if file exists
+    processed_count = 0
     if os.path.exists(results_file):
         with open(results_file, 'r', encoding='utf-8') as f:
             processed_count = sum(1 for _ in f)
         logger.info(
-            f'Found existing results file, {processed_count} entries already processed'
+            f'📦 Found existing results file. Resuming from {processed_count} entries.'
         )
 
-    # Continue from last processed position
     remaining_data = eval_dataset[processed_count:]
     if not remaining_data:
-        logger.info('All data processing completed')
+        logger.info('✅ All data processing completed. Exiting.')
         return
 
-    logger.info(f'Starting to process remaining {len(remaining_data)} entries')
+    logger.info(
+        f'⏳ Starting to process remaining {len(remaining_data)} entries.')
 
-    # Process in batches
-    with open(results_file, 'a', encoding='utf-8') as f:
-        # Split data into batches
-        for batch_start in range(0, len(remaining_data), args.batch_size):
-            batch_end = min(batch_start + args.batch_size, len(remaining_data))
-            batch = remaining_data[batch_start:batch_end]
+    # Setup vLLM engine and sampling parameters
+    llm, sampling_params = setup_vllm_engine(args)
 
-            try:
-                # Prepare batch messages list and original data
-                batch_messages = []
-                original_items = []
+    # Process data in batches
+    for i in tqdm(range(0, len(remaining_data), args.batch_size),
+                  desc='Processing batches'):
+        batch_start = i
+        batch_end = min(i + args.batch_size, len(remaining_data))
+        batch = remaining_data[batch_start:batch_end]
 
-                for item in batch:
-                    # Save original data item
-                    original_items.append(item)
+        # Calculate global start index
+        global_start_index = processed_count + batch_start
 
-                    # Directly use messages field from data
-                    if 'messages' in item:
-                        batch_messages.append(item['messages'])
-                    else:
-                        logger.warning(
-                            f"Data item missing 'messages' field: {item}")
-                        batch_messages.append([{
-                            'role': 'user',
-                            'content': 'Invalid data'
-                        }])
+        process_and_write_batch(llm=llm,
+                                batch_data=batch,
+                                sampling_params=sampling_params,
+                                results_file=results_file,
+                                start_index=global_start_index)
 
-                # Batch call chat API
-                logger.debug(
-                    f'Starting batch processing {batch_start} to {batch_end-1}'
-                )
-                outputs = llm.chat(batch_messages,
-                                   sampling_params,
-                                   use_tqdm=True)
-
-                # Process each output and save results
-                for i, output in enumerate(outputs):
-                    item_idx = processed_count + batch_start + i
-                    original_item = original_items[i]
-
-                    # Get AI response
-                    ai_response = output.outputs[0].text
-
-                    # Build complete messages list including model's response
-                    complete_messages = batch_messages[i].copy()
-                    complete_messages.append({
-                        'role': 'assistant',
-                        'content': ai_response
-                    })
-
-                    # Build metadata
-                    meta = original_item
-
-                    # Build complete result
-                    result = {
-                        'id': item_idx,
-                        'meta': meta,
-                        'messages': complete_messages
-                    }
-
-                    # Write result and flush immediately
-                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
-                    f.flush()
-
-                # Update progress
-                logger.info(
-                    f'Processed {processed_count + batch_end}/{len(eval_dataset)} entries'
-                )
-
-            except Exception as e:
-                logger.error(
-                    f'Error processing batch {batch_start}-{batch_end-1}: {str(e)}'
-                )
-                # Log error but continue with next batch
-                for i in range(len(batch)):
-                    item_idx = processed_count + batch_start + i
-                    original_item = batch[i]
-
-                    # Build metadata
-                    meta = original_item
-
-                    error_result = {
-                        'id': item_idx,
-                        'meta': meta,
-                        'messages': original_item.get('messages', []),
-                        'error': str(e)
-                    }
-                    f.write(
-                        json.dumps(error_result, ensure_ascii=False) + '\n')
-                    f.flush()
-
-    logger.info(f'Data processing completed, results saved to {results_file}')
+    logger.info(
+        f'✨ Final data processing completed. Results saved to {results_file}.')
 
 
 if __name__ == '__main__':
     try:
-        from transformers import HfArgumentParser
-    except ImportError:
-        raise ImportError(
-            'Please install the transformers library to use HfArgumentParser: pip install transformers'
+        parser = HfArgumentParser(EvaluationArguments)
+        eval_args, = parser.parse_args_into_dataclasses()
+
+        logger.info(
+            'Initializing EvaluationArguments with parsed command line arguments...'
         )
+        logger.info('\n--- Parsed Arguments ---')
+        # Use dataclasses.asdict to print arguments cleanly
+        import dataclasses
+        logger.info(json.dumps(dataclasses.asdict(eval_args), indent=2))
 
-    # Create an HfArgumentParser instance for the EvaluationArguments class.
-    # It automatically reads all fields and metadata from the dataclass.
-    parser = HfArgumentParser(EvaluationArguments)
+        main(eval_args)
 
-    # Parse the command-line arguments and get an instance of EvaluationArguments.
-    # The return value is a tuple, we only need the first element.
-    eval_args, = parser.parse_args_into_dataclasses()
-    logger.info(
-        'Initializing EvaluationArguments with parsed command line arguments...'
-    )
-    logger.info('\n--- Parsed Arguments ---')
-    logger.info(eval_args)
-    main(eval_args)
+    except ImportError as e:
+        logger.error(
+            f'❌ A required library is missing: {e}. Please install it.')
+        exit(1)
+    except Exception as e:
+        logger.critical(
+            f'❌ An unrecoverable error occurred during execution: {e}')
+        exit(1)
