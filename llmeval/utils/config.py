@@ -39,6 +39,9 @@ class DataArguments:
         metadata={
             'help': 'Dataset split to use (e.g., train, test, validation).'
         })
+    input_file: str = field(
+        default='input.jsonl',
+        metadata={'help': 'Input JSONL file containing prompts.'})
     cache_dir: str = field(default='./cache',
                            metadata={'help': 'Cache directory for models.'})
     batch_size: int = field(default=128,
@@ -62,13 +65,17 @@ class PromptArguments:
         input_key (str): The key in the dataset dictionary for the input text.
         label_key (str): The key for the target/label text in the dataset.
     """
-    prompt_type: str = field(default='qwen-base',
-                             metadata={'help': 'Type of prompt format used.'})
     input_key: str = field(default='question',
                            metadata={'help': 'Key for input text in dataset.'})
     label_key: str = field(
         default='solution',
         metadata={'help': 'Key for target/label text in dataset.'})
+    system_prompt: Optional[str] = field(
+        default=None,
+        metadata={
+            'help':
+            'Optional system prompt to prepend to each input (if applicable).'
+        })
 
 
 @dataclass
@@ -99,11 +106,19 @@ class GenerationArguments:
         metadata={'help': 'Nucleus sampling probability threshold.'})
     top_k: int = field(default=50,
                        metadata={'help': 'Top-k sampling parameter.'})
-    max_tokens: int = field(
+    max_new_tokens: int = field(
         default=32768,
         metadata={'help': 'Maximum number of tokens to generate.'})
     skip_special_tokens: bool = field(
         default=True, metadata={'help': 'Remove special tokens from output.'})
+    presence_penalty: float = field(
+        default=0.0,
+        metadata={
+            'help':
+            'Presence penalty to discourage repetition in generated text.'
+        })
+    enable_thinking: bool = field(
+        default=False, metadata={'help': 'Enable thinking mode for LLMs.'})
 
     def __post_init__(self) -> None:
         """Validate generation arguments after initialization."""
@@ -117,9 +132,9 @@ class GenerationArguments:
         if self.top_k < 0:
             raise ValueError(
                 f'Top-k must be non-negative, but got {self.top_k}.')
-        if self.max_tokens <= 0:
+        if self.max_new_tokens <= 0:
             raise ValueError(
-                f'Max tokens must be a positive integer, but got {self.max_tokens}.'
+                f'Max new tokens must be a positive integer, but got {self.max_new_tokens}.'
             )
         if self.n_sampling <= 0:
             raise ValueError(
@@ -128,7 +143,7 @@ class GenerationArguments:
 
 
 @dataclass
-class VLLMArguments:
+class VLLMEngineArguments:
     """
     Arguments for configuring the vLLM inference backend.
 
@@ -192,8 +207,29 @@ class VLLMArguments:
 
 
 @dataclass
+class ServerArguments:
+    """
+    Arguments for configuring the vLLM server.
+
+    Attributes:
+        host (str): The hostname or IP address for the server.
+        port (int): The port number for the server.
+        num_workers (int): Number of worker processes to spawn.
+        log_level (str): Logging level for the server.
+    """
+    max_workers: int = field(
+        default=128, metadata={'help': 'Maximum number of worker threads.'})
+    base_url: str = field(default='https://api.openai.com/v1',
+                          metadata={'help': 'Base URL of VLLM server'})
+    model_name: str = field(default='gpt-4o',
+                            metadata={'help': 'Model name of VLLM server'})
+    request_timeout: int = field(
+        default=600, metadata={'help': 'Timeout for requests to VLLM server.'})
+
+
+@dataclass
 class EvaluationArguments(DataArguments, PromptArguments, GenerationArguments,
-                          VLLMArguments):
+                          VLLMEngineArguments, ServerArguments):
     """
     Master configuration class for all evaluation arguments.
 
@@ -211,6 +247,9 @@ class EvaluationArguments(DataArguments, PromptArguments, GenerationArguments,
     output_dir: str = field(
         default='./outputs',
         metadata={'help': 'Directory to save output results.'})
+    output_file: str = field(
+        default='output.jsonl',
+        metadata={'help': 'Output JSONL file to save results.'})
 
     def __post_init__(self) -> None:
         """Validate and prepare evaluation arguments."""
