@@ -268,41 +268,67 @@ class ServerArguments:
 
 
 @dataclass
-class EvaluationArguments(DataArguments, PromptArguments, GenerationArguments,
-                          VLLMEngineArguments, ServerArguments):
+class OnlineInferArguments(DataArguments, PromptArguments, GenerationArguments,
+                           ServerArguments):
     """
-    Master configuration class for all evaluation arguments.
-
-    This class inherits from all other argument classes to provide a single,
-    convenient object for configuring an entire evaluation task.
-
-    Attributes:
-        task (str): Name of the specific evaluation task being run.
-        output_dir (str): Path to the directory for saving results and outputs.
+    Arguments specific to online (OpenAI-compatible API) inference.
     """
-    # Core evaluation settings
-    task: str = field(default='math',
+    task: str = field(default='aime24',
                       metadata={'help': 'Name of the evaluation task.'})
     output_file: str = field(
         default='output.jsonl',
         metadata={'help': 'Output JSONL file to save results.'})
 
     def __post_init__(self) -> None:
-        """Validate and prepare evaluation arguments."""
-        # Call post-init methods of parent classes
+        # Only validate what online mode needs; no vLLM engine args
         DataArguments.__post_init__(self)
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)
-        VLLMEngineArguments.__post_init__(self)
         ServerArguments.__post_init__(self)
 
-        # Adjust generation parameters based on temperature
         if self.temperature <= 0.0:
             self.do_sample = False
             self.top_p = 1.0
             logger.warning(
                 'Temperature is 0, setting do_sample=False and top_p=1.0 for greedy decoding.'
             )
+
+
+@dataclass
+class OfflineInferArguments(DataArguments, PromptArguments,
+                            GenerationArguments, VLLMEngineArguments):
+    """
+    Arguments specific to offline (local vLLM engine) inference.
+    """
+    task: str = field(default='aime24',
+                      metadata={'help': 'Name of the evaluation task.'})
+    output_file: str = field(
+        default='output.jsonl',
+        metadata={'help': 'Output JSONL file to save results.'})
+
+    def __post_init__(self) -> None:
+        DataArguments.__post_init__(self)
+        PromptArguments.__post_init__(self)
+        GenerationArguments.__post_init__(self)
+        VLLMEngineArguments.__post_init__(self)
+
+        if self.temperature <= 0.0:
+            self.do_sample = False
+            self.top_p = 1.0
+            logger.warning(
+                'Temperature is 0, setting do_sample=False and top_p=1.0 for greedy decoding.'
+            )
+
+
+# Backward compatibility: keep the old name but warn; default to offline behavior.
+@dataclass
+class EvaluationArguments(OfflineInferArguments):
+
+    def __post_init__(self) -> None:
+        logger.warning(
+            'EvaluationArguments is deprecated. Use OnlineEvaluationArguments or OfflineEvaluationArguments instead.'
+        )
+        super().__post_init__()
 
 
 # Example usage

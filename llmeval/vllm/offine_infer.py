@@ -10,7 +10,7 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 from vllm import LLM, SamplingParams
 
-from llmeval.utils.config import EvaluationArguments
+from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
 
@@ -21,8 +21,8 @@ logger = init_logger('vllm_infer', logging.INFO)
 class OfflineInferenceRunner:
     """Main class to handle offline inference with vLLM engine."""
 
-    def __init__(self, args: EvaluationArguments):
-        self.args: EvaluationArguments = args
+    def __init__(self, args: OfflineInferArguments):
+        self.args: OfflineInferArguments = args
         self.system_prompt = SYSTEM_PROMPT_FACTORY.get(args.system_prompt_type)
         self._file_lock = threading.Lock()
         self.llm = None
@@ -260,7 +260,7 @@ class OfflineInferenceRunner:
         )
 
 
-def main(args: EvaluationArguments) -> None:
+def main(args: OfflineInferArguments) -> None:
     """Main function to run the vLLM inference and evaluation process."""
     runner = OfflineInferenceRunner(args)
     runner.run()
@@ -268,11 +268,11 @@ def main(args: EvaluationArguments) -> None:
 
 if __name__ == '__main__':
     try:
-        parser = HfArgumentParser(EvaluationArguments)
+        parser = HfArgumentParser(OfflineInferArguments)
         eval_args, = parser.parse_args_into_dataclasses()
 
         logger.info(
-            'Initializing EvaluationArguments with parsed command line arguments...'
+            'Initializing OfflineInferArguments with parsed command line arguments...'
         )
         logger.info('\n--- Parsed Arguments ---')
         import dataclasses

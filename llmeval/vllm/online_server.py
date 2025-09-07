@@ -15,7 +15,7 @@ from openai import APIConnectionError, APIError, RateLimitError
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
-from llmeval.utils.config import EvaluationArguments
+from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
 
@@ -127,8 +127,8 @@ class InferenceClient:
 class InferenceRunner:
     """Main class to handle the inference process, including data loading and multi-threading."""
 
-    def __init__(self, args: EvaluationArguments):
-        self.args: EvaluationArguments = args
+    def __init__(self, args: OnlineInferArguments):
+        self.args: OnlineInferArguments = args
         self.client = InferenceClient(args.base_url, args.request_timeout)
         self.system_prompt = SYSTEM_PROMPT_FACTORY.get(args.system_prompt_type)
         # 使用类级别的锁，确保线程安全
@@ -274,11 +274,11 @@ class InferenceRunner:
 
 def main():
     try:
-        parser = HfArgumentParser(EvaluationArguments)
+        parser = HfArgumentParser(OnlineInferArguments)
         eval_args, = parser.parse_args_into_dataclasses()
 
         logger.info(
-            'Initializing EvaluationArguments with parsed command line arguments...'
+            'Initializing OnlineInferArguments with parsed command line arguments...'
         )
         logger.info('\n--- Parsed Arguments ---')
         # Use dataclasses.asdict to print arguments cleanly
