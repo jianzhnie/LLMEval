@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from llmeval.utils.logger import init_logger
+from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
 
 logger = init_logger(__name__)
 
@@ -65,17 +66,29 @@ class PromptArguments:
         input_key (str): The key in the dataset dictionary for the input text.
         label_key (str): The key for the target/label text in the dataset.
     """
-    input_key: str = field(default='question',
+    input_key: str = field(default='prompt',
                            metadata={'help': 'Key for input text in dataset.'})
     label_key: str = field(
-        default='solution',
+        default='answer',
         metadata={'help': 'Key for target/label text in dataset.'})
-    system_prompt: Optional[str] = field(
+    system_prompt_type: Optional[str] = field(
         default=None,
         metadata={
             'help':
             'Optional system prompt to prepend to each input (if applicable).'
         })
+
+    def __post_init__(self) -> None:
+        """Validate prompt arguments after initialization."""
+        if not self.input_key:
+            raise ValueError('Input key must be a non-empty string.')
+        if not self.label_key:
+            raise ValueError('Label key must be a non-empty string.')
+
+        assert self.system_prompt_type in SYSTEM_PROMPT_FACTORY or self.system_prompt_type is None, (
+            f'Invalid system prompt type: {self.system_prompt_type}. '
+            f'Valid options are: {list(SYSTEM_PROMPT_FACTORY.keys())} or None.'
+        )
 
 
 @dataclass
@@ -119,6 +132,13 @@ class GenerationArguments:
         })
     enable_thinking: bool = field(
         default=False, metadata={'help': 'Enable thinking mode for LLMs.'})
+
+    skip_if_empty: bool = field(
+        default=True,
+        metadata={'help': 'Skip processing if response is empty.'})
+    max_retries: int = field(
+        default=3,
+        metadata={'help': 'Maximum number of retries for API calls.'})
 
     def __post_init__(self) -> None:
         """Validate generation arguments after initialization."""

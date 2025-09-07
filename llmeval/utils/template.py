@@ -32,5 +32,4 @@ SYSTEM_PROMPT_FACTORY: Dict[str, Optional[str]] = {
     'amthinking': amthinking_system_prompt,
     'openr1': openr1_system_prompt,
     'default': defrault_system_prompt,
-    'none': None,
 }
