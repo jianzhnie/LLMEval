@@ -126,7 +126,7 @@ class GenerationArguments:
         metadata={'help': 'Nucleus sampling probability threshold.'})
     top_k: int = field(default=40,
                        metadata={'help': 'Top-k sampling parameter.'})
-    max_new_tokens: int = field(
+    max_tokens: int = field(
         default=32768,
         metadata={'help': 'Maximum number of tokens to generate.'})
     skip_special_tokens: bool = field(
@@ -155,9 +155,9 @@ class GenerationArguments:
         if self.top_k < 0:
             raise ValueError(
                 f'Top-k must be non-negative, but got {self.top_k}.')
-        if self.max_new_tokens <= 0:
+        if self.max_tokens <= 0:
             raise ValueError(
-                f'Max new tokens must be a positive integer, but got {self.max_new_tokens}.'
+                f'Max tokens must be a positive integer, but got {self.max_tokens}.'
             )
         if self.n_sampling <= 0:
             raise ValueError(

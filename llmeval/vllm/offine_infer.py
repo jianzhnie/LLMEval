@@ -20,8 +20,8 @@ class OfflineInferenceRunner:
     """Main class to handle offline inference with vLLM engine."""
 
     def __init__(self, args: EvaluationArguments):
-        self.args = args
-        self.system_prompt = SYSTEM_PROMPT_FACTORY.get(args.system_prompt)
+        self.args: EvaluationArguments = args
+        self.system_prompt = SYSTEM_PROMPT_FACTORY.get(args.system_prompt_type)
         self._file_lock = threading.Lock()
         self.llm = None
         self.sampling_params = None
@@ -110,7 +110,7 @@ class OfflineInferenceRunner:
 
         # 修复参数名不匹配问题
         sampling_params = SamplingParams(
-            max_tokens=self.args.max_new_tokens,  # 修复：使用正确的参数名
+            max_tokens=self.args.max_tokens,  # 修复：使用正确的参数名
             temperature=self.args.temperature,
             top_p=self.args.top_p,
             top_k=self.args.top_k,

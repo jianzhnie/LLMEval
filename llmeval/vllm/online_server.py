@@ -210,7 +210,7 @@ class InferenceRunner:
                 query=query,
                 system_prompt=self.system_prompt,
                 model_name=self.args.model_name,
-                max_tokens=self.args.max_new_tokens,
+                max_tokens=self.args.max_tokens,
                 temperature=self.args.temperature,
                 top_p=self.args.top_p,
                 top_k=self.args.top_k,
