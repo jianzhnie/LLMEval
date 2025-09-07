@@ -131,11 +131,10 @@ class GenerationArguments:
         metadata={'help': 'Maximum number of tokens to generate.'})
     skip_special_tokens: bool = field(
         default=True, metadata={'help': 'Remove special tokens from output.'})
-    repeat_penalty: float = field(
-        default=1.0, metadata={'help': 'Repeat penalty parameter.'})
+    repetition_penalty: float = field(
+        default=1.0, metadata={'help': 'Repetition penalty parameter.'})
     enable_thinking: bool = field(
         default=False, metadata={'help': 'Enable thinking mode for LLMs.'})
-
     skip_if_empty: bool = field(
         default=True,
         metadata={'help': 'Skip processing if response is empty.'})
