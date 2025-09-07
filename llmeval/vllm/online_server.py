@@ -183,11 +183,12 @@ class InferenceRunner:
 
         expanded_data = []
         for item in data:
-            prompt = item.get(self.args.input_key, None)
-            if prompt is None:
-                raise ValueError(
-                    f"Input key '{self.args.input_key}' not found in the eval dataset item: {item}"
-                )
+            try:
+                prompt = item.get(self.args.input_key)
+            except KeyError:
+                logger.warning(
+                    f'No {self.args.input_key} found in item: {item}')
+                continue
             completed = completed_counts.get(prompt, 0)
             remaining = self.args.n_sampling - completed
             for _ in range(remaining):
@@ -203,7 +204,9 @@ class InferenceRunner:
         try:
             query = item.get(self.args.input_key)
             if not query:
-                logger.warning(f'No query found in item: {item}')
+                logger.warning(
+                    f'No {self.args.input_key} found in item: {item}')
+                return
             response = self.client.get_content(
                 query=query,
                 system_prompt=self.system_prompt,
