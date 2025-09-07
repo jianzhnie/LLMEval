@@ -91,10 +91,8 @@ class PromptArguments:
                 f'Valid options are: {list(SYSTEM_PROMPT_FACTORY.keys())}')
         self.system_prompt = SYSTEM_PROMPT_FACTORY.get(self.system_prompt_type)
         logger.info(
-            f'Using system prompt type {self.system_prompt_type}: {self.system_prompt}'
+            f'Using system_prompt_type: {self.system_prompt_type}, content: {self.system_prompt}'
         )
-        logger.info(
-            f'Available system prompts: {list(SYSTEM_PROMPT_FACTORY.keys())}')
         logger.info(
             'If you want to customize the system prompt, please modify the '
             'SYSTEM_PROMPT_FACTORY in llmeval/utils/template.py')
@@ -268,6 +266,17 @@ class ServerArguments:
     request_timeout: int = field(
         default=600, metadata={'help': 'Timeout for requests to VLLM server.'})
 
+    def __post_init__(self) -> None:
+        """Validate server arguments after initialization."""
+        if self.max_workers <= 0:
+            raise ValueError(
+                f'Maximum number of worker threads must be a positive integer, but got {self.max_workers}.'
+            )
+        if self.request_timeout <= 0:
+            raise ValueError(
+                f'Request timeout must be a positive integer, but got {self.request_timeout}.'
+            )
+
 
 @dataclass
 class EvaluationArguments(DataArguments, PromptArguments, GenerationArguments,
@@ -296,7 +305,11 @@ class EvaluationArguments(DataArguments, PromptArguments, GenerationArguments,
     def __post_init__(self) -> None:
         """Validate and prepare evaluation arguments."""
         # Call post-init methods of parent classes
-        super().__post_init__()
+        DataArguments.__post_init__(self)
+        PromptArguments.__post_init__(self)
+        GenerationArguments.__post_init__(self)
+        VLLMEngineArguments.__post_init__(self)
+        ServerArguments.__post_init__(self)
 
         # Ensure the output directory exists
         path_output_dir = Path(self.output_dir)
@@ -304,10 +317,10 @@ class EvaluationArguments(DataArguments, PromptArguments, GenerationArguments,
         logger.info(f'Created output directory at {path_output_dir}')
 
         # Adjust generation parameters based on temperature
-        if self.temperature == 0:
+        if self.temperature <= 0.0:
             self.do_sample = False
             self.top_p = 1.0
-            logger.info(
+            logger.warning(
                 'Temperature is 0, setting do_sample=False and top_p=1.0 for greedy decoding.'
             )
 
