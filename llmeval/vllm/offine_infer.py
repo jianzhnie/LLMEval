@@ -98,11 +98,6 @@ class OfflineInferenceRunner:
         Returns:
             Messages format for vLLM or None if conversion fails
         """
-        # 如果已经是messages格式，直接返回
-        if 'messages' in item and isinstance(item['messages'], list):
-            return item['messages']
-
-        # 如果是prompt格式，转换为messages格式
         if 'prompt' in item or self.args.input_key in item:
             prompt = item.get(self.args.input_key, item.get('prompt', ''))
             if not prompt:

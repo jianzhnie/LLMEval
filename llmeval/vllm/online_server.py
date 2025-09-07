@@ -42,7 +42,7 @@ class InferenceClient:
 
     def get_content(self, query: str, system_prompt: Optional[str],
                     model_name: str, max_tokens: int, temperature: float,
-                    top_p: float, top_k: int, repeat_penalty: float,
+                    top_p: float, top_k: int, repetition_penalty: float,
                     enable_thinking: bool) -> str:
         """
         Fetches content from the OpenAI API with retry logic.
@@ -55,7 +55,7 @@ class InferenceClient:
             temperature (float): The sampling temperature.
             top_p (float): The top-p value.
             top_k (int): The top-k value.
-            repeat_penalty (float): The repeat penalty value.
+            repetition_penalty (float): The repeat penalty value.
             enable_thinking (bool): Whether to enable the "thinking" feature.
 
 
@@ -78,7 +78,7 @@ class InferenceClient:
                     max_tokens=max_tokens,
                     temperature=temperature,
                     top_p=top_p,
-                    repeat_penalty=repeat_penalty,
+                    repetition_penalty=repetition_penalty,
                     extra_body={
                         'top_k': top_k,
                         'chat_template_kwargs': {
@@ -153,7 +153,13 @@ class InferenceRunner:
                 for line in f:
                     try:
                         item = json.loads(line)
-                        prompt = item.get('prompt')
+                        prompt = item.get(
+                            self.args.input_key) or item.get('prompt')
+                        if not prompt:
+                            logger.warning(
+                                f'No {self.args.input_key} found in item: {item}'
+                            )
+                            continue
                         gen_count = len(item.get('gen', []))
                         completed_counts[prompt] += gen_count
                     except json.JSONDecodeError:
@@ -182,14 +188,13 @@ class InferenceRunner:
 
         expanded_data = []
         for item in data:
-            try:
-                prompt = item.get(self.args.input_key)
-            except KeyError:
+            prompt = item.get(self.args.input_key) or item.get('prompt')
+            if not prompt:
                 logger.warning(
                     f'No {self.args.input_key} found in item: {item}')
                 continue
             completed = completed_counts.get(prompt, 0)
-            remaining = self.args.n_sampling - completed
+            remaining = max(0, self.args.n_sampling - completed)
             for _ in range(remaining):
                 expanded_data.append(copy.deepcopy(item))
 
@@ -201,7 +206,7 @@ class InferenceRunner:
         """Processes a single item and writes the result to the output file."""
         response = None
         try:
-            query = item.get(self.args.input_key)
+            query = item.get(self.args.input_key) or item.get('prompt')
             if not query:
                 logger.warning(
                     f'No {self.args.input_key} found in item: {item}')
@@ -214,7 +219,7 @@ class InferenceRunner:
                 temperature=self.args.temperature,
                 top_p=self.args.top_p,
                 top_k=self.args.top_k,
-                repeat_penalty=self.args.repeat_penalty,
+                repetition_penalty=self.args.repetition_penalty,
                 enable_thinking=self.args.enable_thinking,
             )
 
