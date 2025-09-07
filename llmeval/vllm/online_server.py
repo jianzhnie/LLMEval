@@ -42,7 +42,7 @@ class InferenceClient:
 
     def get_content(self, query: str, system_prompt: Optional[str],
                     model_name: str, max_tokens: int, temperature: float,
-                    top_p: float, top_k: int, presence_penalty: float,
+                    top_p: float, top_k: int, repeat_penalty: float,
                     enable_thinking: bool) -> str:
         """
         Fetches content from the OpenAI API with retry logic.
@@ -55,7 +55,7 @@ class InferenceClient:
             temperature (float): The sampling temperature.
             top_p (float): The top-p value.
             top_k (int): The top-k value.
-            presence_penalty (float): Presence penalty value.
+            repeat_penalty (float): The repeat penalty value.
             enable_thinking (bool): Whether to enable the "thinking" feature.
 
 
@@ -78,7 +78,7 @@ class InferenceClient:
                     max_tokens=max_tokens,
                     temperature=temperature,
                     top_p=top_p,
-                    presence_penalty=presence_penalty,
+                    repeat_penalty=repeat_penalty,
                     extra_body={
                         'top_k': top_k,
                         'chat_template_kwargs': {
@@ -130,8 +130,7 @@ class InferenceRunner:
     def __init__(self, args: EvaluationArguments):
         self.args: EvaluationArguments = args
         self.client = InferenceClient(args.base_url, args.request_timeout)
-        self.system_prompt = SYSTEM_PROMPT_FACTORY.get(args.system_prompt)
-        logger.info(f'Using system prompt: {self.system_prompt}')
+        self.system_prompt = SYSTEM_PROMPT_FACTORY.get(args.system_prompt_type)
         # 使用类级别的锁，确保线程安全
         self._file_lock = threading.Lock()
 
@@ -215,7 +214,7 @@ class InferenceRunner:
                 temperature=self.args.temperature,
                 top_p=self.args.top_p,
                 top_k=self.args.top_k,
-                presence_penalty=self.args.presence_penalty,
+                repeat_penalty=self.args.repeat_penalty,
                 enable_thinking=self.args.enable_thinking,
             )
 
