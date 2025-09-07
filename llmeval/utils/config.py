@@ -10,7 +10,7 @@ vLLM-specific settings.
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
@@ -24,22 +24,10 @@ class DataArguments:
     Arguments for configuring the dataset and data loading.
 
     Attributes:
-        dataset_dir (str): Path to the directory containing dataset files.
-        dataset_name (str): The identifier for the specific dataset to use.
-        split (DataSplit): The dataset split to load (e.g., 'train', 'test').
+        input_file (str): Path to the input JSONL file containing prompts.
         cache_dir (str): Path to the directory for caching models and data.
         batch_size (int): The number of samples to process in each batch.
     """
-    dataset_dir: str = field(
-        default='./data',
-        metadata={'help': 'Directory containing the dataset.'})
-    dataset_name: str = field(default='math',
-                              metadata={'help': 'Dataset identifier.'})
-    split: Literal['train', 'test', 'validation', 'dev'] = field(
-        default='test',
-        metadata={
-            'help': 'Dataset split to use (e.g., train, test, validation).'
-        })
     input_file: str = field(
         default='input.jsonl',
         metadata={'help': 'Input JSONL file containing prompts.'})
@@ -50,6 +38,8 @@ class DataArguments:
 
     def __post_init__(self) -> None:
         """Validate data arguments after initialization."""
+        assert Path(self.input_file).exists(
+        ), f'Input file {self.input_file} does not exist.'
         if self.batch_size <= 0:
             raise ValueError(
                 f'Batch size must be a positive integer, but got {self.batch_size}.'
@@ -293,10 +283,6 @@ class EvaluationArguments(DataArguments, PromptArguments, GenerationArguments,
     # Core evaluation settings
     task: str = field(default='math',
                       metadata={'help': 'Name of the evaluation task.'})
-    # Output settings
-    output_dir: str = field(
-        default='./output',
-        metadata={'help': 'Directory to save output results.'})
     output_file: str = field(
         default='output.jsonl',
         metadata={'help': 'Output JSONL file to save results.'})
@@ -309,11 +295,6 @@ class EvaluationArguments(DataArguments, PromptArguments, GenerationArguments,
         GenerationArguments.__post_init__(self)
         VLLMEngineArguments.__post_init__(self)
         ServerArguments.__post_init__(self)
-
-        # Ensure the output directory exists
-        path_output_dir = Path(self.output_dir)
-        path_output_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f'Created output directory at {path_output_dir}')
 
         # Adjust generation parameters based on temperature
         if self.temperature <= 0.0:
