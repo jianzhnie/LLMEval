@@ -71,8 +71,8 @@ class PromptArguments:
     label_key: str = field(
         default='answer',
         metadata={'help': 'Key for target/label text in dataset.'})
-    system_prompt_type: Optional[str] = field(
-        default=None,
+    system_prompt_type: str = field(
+        default='empty',
         metadata={
             'help':
             'Optional system prompt to prepend to each input (if applicable).'
@@ -85,10 +85,19 @@ class PromptArguments:
         if not self.label_key:
             raise ValueError('Label key must be a non-empty string.')
 
-        assert self.system_prompt_type in SYSTEM_PROMPT_FACTORY or self.system_prompt_type is None, (
-            f'Invalid system prompt type: {self.system_prompt_type}. '
-            f'Valid options are: {list(SYSTEM_PROMPT_FACTORY.keys())} or None.'
+        if self.system_prompt_type is not None and self.system_prompt_type not in SYSTEM_PROMPT_FACTORY:
+            raise ValueError(
+                f'Invalid system prompt type: {self.system_prompt_type}. '
+                f'Valid options are: {list(SYSTEM_PROMPT_FACTORY.keys())}')
+        self.system_prompt = SYSTEM_PROMPT_FACTORY.get(self.system_prompt_type)
+        logger.info(
+            f'Using system prompt type {self.system_prompt_type}: {self.system_prompt}'
         )
+        logger.info(
+            f'Available system prompts: {list(SYSTEM_PROMPT_FACTORY.keys())}')
+        logger.info(
+            'If you want to customize the system prompt, please modify the '
+            'SYSTEM_PROMPT_FACTORY in llmeval/utils/template.py')
 
 
 @dataclass
@@ -124,12 +133,8 @@ class GenerationArguments:
         metadata={'help': 'Maximum number of tokens to generate.'})
     skip_special_tokens: bool = field(
         default=True, metadata={'help': 'Remove special tokens from output.'})
-    presence_penalty: float = field(
-        default=0.0,
-        metadata={
-            'help':
-            'Presence penalty to discourage repetition in generated text.'
-        })
+    repeat_penalty: float = field(
+        default=1.0, metadata={'help': 'Repeat penalty parameter.'})
     enable_thinking: bool = field(
         default=False, metadata={'help': 'Enable thinking mode for LLMs.'})
 
@@ -282,7 +287,7 @@ class EvaluationArguments(DataArguments, PromptArguments, GenerationArguments,
                       metadata={'help': 'Name of the evaluation task.'})
     # Output settings
     output_dir: str = field(
-        default='./outputs',
+        default='./output',
         metadata={'help': 'Directory to save output results.'})
     output_file: str = field(
         default='output.jsonl',
