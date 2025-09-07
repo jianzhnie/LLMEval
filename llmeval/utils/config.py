@@ -117,7 +117,7 @@ class GenerationArguments:
     top_p: float = field(
         default=0.95,
         metadata={'help': 'Nucleus sampling probability threshold.'})
-    top_k: int = field(default=50,
+    top_k: int = field(default=40,
                        metadata={'help': 'Top-k sampling parameter.'})
     max_new_tokens: int = field(
         default=32768,
@@ -181,6 +181,14 @@ class VLLMEngineArguments:
     model_name_or_path: str = field(
         default='Qwen/Qwen2.5-7B',
         metadata={'help': 'Path to the model directory.'})
+    trust_remote_code: bool = field(
+        default=True, metadata={'help': 'Whether to trust remote code.'})
+    dtype: str = field(
+        default='auto',
+        metadata={
+            'help': 'Data type for model execution (e.g., "fp16", "auto").'
+        },
+    )
     max_model_len: int = field(
         default=32768,
         metadata={'help': 'Maximum sequence length for the model.'})
@@ -193,6 +201,15 @@ class VLLMEngineArguments:
     tensor_parallel_size: int = field(
         default=4,
         metadata={'help': 'Number of GPUs to use for tensor parallelism.'})
+    pipeline_parallel_size: int = field(
+        default=1,
+        metadata={'help': 'Number of GPUs to use for pipeline parallelism.'})
+    enable_chunked_prefill: bool = field(
+        default=True,
+        metadata={
+            'help':
+            'Enable chunked prefill to reduce memory usage during generation.'
+        })
     enable_prefix_caching: bool = field(
         default=True,
         metadata={'help': 'Enable KV cache prefix optimization.'})
