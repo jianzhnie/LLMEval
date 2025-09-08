@@ -189,7 +189,7 @@ class OfflineInferenceRunner:
                 )
                 continue
             completed = completed_counts.get(prompt, 0)
-            remaining = max(0, self.args.n_sampling - completed)
+            remaining = max(0, self.args.n_samples - completed)
             for _ in range(remaining):
                 expanded_data.append(copy.deepcopy(item))
 

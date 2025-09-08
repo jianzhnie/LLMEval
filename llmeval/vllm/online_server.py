@@ -191,7 +191,7 @@ class InferenceRunner:
                     f'No {self.args.input_key} found in item: {item}')
                 continue
             completed = completed_counts.get(prompt, 0)
-            remaining = max(0, self.args.n_sampling - completed)
+            remaining = max(0, self.args.n_samples - completed)
             for _ in range(remaining):
                 expanded_data.append(copy.deepcopy(item))
 
@@ -201,7 +201,6 @@ class InferenceRunner:
 
     def process_item(self, item: Dict[str, Any]) -> None:
         """Processes a single item and writes the result to the output file."""
-        response = None
         try:
             query = item.get(self.args.input_key) or item.get('prompt')
             if not query:
@@ -219,24 +218,28 @@ class InferenceRunner:
                 enable_thinking=self.args.enable_thinking,
             )
 
-            # 统一处理空响应
-            if not response:
-                logger.warning(f'Empty response for prompt: {query[:100]}...')
-                response = ''
+            # Only write if we got a valid response
+            if response and response.strip():
+                result = copy.deepcopy(item)
+                result.setdefault('gen', []).append(response)
+
+                # 使用类级别的锁确保线程安全
+                with self._file_lock:
+                    with open(self.args.output_file, 'a',
+                              encoding='utf-8') as f:
+                        f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                        f.flush()  # 确保数据立即写入
+            else:
+                logger.warning(
+                    f'Empty or invalid response for item : {item}, skipping write'
+                )
 
         except ClientError as e:
-            logger.error(
-                f'Failed to get content for prompt: {query}. Error: {e}')
-            response = f'ERROR: {str(e)}'
-
-        result = copy.deepcopy(item)
-        result.setdefault('gen', []).append(response)
-
-        # 使用类级别的锁确保线程安全
-        with self._file_lock:
-            with open(self.args.output_file, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(result, ensure_ascii=False) + '\n')
-                f.flush()  # 确保数据立即写入
+            logger.error(f'Failed to get content for item. Error: {e}')
+            # Don't write error entries - just log and continue
+        except Exception as e:
+            logger.error(f'Unexpected error processing item: {e}')
+            # Don't write error entries - just log and continue
 
     def run(self):
         """Runs the main inference process using a thread pool."""
