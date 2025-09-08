@@ -1,7 +1,7 @@
 datasets
 math-verify
 numpy
-openai
+openai>1.0.0
 Pebble
 tokenizers
 torch
