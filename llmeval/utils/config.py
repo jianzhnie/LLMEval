@@ -95,7 +95,7 @@ class GenerationArguments:
 
     Attributes:
         do_sample (bool): Whether to use sampling or greedy decoding.
-        n_sampling (int): Number of sequences to generate per prompt.
+        n_samples (int): Number of sequences to generate per prompt.
         temperature (float): Controls the randomness of sampling. Higher values
                              lead to more diverse outputs.
         top_p (float): Nucleus sampling probability threshold.
@@ -106,7 +106,7 @@ class GenerationArguments:
     do_sample: bool = field(
         default=True,
         metadata={'help': 'Whether to use sampling vs greedy decoding.'})
-    n_sampling: int = field(
+    n_samples: int = field(
         default=1,
         metadata={'help': 'Number of sequences to generate per prompt.'})
     temperature: float = field(default=0.6,
@@ -145,9 +145,9 @@ class GenerationArguments:
             raise ValueError(
                 f'Max tokens must be a positive integer, but got {self.max_tokens}.'
             )
-        if self.n_sampling <= 0:
+        if self.n_samples <= 0:
             raise ValueError(
-                f'Number of samples must be positive, but got {self.n_sampling}.'
+                f'Number of samples must be positive, but got {self.n_samples}.'
             )
 
 
