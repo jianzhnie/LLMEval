@@ -25,8 +25,8 @@ class OfflineInferenceRunner:
         self.args: OfflineInferArguments = args
         self.system_prompt = SYSTEM_PROMPT_FACTORY.get(args.system_prompt_type)
         self._file_lock = threading.Lock()
-        self.llm = None
-        self.sampling_params = None
+        self.llm: Optional[LLM] = None
+        self.sampling_params: Optional[SamplingParams] = None
 
     def setup_vllm_engine(self) -> Tuple[LLM, SamplingParams]:
         """
