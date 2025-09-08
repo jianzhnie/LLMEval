@@ -2,7 +2,9 @@
 
 source set_env.sh
 
-model_path="Qwen/QwQ-32B"
+hfhub="/home/jianzhnie/llmtuner/hfhub/models"
+
+model_path="${hfhub}/Qwen/QwQ-32B"
 model_name="Qwen/QwQ-32B"
 
 num_gpus=8
