@@ -194,9 +194,6 @@ class InferenceRunner:
             remaining = max(0, self.args.n_samples - completed)
             for _ in range(remaining):
                 expanded_data.append(copy.deepcopy(item))
-
-        logger.info(
-            f'Total remaining samples to process: {len(expanded_data)}')
         return expanded_data
 
     def process_item(self, item: Dict[str, Any]) -> None:

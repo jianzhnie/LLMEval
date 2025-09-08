@@ -182,32 +182,31 @@ class VLLMEngineArguments:
         default=32768,
         metadata={'help': 'Maximum sequence length for the model.'})
     rope_scaling: Optional[str] = field(
-        default=
-        '{"rope_type":"yarn","factor":2.5,"original_max_position_embeddings":32768}',
+        default='',
         metadata={'help': 'RoPE scaling configuration in JSON format.'})
     gpu_memory_utilization: float = field(
         default=0.9, metadata={'help': 'Target GPU memory utilization (0-1).'})
     tensor_parallel_size: int = field(
-        default=4,
+        default=1,
         metadata={'help': 'Number of GPUs to use for tensor parallelism.'})
     pipeline_parallel_size: int = field(
         default=1,
         metadata={'help': 'Number of GPUs to use for pipeline parallelism.'})
     enable_chunked_prefill: bool = field(
-        default=True,
+        default=False,
         metadata={
             'help':
             'Enable chunked prefill to reduce memory usage during generation.'
         })
     enable_prefix_caching: bool = field(
-        default=True,
+        default=False,
         metadata={'help': 'Enable KV cache prefix optimization.'})
     max_num_batched_tokens: Optional[int] = field(
-        default=None, metadata={'help': 'Maximum tokens per batch.'})
+        default=32000, metadata={'help': 'Maximum tokens per batch.'})
     max_num_seqs: Optional[int] = field(
         default=128, metadata={'help': 'Maximum parallel sequences.'})
     enforce_eager: bool = field(
-        default=False,
+        default=True,
         metadata={'help': 'Enforce eager execution for debugging purposes.'})
     seed: int = field(default=0,
                       metadata={'help': 'Random seed for initialization.'})

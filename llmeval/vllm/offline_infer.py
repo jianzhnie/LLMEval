@@ -50,9 +50,6 @@ class OfflineInferenceRunner:
         logger.info(f'Batch Size: {self.args.batch_size}')
         logger.info('=' * 50)
 
-        # Set environment variable for vLLM sampler
-        os.environ['VLLM_USE_FLASHINFER_SAMPLER'] = '0'
-
         # Prepare hf_overrides from arguments
         hf_overrides = {
             'rope_scaling': self.args.rope_scaling,
