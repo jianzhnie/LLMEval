@@ -182,7 +182,7 @@ class VLLMEngineArguments:
         default=32768,
         metadata={'help': 'Maximum sequence length for the model.'})
     rope_scaling: Optional[str] = field(
-        default='',
+        default='{}',
         metadata={'help': 'RoPE scaling configuration in JSON format.'})
     gpu_memory_utilization: float = field(
         default=0.9, metadata={'help': 'Target GPU memory utilization (0-1).'})

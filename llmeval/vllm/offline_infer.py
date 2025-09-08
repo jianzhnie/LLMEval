@@ -55,7 +55,9 @@ class OfflineInferenceRunner:
             'rope_scaling': self.args.rope_scaling,
             'max_model_len': self.args.max_model_len,
         }
-
+        hf_overrides = {}
+        if self.args.rope_scaling:
+            hf_overrides['rope_scaling'] = self.args.rope_scaling
         try:
             llm = LLM(
                 model=self.args.model_name_or_path,
@@ -66,6 +68,7 @@ class OfflineInferenceRunner:
                 enable_prefix_caching=self.args.enable_prefix_caching,
                 enforce_eager=self.args.enforce_eager,
                 max_num_seqs=self.args.max_num_seqs,
+                max_model_len=self.args.max_model_len,  # 直接作为参数传递
                 hf_overrides=hf_overrides,
                 seed=self.args.seed,
             )
