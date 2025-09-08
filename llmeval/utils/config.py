@@ -116,9 +116,9 @@ class GenerationArguments:
         metadata={'help': 'Nucleus sampling probability threshold.'})
     top_k: int = field(default=40,
                        metadata={'help': 'Top-k sampling parameter.'})
-    max_tokens: int = field(
-        default=32768,
-        metadata={'help': 'Maximum number of tokens to generate.'})
+    max_tokens: Optional[int] = field(
+        default=None,
+        metadata={'help': 'The Maximum number of tokens to generate.'})
     skip_special_tokens: bool = field(
         default=True, metadata={'help': 'Remove special tokens from output.'})
     repetition_penalty: float = field(
@@ -141,9 +141,9 @@ class GenerationArguments:
         if self.top_k < 0:
             raise ValueError(
                 f'Top-k must be non-negative, but got {self.top_k}.')
-        if self.max_tokens <= 0:
+        if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError(
-                f'Max tokens must be a positive integer, but got {self.max_tokens}.'
+                f'Max tokens must be a positive integer when specified, but got {self.max_tokens}.'
             )
         if self.n_samples <= 0:
             raise ValueError(

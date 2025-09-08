@@ -122,22 +122,16 @@ class OfflineInferenceRunner:
                     output = outputs[idx]
                     model_response = output.outputs[
                         0].text if output.outputs else ''
-                    result = copy.deepcopy(original_item)
-                    result.setdefault('gen', []).append(model_response)
-                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
-                    f.flush()
 
-    def _write_error_entries(self, original_items: List[Dict],
-                             error_message: str) -> None:
-        """Write error entries for failed items, unified schema with 'gen'."""
-        with self._file_lock:
-            with open(self.args.output_file, 'a', encoding='utf-8') as f:
-                for _, original_item in enumerate(original_items):
-                    error_item = copy.deepcopy(original_item)
-                    error_item.setdefault('gen',
-                                          []).append(f'ERROR: {error_message}')
-                    f.write(json.dumps(error_item, ensure_ascii=False) + '\n')
-                    f.flush()
+                    # Only write if we got a valid response
+                    if model_response and model_response.strip():
+                        result = copy.deepcopy(original_item)
+                        result.setdefault('gen', []).append(model_response)
+                        f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                        f.flush()
+                    else:
+                        logger.warning(
+                            f'Empty response for item {idx}, skipping write')
 
     def count_completed_samples(self) -> Dict[str, int]:
         """
@@ -225,8 +219,6 @@ class OfflineInferenceRunner:
 
         except Exception as e:
             logger.error(f'❌ Error during vLLM processing for this batch: {e}')
-            self._write_error_entries(original_items,
-                                      f'Batch processing error: {str(e)}')
 
     def run(self) -> None:
         """Run the main inference process."""
