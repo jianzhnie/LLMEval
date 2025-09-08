@@ -107,7 +107,7 @@ class GenerationArguments:
         default=True,
         metadata={'help': 'Whether to use sampling vs greedy decoding.'})
     n_sampling: int = field(
-        default=64,
+        default=1,
         metadata={'help': 'Number of sequences to generate per prompt.'})
     temperature: float = field(default=0.6,
                                metadata={'help': 'Sampling temperature.'})
@@ -125,9 +125,6 @@ class GenerationArguments:
         default=1.0, metadata={'help': 'Repetition penalty parameter.'})
     enable_thinking: bool = field(
         default=False, metadata={'help': 'Enable thinking mode for LLMs.'})
-    skip_if_empty: bool = field(
-        default=True,
-        metadata={'help': 'Skip processing if response is empty.'})
     max_retries: int = field(
         default=3,
         metadata={'help': 'Maximum number of retries for API calls.'})

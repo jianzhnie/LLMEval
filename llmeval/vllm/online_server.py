@@ -42,8 +42,7 @@ class InferenceClient:
 
     def get_content(self, query: str, system_prompt: Optional[str],
                     model_name: str, max_tokens: int, temperature: float,
-                    top_p: float, top_k: int, repetition_penalty: float,
-                    enable_thinking: bool) -> str:
+                    top_p: float, top_k: int, enable_thinking: bool) -> str:
         """
         Fetches content from the OpenAI API with retry logic.
 
@@ -78,7 +77,6 @@ class InferenceClient:
                     max_tokens=max_tokens,
                     temperature=temperature,
                     top_p=top_p,
-                    repetition_penalty=repetition_penalty,
                     extra_body={
                         'top_k': top_k,
                         'chat_template_kwargs': {
@@ -177,8 +175,7 @@ class InferenceRunner:
             raise
 
         if os.path.exists(self.args.output_file):
-            completed_counts = self.count_completed_samples(
-                self.args.output_file)
+            completed_counts = self.count_completed_samples()
             total_completed = sum(completed_counts.values())
             logger.info(
                 f'Found a total of {total_completed} samples from a previous run.'
@@ -219,7 +216,6 @@ class InferenceRunner:
                 temperature=self.args.temperature,
                 top_p=self.args.top_p,
                 top_k=self.args.top_k,
-                repetition_penalty=self.args.repetition_penalty,
                 enable_thinking=self.args.enable_thinking,
             )
 
