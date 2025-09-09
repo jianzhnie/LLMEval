@@ -3,8 +3,8 @@
 set -euo pipefail
 
 # --- Configuration ---
-output_dir="./output/Qwen/QwQ-32B-4096"
-n_samples=8 # Default sample size for aime24 and aime25
+output_dir="./output/Qwen/QwQ-32B"
+n_samples=64 # Default sample size for aime24 and aime25
 
 # Evaluation output directory
 reval_dir="${output_dir}/eval_score"
