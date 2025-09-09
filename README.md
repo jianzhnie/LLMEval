@@ -89,12 +89,13 @@ python setup.py install
 Install the `llmeval` package by cloning the repository and then using `pip` to install it in editable mode. This will also install all the necessary dependencies.
 
 ```bash
-git clone https://gitee.com/jianzhnie/LLMEval.git
+# For github source
+git clone https://github.com/jianzhnie/LLMEval.git
+# For gitee source
+# git clone https://gitee.com/jianzhnie/LLMEval.git
 cd LLMEval
 pip install -e .
 ```
-
-
 
 ## Evaluation
 

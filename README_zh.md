@@ -88,7 +88,10 @@ python setup.py install
 通过克隆仓库并使用 `pip` 以可编辑模式安装 `llmeval` 包。这将同时安装所有必要的依赖。
 
 ```bash
-git clone https://gitee.com/jianzhnie/LLMEval.git
+# For github source
+git clone https://github.com/jianzhnie/LLMEval.git
+# For gitee source
+# git clone https://gitee.com/jianzhnie/LLMEval.git
 cd LLMEval
 pip install -e .
 ```
