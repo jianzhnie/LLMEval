@@ -1,5 +1,14 @@
 # LLM Evaluation
 
+<div align="center">
+
+[English](README.md) | [简体中文](README_zh.md)
+
+</div>
+
+
+[toc]
+
 ## Overview
 We have successfully reproduced various open-source model results on the AIME 2024 & AIME 2025 benchmarks.
 
@@ -55,7 +64,7 @@ For basic environment setup, please refer to this [documentation](https://gitee.
 
 ### vllm & vllm-ascend
 
-To properly use vllm in verl, you need to compile and install vllm and vllm-ascend using the following commands. Please note the installation method varies depending on your machine type.
+To properly use vllm to accelerate inference, you need to compile and install vllm and vllm-ascend using the following commands. Please note the installation method varies depending on your machine type.
 
 ```bash
 # vllm
@@ -85,9 +94,17 @@ cd LLMEval
 pip install -e .
 ```
 
+
+
 ## Evaluation
 
-### Step 1: Start vLLM Server
+The VLLM library provides two modes for inference: online server mode and offline mode. Below are the instructions for both methods.
+
+### Online Server Mode with vLLM
+
+This method involves starting a vLLM server and then sending requests to it for inference. This approach is more flexible and can handle multiple requests concurrently.
+
+#### Step 1: Start vLLM Server
 
 First, start the vLLM server with the following command:
 
@@ -114,7 +131,7 @@ Adjust the `tensor_parallel_size` parameter based on your available devices.
 Please refer to the [script](./scripts/model_server.sh) for more details.
 
 
-### Step 2: Run Inference
+#### Step 2: Run Inference
 
 After starting the vLLM service, run the inference script to generate responses.
 
@@ -130,29 +147,31 @@ mkdir -p "${output_dir}"
 
 # --- Run Inference Tasks ---
 # aime24 (repeated sample 64 times)
-python ./llmeval/vllm_utils/infer_multithread.py \
+python ./llmeval/vllm/online_server.py \
     --input_file "./data/aime24.jsonl" \
     --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
+    --system_prompt_type empty \
     --max_workers 8
 
 # aime25 (repeated sample 64 times)
-python ./llmeval/vllm_utils/infer_multithread.py \
+python ./llmeval/vllm/online_server.py \
     --input_file "./data/aime25.jsonl" \
     --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
+    --system_prompt_type empty \
     --max_workers 8
 ```
-Please refer to the [script](./scripts/run_infer.sh) for more details.
 
+Please refer to the [script](./scripts/QwQ/online_infer.sh) for more details.
 
 **Note:** We apply repeated sampling to reduce evaluation variance, but it may take a long time to complete (more than 8 hours depending on your device).
 
-#### Parameter Description
+##### Parameter Description
 
 - `--base_url`: Base URL of the vLLM service
 - `--model_name`: Must match the model name used in Step 1
@@ -162,13 +181,59 @@ Please refer to the [script](./scripts/run_infer.sh) for more details.
 - `--output_file`: Output result file path, model responses will be stored in the `gen` field
 - `--max_workers`: Maximum number of concurrent threads to control inference speed and resource usage
 
-#### Sampling Parameters
+##### Sampling Parameters
 
 We use ``top_p=0.95``, ``temperature=0.6``, ``top_k=40``, ``max_tokens=32768`` for sampling.
 
-#### Resuming Interrupted Inference
+##### Resuming Interrupted Inference
 
 If the inference process is interrupted, simply rerun the same command to resume. The script will automatically read the previous output file and process any prompts that haven't completed the required number of samples.
+
+
+### Offline Inference with vLLM
+
+This method involves loading the model into memory and then running inference locally. This approach is faster and more efficient, but it requires more memory and may not be suitable for large models.
+
+
+```bash
+# --- Configuration ---
+output_dir="./output/Qwen/QwQ-32B"
+model_name_or_path="Qwen/QwQ-32B"
+n_samples=64  # Default sample size for aime24 and aime25
+
+# Create output directory if it doesn't exist
+mkdir -p "${output_dir}"
+
+# --- Run Inference Tasks ---
+# aime24 (repeated sample 64 times)
+python llmeval/vllm/offline_infer.py \
+    --input_file "./data/aime24.jsonl" \
+    --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
+    --batch_size 32 \
+    --model_name_or_path "${model_name_or_path}" \
+    --trust_remote_code \
+    --max_model_len 32768 \
+    --gpu_memory_utilization 0.9 \
+    --tensor_parallel_size 8 \
+    --enforce_eager \
+    --n_samples "${n_samples}"
+
+# aime25 (repeated sample 64 times)
+python llmeval/vllm/offline_infer.py \
+    --input_file "./data/aime25.jsonl" \
+    --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
+    --batch_size 32 \
+    --model_name_or_path "${model_name_or_path}" \
+    --trust_remote_code \
+    --max_model_len 32768 \
+    --gpu_memory_utilization 0.9 \
+    --tensor_parallel_size 8 \
+    --enforce_eager \
+    --n_samples "${n_samples}"
+```
+Please refer to the [script](./scripts/QwQ/offline_infer.sh) for more details.
+
+The result format is consistent with the online server mode, and the model responses will be stored in the `gen` field.
 
 ### Step 3: Scoring
 
