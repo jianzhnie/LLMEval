@@ -11,7 +11,7 @@ n_samples=64  # Default sample size for aime24 and aime25
 # Create output directory if it doesn't exist
 mkdir -p "${output_dir}"
 
-rope_scaling={"rope_type":"yarn","factor":2.5,"original_max_position_embeddings":32768}
+rope_scaling={"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":32768}
 
 # --- Run Inference Tasks ---
 
@@ -34,7 +34,7 @@ python llmeval/vllm/offline_infer.py \
     --system_prompt_type deepseek_r1
 
 # aime25 (repeated sample 64 times)
-python llmeval/vllm/online_server.py \
+python llmeval/vllm/offline_infer.py \
     --input_file "./data/aime25.jsonl" \
     --input_key "prompt" \
     --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \

@@ -22,7 +22,6 @@ python ./llmeval/vllm/online_server.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
-    --max_tokens 32768 \
     --temperature 0.6  \
     --system_prompt_type empty \
     --max_workers 64
@@ -35,22 +34,8 @@ python ./llmeval/vllm/online_server.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
-    --max_tokens 32768 \
     --temperature 0.6  \
     --system_prompt_type empty \
     --max_workers 64
-
-# math500
-python ./llmeval/vllm/online_server.py \
-    --input_file "./data/math500.jsonl" \
-    --output_file "${output_dir}/math500_bz${n_samples}.jsonl" \
-    --base_url "${base_url}" \
-    --model_name "${model_name}" \
-    --n_samples "${n_samples}" \
-    --max_tokens 32768 \
-    --temperature 0.6  \
-    --system_prompt_type empty \
-    --max_workers 64
-
 
 echo "🎉 All inference tasks completed successfully!"
