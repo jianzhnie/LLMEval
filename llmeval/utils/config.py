@@ -33,13 +33,22 @@ class DataArguments:
         metadata={'help': 'Input JSONL file containing prompts.'})
     cache_dir: str = field(default='./cache',
                            metadata={'help': 'Cache directory for models.'})
+    output_file: str = field(
+        default='output.jsonl',
+        metadata={'help': 'Output JSONL file to save results.'})
+    task: str = field(default='aime24',
+                      metadata={'help': 'Name of the evaluation task.'})
     batch_size: int = field(default=128,
                             metadata={'help': 'Batch size for data loading.'})
 
     def __post_init__(self) -> None:
         """Validate data arguments after initialization."""
-        assert Path(self.input_file).exists(
-        ), f'Input file {self.input_file} does not exist.'
+        if not self.args.input_file or not Path(self.args.input_file).exists():
+            raise FileNotFoundError(
+                f'Input file not found: {self.args.input_file}')
+        if not self.args.output_file:
+            raise ValueError('Output file path is required')
+
         if self.batch_size <= 0:
             raise ValueError(
                 f'Batch size must be a positive integer, but got {self.batch_size}.'
@@ -127,22 +136,19 @@ class GenerationArguments:
         default=1.0, metadata={'help': 'Repetition penalty parameter.'})
     enable_thinking: bool = field(
         default=False, metadata={'help': 'Enable thinking mode for LLMs.'})
-    max_retries: int = field(
-        default=3,
-        metadata={'help': 'Maximum number of retries for API calls.'})
 
     def __post_init__(self) -> None:
         """Validate generation arguments after initialization."""
-        if self.temperature < 0:
+        if not (0.0 <= self.temperature <= 2.0):
             raise ValueError(
-                f'Temperature must be non-negative, but got {self.temperature}.'
+                f'Temperature must be between 0.0 and 2.0, got: {self.temperature}'
             )
         if not 0 <= self.top_p <= 1:
             raise ValueError(
                 f'Top-p must be between 0 and 1, but got {self.top_p}.')
-        if self.top_k < 0:
-            raise ValueError(
-                f'Top-k must be non-negative, but got {self.top_k}.')
+        if self.top_k <= 0:
+            raise ValueError(f'Top-k must be positive, got: {self.top_k}')
+
         if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError(
                 f'Max tokens must be a positive integer when specified, but got {self.max_tokens}.'
@@ -250,6 +256,9 @@ class ServerArguments:
                           metadata={'help': 'Base URL of VLLM server'})
     model_name: str = field(default='gpt-4o',
                             metadata={'help': 'Model name of VLLM server'})
+    max_retries: int = field(
+        default=3,
+        metadata={'help': 'Maximum number of retries for API calls.'})
     request_timeout: int = field(
         default=600, metadata={'help': 'Timeout for requests to VLLM server.'})
 
@@ -259,6 +268,9 @@ class ServerArguments:
             raise ValueError(
                 f'Maximum number of worker threads must be a positive integer, but got {self.max_workers}.'
             )
+        if self.max_retries < 0:
+            raise ValueError(
+                f'Max retries must be non-negative, got: {self.max_retries}')
         if self.request_timeout <= 0:
             raise ValueError(
                 f'Request timeout must be a positive integer, but got {self.request_timeout}.'
@@ -271,11 +283,6 @@ class OnlineInferArguments(DataArguments, PromptArguments, GenerationArguments,
     """
     Arguments specific to online (OpenAI-compatible API) inference.
     """
-    task: str = field(default='aime24',
-                      metadata={'help': 'Name of the evaluation task.'})
-    output_file: str = field(
-        default='output.jsonl',
-        metadata={'help': 'Output JSONL file to save results.'})
 
     def __post_init__(self) -> None:
         # Only validate what online mode needs; no vLLM engine args
@@ -298,11 +305,6 @@ class OfflineInferArguments(DataArguments, PromptArguments,
     """
     Arguments specific to offline (local vLLM engine) inference.
     """
-    task: str = field(default='aime24',
-                      metadata={'help': 'Name of the evaluation task.'})
-    output_file: str = field(
-        default='output.jsonl',
-        metadata={'help': 'Output JSONL file to save results.'})
 
     def __post_init__(self) -> None:
         DataArguments.__post_init__(self)
