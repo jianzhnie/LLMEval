@@ -278,9 +278,10 @@ class OfflineInferenceRunner:
         for item in data:
             prompt_val = item.get(self.args.input_key) or item.get('prompt')
             prompt = str(prompt_val) if prompt_val is not None else ''
-            if not prompt:
+            if not prompt.strip():
                 logger.warning(
-                    f'No "question" field found in item: {list(item.keys())}')
+                    f'No valid prompt found under keys [{self.args.input_key!r}, "prompt"] for item with keys: {list(item.keys())}'
+                )
                 skipped_items += 1
                 continue
 
@@ -292,7 +293,8 @@ class OfflineInferenceRunner:
 
         if skipped_items > 0:
             logger.warning(
-                f'Skipped {skipped_items} items due to missing question field')
+                f'Skipped {skipped_items} items due to missing or empty prompt'
+            )
 
         logger.info(
             f'Total remaining samples to process: {len(expanded_data)}')
@@ -310,10 +312,18 @@ class OfflineInferenceRunner:
             - Filter out invalid items safely.
             - Run vLLM chat inference.
             - Persist outputs for valid items.
+
+        Raises:
+            RuntimeError: If the vLLM engine is not initialized or processing fails.
         """
         if not batch_data:
             logger.warning('Empty batch data provided')
             return
+
+        if self.llm is None or self.sampling_params is None:
+            raise RuntimeError(
+                'vLLM engine is not initialized. Call setup_vllm_engine() first.'
+            )
 
         # Keep only items that successfully convert to message format
         valid_items: List[Dict[str, Any]] = []
@@ -386,7 +396,7 @@ class OfflineInferenceRunner:
 
 def main(args: OfflineInferArguments) -> None:
     """
-    Main function to run the CompassVerifier vLLM inference process.
+    Main function to run the vLLM offline inference process.
 
     Args:
         args: Configuration arguments for the inference process
@@ -403,7 +413,7 @@ def main(args: OfflineInferArguments) -> None:
 
 
 if __name__ == '__main__':
-    """Command-line interface for CompassVerifier offline inference."""
+    """Command-line interface for vLLM offline inference."""
     try:
         # Parse command line arguments
         parser = HfArgumentParser(OfflineInferArguments)
@@ -411,7 +421,7 @@ if __name__ == '__main__':
 
         # Log configuration
         logger.info(
-            'Initializing CompassVerifier OfflineInferArguments with parsed command line arguments...'
+            'Initializing OfflineInferArguments with parsed command line arguments...'
         )
         logger.info('\n--- Parsed Arguments ---')
         logger.info(json.dumps(asdict(eval_args), indent=2, default=str))
@@ -424,7 +434,7 @@ if __name__ == '__main__':
             f'❌ A required library is missing: {e}. Please install it.')
         sys.exit(1)
     except KeyboardInterrupt:
-        logger.info('�� Process interrupted by user')
+        logger.info('Process interrupted by user')
         sys.exit(0)
     except Exception as e:
         logger.critical(
