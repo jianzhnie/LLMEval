@@ -58,15 +58,12 @@ class OfflineInferenceRunner:
         logger.info(f'Batch Size: {self.args.batch_size}')
         logger.info('=' * 50)
 
-        # Prepare hf_overrides from arguments
-        hf_overrides: Dict[str, Any] = {}
-        if self.args.rope_scaling:
-            hf_overrides['rope_scaling'] = self.args.rope_scaling
-        if self.args.max_model_len:
-            # Some versions of vLLM/HF configs accept overriding max length via overrides.
-            hf_overrides['max_model_len'] = self.args.max_model_len
+        # Prepare HuggingFace overrides
+        hf_overrides = self._prepare_hf_overrides()
 
         try:
+            # Initialize vLLM engine
+            logger.info('Loading vLLM engine...')
             llm = LLM(
                 model=self.args.model_name_or_path,
                 tensor_parallel_size=self.args.tensor_parallel_size,
@@ -79,11 +76,16 @@ class OfflineInferenceRunner:
                 max_model_len=self.args.max_model_len,
                 hf_overrides=hf_overrides,
                 seed=self.args.seed,
+                trust_remote_code=self.args.trust_remote_code,
+                dtype=self.args.dtype,
             )
-        except Exception as e:
-            logger.error(f'Failed to initialize vLLM engine: {e}')
-            raise
+            logger.info('✅ vLLM engine loaded successfully')
 
+        except Exception as e:
+            logger.error(f'❌ Failed to initialize vLLM engine: {e}')
+            raise RuntimeError(f'Engine initialization failed: {e}') from e
+
+        # Configure sampling parameters
         sampling_params = SamplingParams(
             max_tokens=self.args.max_tokens,
             temperature=self.args.temperature,
@@ -92,8 +94,25 @@ class OfflineInferenceRunner:
             repetition_penalty=self.args.repetition_penalty,
         )
 
-        logger.info('✅ vLLM engine initialization completed.')
+        logger.info('✅ vLLM engine initialization completed')
         return llm, sampling_params
+
+    def _prepare_hf_overrides(self) -> Dict[str, Any]:
+        """
+        Prepare HuggingFace model overrides from arguments.
+
+        Returns:
+            Dictionary of overrides for HuggingFace model loading
+        """
+        hf_overrides: Dict[str, Any] = {}
+
+        if self.args.rope_scaling:
+            hf_overrides['rope_scaling'] = self.args.rope_scaling
+
+        if self.args.max_model_len:
+            hf_overrides['max_model_len'] = self.args.max_model_len
+
+        return hf_overrides
 
     def convert_to_messages_format(
             self, item: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
