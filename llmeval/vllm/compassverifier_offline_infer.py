@@ -3,6 +3,7 @@ import copy
 import json
 import logging
 import os
+import re
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,6 +17,26 @@ from llmeval.utils.logger import init_logger
 
 # Initialize logger
 logger = init_logger('compass_verifier_infer', logging.INFO)
+
+
+def process_judgment(judgment_str: str) -> str:
+    # First try to find the exact \boxed{letter} pattern
+    boxed_matches = re.findall(r'boxed{([A-C])}', judgment_str)
+    if boxed_matches:
+        return boxed_matches[-1]
+
+    # Directly return the judgment if it is A, B, or C
+    if judgment_str in ['A', 'B', 'C']:
+        return judgment_str
+    else:
+        final_judgment_str = judgment_str.split('Final Judgment:')[-1]
+        matches = re.findall(r'\(([A-C])\)*', final_judgment_str)
+        if matches:
+            return matches[-1]
+        matches = re.findall(r'([A-C])', final_judgment_str)
+        if matches:
+            return matches[-1]
+        return ''
 
 
 class CompassVerifierOfflineInferenceRunner:
@@ -106,7 +127,11 @@ class CompassVerifierOfflineInferenceRunner:
         Returns:
             Formatted prompt string for CompassVerifier or None if conversion fails
         """
-        required_keys = ['question', 'gold_answer', 'llm_response']
+        input_key = self.args.input_key or 'prompt'
+        label_key = self.args.label_key or 'answer'
+        response_key = self.args.response_key or 'gen'
+
+        required_keys = [input_key, label_key, response_key]
 
         # Check if all required keys are present
         for key in required_keys:
@@ -115,11 +140,11 @@ class CompassVerifierOfflineInferenceRunner:
                 return None
 
         # Extract the required fields
-        question = item['question']
-        gold_answer = item['gold_answer']
-        llm_response = item['llm_response']
+        question = item.get(input_key)
+        ground_truth = item.get(label_key)
+        llm_response = item.get(response_key)[0]
 
-        if not question or not gold_answer or not llm_response:
+        if not question or not ground_truth or not llm_response:
             logger.warning(f'Empty required field in item: {item}')
             return None
 
@@ -127,7 +152,7 @@ class CompassVerifierOfflineInferenceRunner:
         try:
             formatted_prompt = CompassVerifier_PROMPT.format(
                 question=question,
-                gold_answer=gold_answer,
+                gold_answer=ground_truth,
                 llm_response=llm_response)
             return formatted_prompt
         except Exception as e:
@@ -147,7 +172,8 @@ class CompassVerifierOfflineInferenceRunner:
                     # Only write if we got a valid response
                     if model_response and model_response.strip():
                         result = copy.deepcopy(original_item)
-                        result['judgment'] = model_response.strip()
+                        result['origin_judgment'] = model_response.strip()
+                        result['judgment'] = process_judgment(model_response)
                         f.write(json.dumps(result, ensure_ascii=False) + '\n')
                         f.flush()
                     else:

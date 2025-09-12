@@ -61,6 +61,8 @@ class PromptArguments:
     label_key: str = field(
         default='answer',
         metadata={'help': 'Key for target/label text in dataset.'})
+    response_key: str = field(
+        default='gen', metadata={'help': 'Key for model generated text.'})
     system_prompt_type: str = field(
         default='empty',
         metadata={
