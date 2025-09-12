@@ -180,3 +180,5 @@ available_nodes.txt
 run.sh
 *json
 *.log
+archive/
+a.py
