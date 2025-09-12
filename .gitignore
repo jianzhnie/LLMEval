@@ -175,7 +175,10 @@ cython_debug/
 data/
 output/
 kernel_meta/
+extra-info/
 available_nodes.txt
 run.sh
+*json
+*.log
 archive/
 a.py
