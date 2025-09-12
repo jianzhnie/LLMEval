@@ -1,8 +1,21 @@
+"""Offline vLLM inference runner.
+
+This module provides a small, documented wrapper around vLLM to:
+- Load a line-delimited JSON dataset
+- Resume generation per unique prompt up to a requested sample count
+- Convert records into vLLM chat message format
+- Run batched chat inference
+- Persist unified results incrementally for robustness
+
+The output schema appends generations into a `gen` list for each input record.
+"""
+
 import collections
 import copy
 import json
 import logging
 import os
+import sys
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -29,7 +42,11 @@ class OfflineInferenceRunner:
     """
 
     def __init__(self, args: OfflineInferArguments):
-        """Initialize the runner with parsed CLI arguments."""
+        """Initialize the runner with parsed CLI arguments.
+
+        Args:
+            args: Parsed `OfflineInferArguments` used to configure vLLM and IO.
+        """
         self.args: OfflineInferArguments = args
         self.system_prompt: Optional[str] = SYSTEM_PROMPT_FACTORY.get(
             args.system_prompt_type)
@@ -82,7 +99,8 @@ class OfflineInferenceRunner:
             logger.info('✅ vLLM engine loaded successfully')
 
         except Exception as e:
-            logger.error(f'❌ Failed to initialize vLLM engine: {e}')
+            # Include traceback for easier debugging
+            logger.exception('❌ Failed to initialize vLLM engine')
             raise RuntimeError(f'Engine initialization failed: {e}') from e
 
         # Configure sampling parameters
@@ -204,7 +222,15 @@ class OfflineInferenceRunner:
         return completed_counts
 
     def load_data(self) -> List[Dict[str, Any]]:
-        """Load and expand the dataset, handling resume functionality per prompt."""
+        """Load and expand the dataset, handling resume functionality per prompt.
+
+        Returns:
+            Expanded dataset where each record appears as many times as its
+            remaining required generations.
+        Raises:
+            FileNotFoundError: If the input file does not exist.
+            json.JSONDecodeError: If an input line is not valid JSON.
+        """
         try:
             with open(self.args.input_file, 'r', encoding='utf-8') as f:
                 data = [json.loads(line) for line in f if line.strip()]
@@ -275,8 +301,9 @@ class OfflineInferenceRunner:
                                                self.sampling_params,
                                                use_tqdm=False)
             self._write_batch_results(valid_items, outputs)
-        except Exception as e:
-            logger.error(f'Error during vLLM processing for this batch: {e}')
+        except Exception:
+            # Provide traceback to aid debugging without interrupting the loop
+            logger.exception('Error during vLLM processing for this batch')
 
     def run(self) -> None:
         """Run the main inference process end-to-end."""
@@ -326,8 +353,7 @@ if __name__ == '__main__':
 
     except ImportError as e:
         logger.error(f'A required library is missing: {e}. Please install it.')
-        exit(1)
-    except Exception as e:
-        logger.critical(
-            f'An unrecoverable error occurred during execution: {e}')
-        exit(1)
+        sys.exit(1)
+    except Exception:
+        logger.exception('An unrecoverable error occurred during execution')
+        sys.exit(1)
