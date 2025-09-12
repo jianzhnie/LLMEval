@@ -3,17 +3,28 @@ Configuration classes for a large language model evaluation pipeline.
 
 This module defines a set of dataclasses to handle and validate all
 the necessary arguments for a complete evaluation run. The arguments are
-categorized into data, prompt formatting, generation parameters, and
-vLLM-specific settings.
+categorized into data, prompt formatting, generation parameters, server,
+and vLLM-specific settings.
 """
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional, Union
 
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
+
+__all__ = [
+    'DataArguments',
+    'PromptArguments',
+    'GenerationArguments',
+    'VLLMEngineArguments',
+    'ServerArguments',
+    'OnlineInferArguments',
+    'OfflineInferArguments',
+    'EvaluationArguments',
+]
 
 logger = init_logger(__name__)
 
@@ -26,6 +37,8 @@ class DataArguments:
     Attributes:
         input_file (str): Path to the input JSONL file containing prompts.
         cache_dir (str): Path to the directory for caching models and data.
+        output_file (str): Path to the output JSONL file to save results.
+        task (str): Name of the evaluation task (e.g., 'aime24').
         batch_size (int): The number of samples to process in each batch.
     """
     input_file: str = field(
@@ -43,10 +56,9 @@ class DataArguments:
 
     def __post_init__(self) -> None:
         """Validate data arguments after initialization."""
-        if not self.args.input_file or not Path(self.args.input_file).exists():
-            raise FileNotFoundError(
-                f'Input file not found: {self.args.input_file}')
-        if not self.args.output_file:
+        if not self.input_file or not Path(self.input_file).exists():
+            raise FileNotFoundError(f'Input file not found: {self.input_file}')
+        if not self.output_file:
             raise ValueError('Output file path is required')
 
         if self.batch_size <= 0:
@@ -64,6 +76,9 @@ class PromptArguments:
         prompt_type (str): The type of prompt format to apply (e.g., 'qwen-base').
         input_key (str): The key in the dataset dictionary for the input text.
         label_key (str): The key for the target/label text in the dataset.
+        response_key (str): The key where model generated text will be stored.
+        system_prompt_type (str): Optional system prompt type (see SYSTEM_PROMPT_FACTORY).
+        system_prompt (Optional[str]): The resolved system prompt text (computed).
     """
     input_key: str = field(default='prompt',
                            metadata={'help': 'Key for input text in dataset.'})
@@ -78,6 +93,8 @@ class PromptArguments:
             'help':
             'Optional system prompt to prepend to each input (if applicable).'
         })
+    # Computed value based on system_prompt_type; not settable via CLI
+    system_prompt: Optional[str] = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         """Validate prompt arguments after initialization."""
@@ -86,7 +103,8 @@ class PromptArguments:
         if not self.label_key:
             raise ValueError('Label key must be a non-empty string.')
 
-        if self.system_prompt_type is not None and self.system_prompt_type not in SYSTEM_PROMPT_FACTORY:
+        if (self.system_prompt_type is not None
+                and self.system_prompt_type not in SYSTEM_PROMPT_FACTORY):
             raise ValueError(
                 f'Invalid system prompt type: {self.system_prompt_type}. '
                 f'Valid options are: {list(SYSTEM_PROMPT_FACTORY.keys())}')
@@ -111,8 +129,10 @@ class GenerationArguments:
                              lead to more diverse outputs.
         top_p (float): Nucleus sampling probability threshold.
         top_k (int): Top-k sampling parameter.
-        max_tokens (int): Maximum number of tokens to generate per sequence.
+        max_tokens (Optional[int]): Maximum number of tokens to generate per sequence.
         skip_special_tokens (bool): Whether to remove special tokens from the output.
+        repetition_penalty (float): Repetition penalty parameter.
+        enable_thinking (bool): Enable thinking mode for LLMs (if supported).
     """
     do_sample: bool = field(
         default=True,
@@ -166,14 +186,21 @@ class VLLMEngineArguments:
 
     Attributes:
         model_name_or_path (str): Path or name of the model to load.
+        trust_remote_code (bool): Whether to trust remote code.
+        dtype (str): Data type for model execution (e.g., "fp16", "auto").
         max_model_len (int): Maximum context length for the model.
-        rope_scaling (Optional[dict]): RoPE scaling configuration as a dictionary.
-        gpu_memory_utilization (float): Target GPU memory usage (0-1).
+        rope_scaling (Optional[Union[str, Dict[str, Any]]]): RoPE scaling configuration
+            as a JSON string or Python dict. If provided as a string, it will be parsed.
+        rope_scaling_dict (Optional[Dict[str, Any]]): Parsed RoPE scaling configuration (computed).
+        gpu_memory_utilization (float): Target GPU memory usage (0-1].
         tensor_parallel_size (int): Number of GPUs for tensor parallelism.
-        enable_prefix_caching (bool): Whether to enable KV cache prefix optimization.
+        pipeline_parallel_size (int): Number of GPUs for pipeline parallelism.
+        enable_chunked_prefill (bool): Reduce memory usage during generation.
+        enable_prefix_caching (bool): Enable KV cache prefix optimization.
         max_num_batched_tokens (Optional[int]): Maximum number of tokens per batch.
         max_num_seqs (Optional[int]): Maximum number of parallel sequences.
-        seed (int): The random seed for initialization.
+        enforce_eager (bool): Enforce eager execution for debugging purposes.
+        seed (int): Random seed for initialization.
     """
     model_name_or_path: str = field(
         default='Qwen/Qwen2.5-7B',
@@ -189,9 +216,14 @@ class VLLMEngineArguments:
     max_model_len: int = field(
         default=32768,
         metadata={'help': 'Maximum sequence length for the model.'})
-    rope_scaling: Optional[str] = field(
+    rope_scaling: Optional[Union[str, Dict[str, Any]]] = field(
         default='{}',
-        metadata={'help': 'RoPE scaling configuration in JSON format.'})
+        metadata={
+            'help': 'RoPE scaling configuration in JSON format or dict.'
+        })
+    # Parsed representation; not settable via CLI
+    rope_scaling_dict: Optional[Dict[str, Any]] = field(init=False,
+                                                        default=None)
     gpu_memory_utilization: float = field(
         default=0.9, metadata={'help': 'Target GPU memory utilization (0-1).'})
     tensor_parallel_size: int = field(
@@ -220,35 +252,68 @@ class VLLMEngineArguments:
                       metadata={'help': 'Random seed for initialization.'})
 
     def __post_init__(self) -> None:
-        """Validate vLLM arguments and parse JSON string."""
+        """Validate vLLM arguments and parse rope_scaling value."""
         if not 0 < self.gpu_memory_utilization <= 1:
             raise ValueError(
                 f'GPU memory utilization must be between 0 and 1, but got {self.gpu_memory_utilization}.'
             )
 
-        # Parse the JSON string for rope_scaling.
-        # This makes it easier to work with as a dictionary later.
-        if self.rope_scaling:
-            try:
-                self.rope_scaling = json.loads(self.rope_scaling)
-                logger.info(
-                    f'Successfully parsed rope_scaling: {self.rope_scaling}')
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f'Invalid JSON string for rope_scaling: {self.rope_scaling}. Error: {e}'
-                ) from e
+        if self.max_num_batched_tokens is not None and self.max_num_seqs is not None:
+            raise ValueError(
+                'Cannot specify both max_num_batched_tokens and max_num_seqs.')
+
+        if self.max_model_len < 0:
+            raise ValueError(
+                f'Max model length must be positive, but got {self.max_model_len}.'
+            )
+
+        if self.tensor_parallel_size < 1:
+            raise ValueError(
+                f'Tensor parallel size must be at least 1, but got {self.tensor_parallel_size}.'
+            )
+        if self.pipeline_parallel_size < 1:
+            raise ValueError(
+                f'Pipeline parallel size must be at least 1, but got {self.pipeline_parallel_size}.'
+            )
+
+        # Parse rope_scaling into rope_scaling_dict, keeping the original field stable.
+        if self.rope_scaling is None:
+            self.rope_scaling_dict = None
+        elif isinstance(self.rope_scaling, dict):
+            self.rope_scaling_dict = self.rope_scaling
+            logger.info(
+                f'Using provided dict for rope_scaling: {self.rope_scaling_dict}'
+            )
+        elif isinstance(self.rope_scaling, str):
+            if self.rope_scaling.strip():
+                try:
+                    self.rope_scaling_dict = json.loads(self.rope_scaling)
+                    logger.info(
+                        f'Successfully parsed rope_scaling: {self.rope_scaling_dict}'
+                    )
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        f'Invalid JSON string for rope_scaling: {self.rope_scaling}. Error: {e}'
+                    ) from e
+            else:
+                self.rope_scaling_dict = None
+        else:
+            raise TypeError(
+                f'rope_scaling must be None, str, or dict, got {type(self.rope_scaling).__name__}'
+            )
 
 
 @dataclass
 class ServerArguments:
     """
-    Arguments for configuring the vLLM server.
+    Arguments for configuring an OpenAI-compatible server/API.
 
     Attributes:
-        host (str): The hostname or IP address for the server.
-        port (int): The port number for the server.
-        num_workers (int): Number of worker processes to spawn.
-        log_level (str): Logging level for the server.
+        max_workers (int): Maximum number of worker threads for client-side concurrency.
+        base_url (str): Base URL of the OpenAI-compatible server.
+        model_name (str): Model name to use on the server.
+        max_retries (int): Maximum number of retries for API calls.
+        request_timeout (int): Timeout (seconds) for requests to server.
     """
     max_workers: int = field(
         default=128, metadata={'help': 'Maximum number of worker threads.'})
