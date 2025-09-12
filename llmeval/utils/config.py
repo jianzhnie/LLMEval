@@ -9,8 +9,7 @@ and vLLM-specific settings.
 
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
@@ -24,6 +23,7 @@ __all__ = [
     'OnlineInferArguments',
     'OfflineInferArguments',
     'EvaluationArguments',
+    'main',
 ]
 
 logger = init_logger(__name__)
@@ -56,11 +56,6 @@ class DataArguments:
 
     def __post_init__(self) -> None:
         """Validate data arguments after initialization."""
-        if not self.input_file or not Path(self.input_file).exists():
-            raise FileNotFoundError(f'Input file not found: {self.input_file}')
-        if not self.output_file:
-            raise ValueError('Output file path is required')
-
         if self.batch_size <= 0:
             raise ValueError(
                 f'Batch size must be a positive integer, but got {self.batch_size}.'
@@ -73,7 +68,6 @@ class PromptArguments:
     Arguments for configuring prompt templates and formatting.
 
     Attributes:
-        prompt_type (str): The type of prompt format to apply (e.g., 'qwen-base').
         input_key (str): The key in the dataset dictionary for the input text.
         label_key (str): The key for the target/label text in the dataset.
         response_key (str): The key where model generated text will be stored.
@@ -125,8 +119,7 @@ class GenerationArguments:
     Attributes:
         do_sample (bool): Whether to use sampling or greedy decoding.
         n_samples (int): Number of sequences to generate per prompt.
-        temperature (float): Controls the randomness of sampling. Higher values
-                             lead to more diverse outputs.
+        temperature (float): Controls randomness; higher is more diverse.
         top_p (float): Nucleus sampling probability threshold.
         top_k (int): Top-k sampling parameter.
         max_tokens (Optional[int]): Maximum number of tokens to generate per sequence.
@@ -168,7 +161,6 @@ class GenerationArguments:
                 f'Top-p must be between 0 and 1, but got {self.top_p}.')
         if self.top_k <= 0:
             raise ValueError(f'Top-k must be positive, got: {self.top_k}')
-
         if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError(
                 f'Max tokens must be a positive integer when specified, but got {self.max_tokens}.'
@@ -189,8 +181,8 @@ class VLLMEngineArguments:
         trust_remote_code (bool): Whether to trust remote code.
         dtype (str): Data type for model execution (e.g., "fp16", "auto").
         max_model_len (int): Maximum context length for the model.
-        rope_scaling (Optional[Union[str, Dict[str, Any]]]): RoPE scaling configuration
-            as a JSON string or Python dict. If provided as a string, it will be parsed.
+        rope_scaling (str): RoPE scaling configuration as a JSON string. If empty,
+            no scaling is applied. Parsed into `rope_scaling_dict`.
         rope_scaling_dict (Optional[Dict[str, Any]]): Parsed RoPE scaling configuration (computed).
         gpu_memory_utilization (float): Target GPU memory usage (0-1].
         tensor_parallel_size (int): Number of GPUs for tensor parallelism.
@@ -216,11 +208,9 @@ class VLLMEngineArguments:
     max_model_len: int = field(
         default=32768,
         metadata={'help': 'Maximum sequence length for the model.'})
-    rope_scaling: Optional[Union[str, Dict[str, Any]]] = field(
+    rope_scaling: str = field(
         default='{}',
-        metadata={
-            'help': 'RoPE scaling configuration in JSON format or dict.'
-        })
+        metadata={'help': 'RoPE scaling configuration as a JSON string.'})
     # Parsed representation; not settable via CLI
     rope_scaling_dict: Optional[Dict[str, Any]] = field(init=False,
                                                         default=None)
@@ -257,16 +247,10 @@ class VLLMEngineArguments:
             raise ValueError(
                 f'GPU memory utilization must be between 0 and 1, but got {self.gpu_memory_utilization}.'
             )
-
-        if self.max_num_batched_tokens is not None and self.max_num_seqs is not None:
-            raise ValueError(
-                'Cannot specify both max_num_batched_tokens and max_num_seqs.')
-
         if self.max_model_len < 0:
             raise ValueError(
                 f'Max model length must be positive, but got {self.max_model_len}.'
             )
-
         if self.tensor_parallel_size < 1:
             raise ValueError(
                 f'Tensor parallel size must be at least 1, but got {self.tensor_parallel_size}.'
@@ -276,31 +260,20 @@ class VLLMEngineArguments:
                 f'Pipeline parallel size must be at least 1, but got {self.pipeline_parallel_size}.'
             )
 
-        # Parse rope_scaling into rope_scaling_dict, keeping the original field stable.
-        if self.rope_scaling is None:
+        # Parse rope_scaling into rope_scaling_dict, keeping the original field as string.
+        text = (self.rope_scaling or '').strip()
+        if not text:
             self.rope_scaling_dict = None
-        elif isinstance(self.rope_scaling, dict):
-            self.rope_scaling_dict = self.rope_scaling
-            logger.info(
-                f'Using provided dict for rope_scaling: {self.rope_scaling_dict}'
-            )
-        elif isinstance(self.rope_scaling, str):
-            if self.rope_scaling.strip():
-                try:
-                    self.rope_scaling_dict = json.loads(self.rope_scaling)
-                    logger.info(
-                        f'Successfully parsed rope_scaling: {self.rope_scaling_dict}'
-                    )
-                except json.JSONDecodeError as e:
-                    raise ValueError(
-                        f'Invalid JSON string for rope_scaling: {self.rope_scaling}. Error: {e}'
-                    ) from e
-            else:
-                self.rope_scaling_dict = None
         else:
-            raise TypeError(
-                f'rope_scaling must be None, str, or dict, got {type(self.rope_scaling).__name__}'
-            )
+            try:
+                self.rope_scaling_dict = json.loads(text)
+                logger.info(
+                    f'Successfully parsed rope_scaling: {self.rope_scaling_dict}'
+                )
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f'Invalid JSON string for rope_scaling: {self.rope_scaling}. Error: {e}'
+                ) from e
 
 
 @dataclass

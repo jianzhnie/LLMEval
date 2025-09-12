@@ -354,6 +354,11 @@ class OfflineInferenceRunner:
 
     def run(self) -> None:
         """Run the main inference process end-to-end."""
+        if not self.args.input_file or not Path(self.args.input_file).exists():
+            raise FileNotFoundError(
+                f'Input file not found: {self.args.input_file}')
+        if not self.arg.output_file:
+            raise ValueError('Output file path is required')
         try:
             # Load data (including resume functionality)
             eval_dataset = self.load_data()

@@ -365,6 +365,12 @@ class InferenceRunner:
         This method orchestrates the entire inference process, including data loading,
         concurrent processing, and progress tracking.
         """
+        if not self.args.input_file or not Path(self.args.input_file).exists():
+            raise FileNotFoundError(
+                f'Input file not found: {self.args.input_file}')
+        if not self.arg.output_file:
+            raise ValueError('Output file path is required')
+
         expanded_data = self.load_data()
         total_tasks = len(expanded_data)
 
