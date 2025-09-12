@@ -29,6 +29,33 @@ DEFAULT_LABEL_KEY = 'gold_answer'
 DEFAULT_RESPONSE_KEY = 'llm_response'
 
 
+def extract_answer(response_string: str) -> str | None:
+    """
+    从模型响应中提取 <answer> 标签内的内容。
+
+    Args:
+        response_string: 包含 <answer> 标签的完整字符串。
+
+    Returns:
+        如果找到 <answer> 标签，则返回其内部的字符串内容；
+        如果未找到，则返回 None。
+    """
+    # 定义正则表达式模式。
+    # (.*?) 是一个非贪婪捕获组，用于匹配并提取标签内的所有内容。
+    # re.DOTALL 标志确保 . 也能匹配换行符，以防 answer 内容有多行。
+    pattern = r'<answer>(.*?)</answer>'
+
+    # 在输入的字符串中搜索匹配项
+    match = re.search(pattern, response_string, re.DOTALL)
+
+    if match:
+        # 如果找到匹配项，返回第一个捕获组（括号内的内容），并去除首尾空格
+        return match.group(1).strip()
+    else:
+        # 如果没有找到匹配项，返回 None
+        return None
+
+
 def process_judgment(judgment_str: str) -> str:
     """
     Extract and clean judgment from model response.
@@ -273,6 +300,7 @@ class CompassVerifierOfflineInferenceRunner:
             )
             return None
 
+        llm_response = extract_answer(llm_response)
         # Format the prompt using CompassVerifier template
         try:
             formatted_prompt = CompassVerifier_PROMPT.format(
@@ -311,7 +339,8 @@ class CompassVerifierOfflineInferenceRunner:
                         # Only write if we got a valid response
                         if model_response and model_response.strip():
                             result = copy.deepcopy(original_item)
-                            result['origin_judgment'] = model_response.strip()
+                            result['gen'] = extract_answer(result['gen'])
+                            # result['origin_judgment'] = model_response.strip()
                             result['judgment'] = process_judgment(
                                 model_response)
 
