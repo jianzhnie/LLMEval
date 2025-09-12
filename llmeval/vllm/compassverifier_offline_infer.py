@@ -408,6 +408,7 @@ class CompassVerifierOfflineInferenceRunner:
             json.JSONDecodeError: If input file contains invalid JSON
         """
         logger.info(f'Loading data from: {self.args.input_file}')
+        input_key = getattr(self.args, 'input_key', None) or DEFAULT_INPUT_KEY
 
         try:
             with open(self.args.input_file, 'r', encoding='utf-8') as f:
@@ -435,7 +436,7 @@ class CompassVerifierOfflineInferenceRunner:
         skipped_items = 0
 
         for item in data:
-            question = item.get('question')
+            question = item.get(input_key)
             if not question:
                 logger.warning(
                     f'No "question" field found in item: {list(item.keys())}')
@@ -536,7 +537,7 @@ class CompassVerifierOfflineInferenceRunner:
         if not self.args.input_file or not Path(self.args.input_file).exists():
             raise FileNotFoundError(
                 f'Input file not found: {self.args.input_file}')
-        if not self.arg.output_file:
+        if not self.args.output_file:
             raise ValueError('Output file path is required')
         try:
             # Load data (including resume functionality)

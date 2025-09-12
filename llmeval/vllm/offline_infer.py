@@ -357,7 +357,7 @@ class OfflineInferenceRunner:
         if not self.args.input_file or not Path(self.args.input_file).exists():
             raise FileNotFoundError(
                 f'Input file not found: {self.args.input_file}')
-        if not self.arg.output_file:
+        if not self.args.output_file:
             raise ValueError('Output file path is required')
         try:
             # Load data (including resume functionality)
