@@ -174,9 +174,10 @@ class OfflineInferenceRunner:
         with self._file_lock:
             try:
                 with open(self.args.output_file, 'a', encoding='utf-8') as f:
-                    for idx, original_item in enumerate(original_items):
+                    for idx, (original_item,
+                              output) in enumerate(zip(original_items,
+                                                       outputs)):
                         # Defensive checks around vLLM response objects
-                        output = outputs[idx] if idx < len(outputs) else None
                         model_response: str = ''
                         if output is not None:
                             try:
@@ -191,6 +192,7 @@ class OfflineInferenceRunner:
                         if model_response and model_response.strip():
                             result = copy.deepcopy(original_item)
                             result.setdefault('gen', []).append(model_response)
+
                             f.write(
                                 json.dumps(result, ensure_ascii=False) + '\n')
                             f.flush()
@@ -225,7 +227,7 @@ class OfflineInferenceRunner:
             with open(self.args.output_file, 'r', encoding='utf-8') as f:
                 for line_num, line in enumerate(f, 1):
                     try:
-                        item = json.loads(line)
+                        item = json.loads(line.strip())
                         prompt_key = item.get(
                             self.args.input_key) or item.get('prompt')
                         gen_count = len(item.get('gen', []))
