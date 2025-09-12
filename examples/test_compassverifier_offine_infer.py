@@ -1,20 +1,45 @@
 #!/usr/bin/env python3
 """
 Test script for CompassVerifier offline inference.
-This script demonstrates how to use the optimized CompassVerifierOfflineInferenceRunner.
+
+This script demonstrates how to use the optimized CompassVerifierOfflineInferenceRunner
+for an end-to-end offline evaluation workflow:
+- parse CLI arguments into `OfflineInferArguments`
+- create sample input data
+- run inference with `CompassVerifierOfflineInferenceRunner`
+- read and display results
+- clean up temporary files
 """
 
+import dataclasses
 import json
+import logging
 import os
-import tempfile
+import sys
+from typing import Dict, List
+
+from transformers import HfArgumentParser
 
 from llmeval.utils.config import OfflineInferArguments
+from llmeval.utils.logger import init_logger
 from llmeval.vllm.compassverifier_offline_infer import \
     CompassVerifierOfflineInferenceRunner
 
+# Initialize logger early so we can report parsing/IO issues consistently.
+logger = init_logger('vllm_infer', logging.INFO)
 
-def create_test_data():
-    """Create test data for CompassVerifier inference."""
+
+def create_test_data() -> List[Dict[str, str]]:
+    """
+    Create deterministic test samples for CompassVerifier inference.
+
+    Returns:
+        A list of dictionaries. Each dictionary contains:
+        - 'question': the problem statement
+        - 'gold_answer': the expected correct answer
+        - 'llm_response': a model-generated rationale/answer to be judged
+        - 'gold_judgment': the expected judgment label (e.g., 'A', 'B')
+    """
     test_samples = [{
         'question':
         'Harold tosses a nickel four times. What is the probability that he gets at least as many heads as tails?',
@@ -34,68 +59,77 @@ def create_test_data():
     return test_samples
 
 
-def main():
-    """Main function to demonstrate CompassVerifier offline inference."""
-    # Create temporary files for input and output
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl',
-                                     delete=False) as input_file:
-        with tempfile.NamedTemporaryFile(mode='w',
-                                         suffix='.jsonl',
-                                         delete=False) as output_file:
-            input_path = input_file.name
-            output_path = output_file.name
+def main() -> None:
+    """
+    CLI entry point. Parses arguments, creates input data, runs offline inference,
+    and prints results.
+
+    Raises:
+        SystemExit: on unrecoverable errors (e.g., missing dependencies, parse errors).
+    """
+    # Parse CLI args into dataclass instance.
+    try:
+        parser = HfArgumentParser(OfflineInferArguments)
+        args, = parser.parse_args_into_dataclasses()
+
+        logger.info(
+            'Initializing OfflineInferArguments with parsed command line arguments...'
+        )
+        logger.info('\n--- Parsed Arguments ---')
+        logger.info(json.dumps(dataclasses.asdict(args), indent=2))
+    except ImportError as e:
+        logger.error(f'A required library is missing: {e}. Please install it.')
+        sys.exit(1)
+    except Exception as e:
+        logger.critical(
+            f'An unrecoverable error occurred during execution: {e}')
+        sys.exit(1)
+
+    # Configure IO paths (in working directory) for the demo.
+    args.input_path = 'input.json'
+    args.output_path = 'output.jsonl'
 
     try:
-        # Create test data
+        # Create and write test input.
         test_data = create_test_data()
-
-        # Write test data to input file
-        with open(input_path, 'w', encoding='utf-8') as f:
+        with open(args.input_path, 'w', encoding='utf-8') as f:
             for item in test_data:
                 f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
-        print(f'Created test input file: {input_path}')
-        print(f'Output will be saved to: {output_path}')
+        print(f'Created test input file: {args.input_path}')
+        print(f'Output will be saved to: {args.output_path}')
 
-        # Create arguments for CompassVerifier inference
-        args = OfflineInferArguments(
-            input_file=input_path,
-            output_file=output_path,
-            model_name_or_path='opencompass/CompassVerifier-3B',
-            batch_size=2,
-            max_tokens=10,  # Short output for judgment
-            temperature=0.0,  # Deterministic output
-            n_samples=1,
-            tensor_parallel_size=1,
-            gpu_memory_utilization=0.8,
-            max_model_len=4096,
-        )
-
-        # Run CompassVerifier inference
+        # Run CompassVerifier inference.
         runner = CompassVerifierOfflineInferenceRunner(args)
         runner.run()
 
-        # Read and display results
+        # Read and display results.
         print('\n' + '=' * 50)
         print('RESULTS:')
         print('=' * 50)
+        if not os.path.exists(args.output_path):
+            logger.error(f'Output file not found: {args.output_path}')
+            return
 
-        with open(output_path, 'r', encoding='utf-8') as f:
+        with open(args.output_path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 result = json.loads(line)
                 print(f'\nSample {line_num}:')
-                print(f"Question: {result['question'][:100]}...")
-                print(f"Gold Answer: {result['gold_answer']}")
-                print(f"Gold Judgment: {result['gold_judgment']}")
-                print(f"Model Judgment: {result['judgment']}")
+                print(f"Question: {result.get('question', '')[:100]}...")
+                print(f"Gold Answer: {result.get('gold_answer', '')}")
+                print(f"Gold Judgment: {result.get('gold_judgment', '')}")
+                print(f"Model Judgment: {result.get('judgment', '')}")
                 print('-' * 30)
-
     finally:
-        # Clean up temporary files
-        if os.path.exists(input_path):
-            os.unlink(input_path)
-        if os.path.exists(output_path):
-            os.unlink(output_path)
+        # Clean up temporary files created by this demo script.
+        try:
+            if os.path.exists(args.input_path):
+                os.unlink(args.input_path)
+            if os.path.exists(args.output_path):
+                os.unlink(args.output_path)
+        except Exception as e:
+            # Cleanup errors should not crash the script; just log them.
+            logger.warning(f'Cleanup failed: {e}')
 
 
 if __name__ == '__main__':
