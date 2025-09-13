@@ -24,7 +24,7 @@ logger = init_logger('compass_verifier_infer', logging.INFO)
 
 # Constants
 VALID_JUDGMENTS = {'A', 'B', 'C'}
-DEFAULT_INPUT_KEY = 'question'
+DEFAULT_INPUT_KEY = 'prompt'
 DEFAULT_LABEL_KEY = 'gold_answer'
 DEFAULT_RESPONSE_KEY = 'llm_response'
 

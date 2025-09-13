@@ -32,6 +32,10 @@ from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
 # Initialize logger
 logger = init_logger('vllm_infer', logging.INFO)
 
+DEFAULT_INPUT_KEY = 'prompt'
+DEFAULT_LABEL_KEY = 'answer'
+DEFAULT_RESPONSE_KEY = 'gen'
+
 
 class OfflineInferenceRunner:
     """Main class to handle offline inference with the vLLM engine.
@@ -75,7 +79,7 @@ class OfflineInferenceRunner:
         logger.info(
             f'GPU Memory Utilization: {self.args.gpu_memory_utilization}')
         logger.info(f'Batch Size: {self.args.batch_size}')
-        logger.info('=' * 50)
+        logger.info('=' * 60)
 
         # Prepare HuggingFace overrides
         hf_overrides = self._prepare_hf_overrides()
@@ -145,25 +149,36 @@ class OfflineInferenceRunner:
         Returns:
             The messages list if conversion succeeds, otherwise None.
         """
+        # Determine field keys with fallbacks
+        input_key = getattr(self.args, 'input_key', None) or DEFAULT_INPUT_KEY
+        label_key = getattr(self.args, 'label_key', None) or DEFAULT_LABEL_KEY
+
+        required_keys = [input_key, label_key]
+        missing_keys = [key for key in required_keys if key not in item]
+
+        if missing_keys:
+            logger.warning(
+                f'Missing required keys {missing_keys} in item: {list(item.keys())}'
+            )
+            return None
+
         # Prefer the user-provided input key, fallback to 'prompt'
-        if 'prompt' in item or self.args.input_key in item:
-            prompt_val = item.get(self.args.input_key, item.get('prompt', ''))
-            prompt = str(prompt_val) if prompt_val is not None else ''
-            if not prompt.strip():
-                logger.warning(f'Empty prompt in item: {item}')
-                return None
+        prompt = item.get(input_key)
+        ground_truth = item.get(label_key)
 
-            messages: List[Dict[str, str]] = []
-            if self.system_prompt:
-                messages.append({
-                    'role': 'system',
-                    'content': self.system_prompt
-                })
-            messages.append({'role': 'user', 'content': prompt})
-            return messages
+        # Validate required fields
+        if not prompt or not ground_truth:
+            logger.warning(
+                f'Empty required field in item - question: {bool(prompt)}, '
+                f'ground_truth: {bool(ground_truth)}')
+            return None
 
-        logger.warning(f'Unable to convert item to messages format: {item}')
-        return None
+        messages: List[Dict[str, str]] = []
+        if self.system_prompt:
+            messages.append({'role': 'system', 'content': self.system_prompt})
+        messages.append({'role': 'user', 'content': prompt})
+        logger.info(f'Messages: {messages}')
+        return messages
 
     def _write_batch_results(self, original_items: Sequence[Dict[str, Any]],
                              outputs: Sequence[Any]) -> None:
