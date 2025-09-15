@@ -184,7 +184,7 @@ class OfflineInferenceRunner:
             )
             return None
 
-        # Prefer the user-provided input key, fallback to 'prompt'
+        # Extract required fields
         prompt = item.get(input_key)
         ground_truth = item.get(label_key)
 

@@ -228,7 +228,8 @@ class CompassVerifierOfflineInferenceRunner:
             logger.info('✅ vLLM engine loaded successfully')
 
         except Exception as e:
-            logger.error(f'❌ Failed to initialize vLLM engine: {e}')
+            # Include traceback for easier debugging
+            logger.exception(f'❌ Failed to initialize vLLM engine: {e}')
             raise RuntimeError(f'Engine initialization failed: {e}') from e
 
         # Configure sampling parameters
@@ -244,8 +245,7 @@ class CompassVerifierOfflineInferenceRunner:
         return llm, tokenizer, sampling_params
 
     def _prepare_hf_overrides(self) -> Dict[str, Any]:
-        """
-        Prepare HuggingFace model overrides from arguments.
+        """Prepare HuggingFace model overrides from arguments.
 
         Returns:
             Dictionary of overrides for HuggingFace model loading.
@@ -297,7 +297,8 @@ class CompassVerifierOfflineInferenceRunner:
             return None
 
         # Extract required fields
-        question = item.get(input_key)
+
+        prompt = item.get(input_key)
         ground_truth = item.get(label_key)
         llm_response_raw = item.get(response_key)
 
@@ -307,9 +308,9 @@ class CompassVerifierOfflineInferenceRunner:
             return None
 
         # Validate required fields
-        if not question or not ground_truth or not llm_response:
+        if not prompt or not ground_truth or not llm_response:
             logger.warning(
-                f'Empty required field in item - question: {bool(question)}, '
+                f'Empty required field in item - question: {bool(prompt)}, '
                 f'ground_truth: {bool(ground_truth)}, llm_response: {bool(llm_response)}'
             )
             return None
@@ -320,7 +321,7 @@ class CompassVerifierOfflineInferenceRunner:
         # Format the prompt using CompassVerifier template
         try:
             formatted_prompt = CompassVerifier_PROMPT.format(
-                question=question,
+                question=prompt,
                 gold_answer=ground_truth,
                 llm_response=llm_response)
             return formatted_prompt
@@ -459,9 +460,11 @@ class CompassVerifierOfflineInferenceRunner:
                 for line_num, line in enumerate(f, 1):
                     try:
                         item = json.loads(line.strip())
-                        question = item.get('question')
-                        if question is not None and 'judgment' in item:
-                            completed_counts[question] += 1
+                        prompt_key = item.get(
+                            self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+                        gen_count = len(item.get(DEFAULT_RESPONSE_KEY, []))
+                        if prompt_key is not None and 'judgment' in item:
+                            completed_counts[str(prompt_key)] += gen_count
                     except json.JSONDecodeError as e:
                         logger.warning(f'Invalid JSON on line {line_num}: {e}')
                         continue
@@ -479,11 +482,13 @@ class CompassVerifierOfflineInferenceRunner:
         respecting the resume functionality.
 
         Returns:
-            List of data items to be processed.
+            Expanded dataset where each record appears as many times as its
+            remaining required generations.
 
         Raises:
-            FileNotFoundError: If input file doesn't exist.
-            json.JSONDecodeError: If input file contains invalid JSON.
+            FileNotFoundError: If the input file does not exist.
+            json.JSONDecodeError: If an input line is not valid JSON.
+            ValueError: If the dataset is empty or invalid.
         """
         logger.info(f'Loading data from: {self.args.input_file}')
 
@@ -623,7 +628,7 @@ class CompassVerifierOfflineInferenceRunner:
 
             # Use vLLM for inference
             logger.debug(f'Processing batch of {len(batch_messages)} prompts')
-            outputs = self.llm.generate(
+            outputs: List[RequestOutput] = self.llm.generate(
                 batch_messages,
                 self.sampling_params,
                 use_tqdm=False  # Avoid progress bar conflicts
@@ -674,11 +679,13 @@ class CompassVerifierOfflineInferenceRunner:
             ValueError: If output file path is not provided.
             RuntimeError: If inference process fails.
         """
+        # Validate file paths
         if not self.args.input_file or not Path(self.args.input_file).exists():
             raise FileNotFoundError(
                 f'Input file not found: {self.args.input_file}')
         if not self.args.output_file:
             raise ValueError('Output file path is required')
+
         try:
             # Load data (including resume functionality)
             eval_dataset = self.load_data()
