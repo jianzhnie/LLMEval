@@ -24,7 +24,7 @@ from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
 from llmeval.utils.compass_template import CompassVerifier_PROMPT
-from llmeval.utils.config import OfflineInferArguments
+from llmeval.utils.config import CompassVerifierInferArguments
 from llmeval.utils.logger import init_logger
 
 # Initialize logger
@@ -68,7 +68,7 @@ def extract_answer(response_string: str) -> str:
     # 如果没有找到匹配项，返回原字符串
     if match:
         return match.group(1).strip()
-    return response_string
+    return response_string[-100:]
 
 
 def process_judgment(judgment_str: str) -> str:
@@ -149,7 +149,7 @@ class CompassVerifierOfflineInferenceRunner:
         sampling_params: Sampling parameters for generation control.
     """
 
-    def __init__(self, args: OfflineInferArguments) -> None:
+    def __init__(self, args: CompassVerifierInferArguments) -> None:
         """
         Initialize the CompassVerifier inference runner.
 
@@ -159,7 +159,7 @@ class CompassVerifierOfflineInferenceRunner:
         Raises:
             ValueError: If required arguments are invalid.
         """
-        self.args: OfflineInferArguments = args
+        self.args: CompassVerifierInferArguments = args
         self._file_lock: threading.Lock = threading.Lock()
         self.llm: Optional[LLM] = None
         self.tokenizer: Optional[AutoTokenizer] = None
@@ -428,11 +428,13 @@ class CompassVerifierOfflineInferenceRunner:
         result = copy.deepcopy(original_item)
 
         # Safely extract answer from 'gen' field if it exists and is a string
-        if 'gen' in result and isinstance(result['gen'], str):
-            result['gen'] = extract_answer(result['gen'])
+        result.setdefault(DEFAULT_RESPONSE_KEY, []).append(model_response)
+        if not self.args.keep_origin_data:
+            result[DEFAULT_INPUT_KEY] = ''
+            result[DEFAULT_RESPONSE_KEY] = ''
 
         # Add judgment
-        result['judgment'] = process_judgment(model_response)
+        result['compassverifier_judgment'] = process_judgment(model_response)
 
         return result
 
@@ -736,7 +738,7 @@ class CompassVerifierOfflineInferenceRunner:
                 pbar.update(1)
 
 
-def main(args: OfflineInferArguments) -> None:
+def main(args: CompassVerifierInferArguments) -> None:
     """
     Main function to run the CompassVerifier vLLM inference process.
 
@@ -758,12 +760,12 @@ if __name__ == '__main__':
     """Command-line interface for CompassVerifier offline inference."""
     try:
         # Parse command line arguments
-        parser = HfArgumentParser(OfflineInferArguments)
+        parser = HfArgumentParser(CompassVerifierInferArguments)
         eval_args, = parser.parse_args_into_dataclasses()
 
         # Log configuration
         logger.info(
-            'Initializing CompassVerifier OfflineInferArguments with parsed command line arguments...'
+            'Initializing CompassVerifier CompassVerifierInferArguments with parsed command line arguments...'
         )
         logger.info('\n--- Parsed Arguments ---')
         logger.info(json.dumps(asdict(eval_args), indent=2, default=str))

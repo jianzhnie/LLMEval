@@ -43,7 +43,7 @@ class DataArguments:
     input_file: str = field(
         default='input.jsonl',
         metadata={'help': 'Input JSONL file containing prompts.'})
-    cache_dir: str = field(default='./cache',
+    cache_dir: str = field(default='/home/jianzhnie/llmtuner/hfhub/cache',
                            metadata={'help': 'Cache directory for models.'})
     output_file: str = field(
         default='output.jsonl',
@@ -342,6 +342,30 @@ class OfflineInferArguments(DataArguments, PromptArguments,
     """
     Arguments specific to offline (local vLLM engine) inference.
     """
+
+    def __post_init__(self) -> None:
+        DataArguments.__post_init__(self)
+        PromptArguments.__post_init__(self)
+        GenerationArguments.__post_init__(self)
+        VLLMEngineArguments.__post_init__(self)
+
+        if self.temperature <= 0.0:
+            self.do_sample = False
+            self.top_p = 1.0
+            logger.warning(
+                'Temperature is 0, setting do_sample=False and top_p=1.0 for greedy decoding.'
+            )
+
+
+@dataclass
+class CompassVerifierInferArguments(DataArguments, PromptArguments,
+                                    GenerationArguments, VLLMEngineArguments):
+    """
+    Arguments specific to offline (local vLLM engine) inference.
+    """
+    keep_origin_data: bool = field(
+        default=False,
+        metadata={'help': 'Will keep the ogininal data or not.'})
 
     def __post_init__(self) -> None:
         DataArguments.__post_init__(self)
