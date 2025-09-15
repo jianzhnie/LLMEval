@@ -23,10 +23,9 @@ __all__ = [
     'OnlineInferArguments',
     'OfflineInferArguments',
     'EvaluationArguments',
-    'main',
 ]
 
-logger = init_logger(__name__)
+logger = init_logger('eval_config')
 
 
 @dataclass
