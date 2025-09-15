@@ -53,7 +53,7 @@ def extract_answer(response_string: str) -> str | None:
         return match.group(1).strip()
     else:
         # 如果没有找到匹配项，返回 None
-        return None
+        return response_string
 
 
 def process_judgment(judgment_str: str) -> str:
@@ -341,7 +341,10 @@ class CompassVerifierOfflineInferenceRunner:
                         # Only write if we got a valid response
                         if model_response and model_response.strip():
                             result = copy.deepcopy(original_item)
-                            result['gen'] = extract_answer(result['gen'])
+                            # Safely extract answer from 'gen' field if it exists and is a string
+                            if 'gen' in result and isinstance(
+                                    result['gen'], str):
+                                result['gen'] = extract_answer(result['gen'])
                             # result['origin_judgment'] = model_response.strip()
                             result['judgment'] = process_judgment(
                                 model_response)
