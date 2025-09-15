@@ -31,7 +31,7 @@ from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
 
 # Initialize logger
-logger = init_logger('vllm_infer', logging.INFO)
+logger = init_logger('offline_vllm_infer', logging.INFO)
 
 # Constants
 DEFAULT_INPUT_KEY = 'prompt'

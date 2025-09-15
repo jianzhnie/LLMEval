@@ -1,3 +1,11 @@
+"""
+CompassVerifier Offline Inference Module
+
+This module provides functionality for running offline inference using vLLM engine
+for the CompassVerifier evaluation system. It supports batch processing, resume
+functionality, and robust error handling.
+"""
+
 import collections
 import copy
 import json
@@ -23,37 +31,44 @@ from llmeval.utils.logger import init_logger
 logger = init_logger('compass_verifier_infer', logging.INFO)
 
 # Constants
-VALID_JUDGMENTS = {'A', 'B', 'C'}
-DEFAULT_INPUT_KEY = 'prompt'
-DEFAULT_LABEL_KEY = 'gold_answer'
-DEFAULT_RESPONSE_KEY = 'llm_response'
+VALID_JUDGMENTS: frozenset[str] = frozenset({'A', 'B', 'C'})
+DEFAULT_INPUT_KEY: str = 'prompt'
+DEFAULT_LABEL_KEY: str = 'answer'
+DEFAULT_RESPONSE_KEY: str = 'gen'
 
 
-def extract_answer(response_string: str) -> str | None:
+def extract_answer(response_string: str) -> str:
     """
-    从模型响应中提取 <answer> 标签内的内容。
+    Extract content from <answer> tags in model response.
+
+    This function searches for <answer> tags in the response string and extracts
+    the content within them. If no tags are found, returns the original string.
 
     Args:
-        response_string: 包含 <answer> 标签的完整字符串。
+        response_string: Complete string containing <answer> tags.
 
     Returns:
-        如果找到 <answer> 标签，则返回其内部的字符串内容；
-        如果未找到，则返回 None。
+        Extracted content from <answer> tags, or original string if no tags found.
+
+    Example:
+        >>> extract_answer("Some text <answer>42</answer> more text")
+        "42"
+        >>> extract_answer("No tags here")
+        "No tags here"
     """
-    # 定义正则表达式模式。
+    if not response_string or not isinstance(response_string, str):
+        return ''
+
+    # Regular expression patterns for answer extraction
     # (.*?) 是一个非贪婪捕获组，用于匹配并提取标签内的所有内容。
     # re.DOTALL 标志确保 . 也能匹配换行符，以防 answer 内容有多行。
-    pattern = r'<answer>(.*?)</answer>'
-
-    # 在输入的字符串中搜索匹配项
-    match = re.search(pattern, response_string, re.DOTALL)
-
+    pattern: re.Pattern[str] = re.compile(r'<answer>(.*?)</answer>', re.DOTALL)
+    match = pattern.search(response_string)
+    # 如果找到匹配项，返回第一个捕获组（括号内的内容），并去除首尾空格
+    # 如果没有找到匹配项，返回原字符串
     if match:
-        # 如果找到匹配项，返回第一个捕获组（括号内的内容），并去除首尾空格
         return match.group(1).strip()
-    else:
-        # 如果没有找到匹配项，返回 None
-        return response_string
+    return response_string
 
 
 def process_judgment(judgment_str: str) -> str:
@@ -61,13 +76,13 @@ def process_judgment(judgment_str: str) -> str:
     Extract and clean judgment from model response.
 
     This function processes the raw model output to extract a clean judgment
-    (A, B, or C) using multiple extraction strategies.
+    (A, B, or C) using multiple extraction strategies in order of preference.
 
     Args:
-        judgment_str: Raw judgment string from the model
+        judgment_str: Raw judgment string from the model.
 
     Returns:
-        Clean judgment string (A, B, or C) or empty string if no valid judgment found
+        Clean judgment string (A, B, or C) or empty string if no valid judgment found.
 
     Examples:
         >>> process_judgment("\\boxed{A}")
@@ -76,6 +91,8 @@ def process_judgment(judgment_str: str) -> str:
         'B'
         >>> process_judgment("The answer is C")
         'C'
+        >>> process_judgment("Invalid response")
+        ''
     """
     if not judgment_str or not isinstance(judgment_str, str):
         return ''
@@ -83,8 +100,8 @@ def process_judgment(judgment_str: str) -> str:
     judgment_str = judgment_str.strip()
 
     # Strategy 1: Look for \boxed{letter} pattern
-    boxed_pattern = r'\\boxed\{([A-C])\}'
-    boxed_matches = re.findall(boxed_pattern, judgment_str)
+    boxed_pattern: re.Pattern[str] = re.compile(r'\\boxed\{([A-C])\}')
+    boxed_matches = boxed_pattern.findall(judgment_str)
     if boxed_matches:
         return boxed_matches[-1]
 
@@ -97,20 +114,20 @@ def process_judgment(judgment_str: str) -> str:
         final_section = judgment_str.split('Final Judgment:')[-1]
 
         # Look for (A), (B), (C) pattern
-        paren_pattern = r'\(([A-C])\)'
-        paren_matches = re.findall(paren_pattern, final_section)
+        paren_pattern: re.Pattern[str] = re.compile(r'\(([A-C])\)')
+        paren_matches = paren_pattern.findall(final_section)
         if paren_matches:
             return paren_matches[-1]
 
         # Look for any A, B, or C in the final section
-        letter_pattern = r'([A-C])'
-        letter_matches = re.findall(letter_pattern, final_section)
+        letter_pattern: re.Pattern[str] = re.compile(r'([A-C])')
+        letter_matches = letter_pattern.findall(final_section)
         if letter_matches:
             return letter_matches[-1]
 
     # Strategy 4: Look for any A, B, or C in the entire string
-    letter_pattern = r'([A-C])'
-    all_matches = re.findall(letter_pattern, judgment_str)
+    letter_pattern: re.Pattern[str] = re.compile(r'([A-C])')
+    all_matches = letter_pattern(judgment_str)
     if all_matches:
         return all_matches[-1]
 
@@ -125,11 +142,11 @@ class CompassVerifierOfflineInferenceRunner:
     with support for batch processing, resume functionality, and robust error handling.
 
     Attributes:
-        args: Configuration arguments for the inference process
-        _file_lock: Thread lock for safe file writing
-        llm: vLLM engine instance
-        tokenizer: HuggingFace tokenizer instance
-        sampling_params: Sampling parameters for generation
+        args: Configuration arguments for the inference process.
+        _file_lock: Thread lock for safe file writing operations.
+        llm: vLLM engine instance for model inference.
+        tokenizer: HuggingFace tokenizer instance for text processing.
+        sampling_params: Sampling parameters for generation control.
     """
 
     def __init__(self, args: OfflineInferArguments) -> None:
@@ -140,7 +157,7 @@ class CompassVerifierOfflineInferenceRunner:
             args: Configuration arguments containing model settings, file paths, etc.
 
         Raises:
-            ValueError: If required arguments are invalid
+            ValueError: If required arguments are invalid.
         """
         self.args: OfflineInferArguments = args
         self._file_lock: threading.Lock = threading.Lock()
@@ -162,8 +179,8 @@ class CompassVerifierOfflineInferenceRunner:
                 - SamplingParams for generation control
 
         Raises:
-            RuntimeError: If engine initialization fails
-            ImportError: If required dependencies are missing
+            RuntimeError: If engine initialization fails.
+            ImportError: If required dependencies are missing.
         """
         logger.info('=' * 60)
         logger.info('🚀 Initializing CompassVerifier vLLM Engine')
@@ -231,7 +248,7 @@ class CompassVerifierOfflineInferenceRunner:
         Prepare HuggingFace model overrides from arguments.
 
         Returns:
-            Dictionary of overrides for HuggingFace model loading
+            Dictionary of overrides for HuggingFace model loading.
         """
         hf_overrides: Dict[str, Any] = {}
 
@@ -254,14 +271,14 @@ class CompassVerifierOfflineInferenceRunner:
         them according to the CompassVerifier template.
 
         Args:
-            item: Input data item containing question, gold_answer, and llm_response
+            item: Input data item containing question, gold_answer, and llm_response.
 
         Returns:
-            Formatted prompt string for CompassVerifier or None if conversion fails
+            Formatted prompt string for CompassVerifier or None if conversion fails.
 
         Raises:
-            KeyError: If required keys are missing from the input item
-            ValueError: If required fields are empty or invalid
+            KeyError: If required keys are missing from the input item.
+            ValueError: If required fields are empty or invalid.
         """
         # Determine field keys with fallbacks
         input_key = getattr(self.args, 'input_key', None) or DEFAULT_INPUT_KEY
@@ -285,13 +302,8 @@ class CompassVerifierOfflineInferenceRunner:
         llm_response_raw = item.get(response_key)
 
         # Handle different response formats
-        if isinstance(llm_response_raw, list) and llm_response_raw:
-            llm_response = llm_response_raw[0]
-        elif isinstance(llm_response_raw, str):
-            llm_response = llm_response_raw
-        else:
-            logger.warning(
-                f'Invalid response format in item: {type(llm_response_raw)}')
+        llm_response = self._extract_llm_response(llm_response_raw)
+        if llm_response is None:
             return None
 
         # Validate required fields
@@ -302,7 +314,9 @@ class CompassVerifierOfflineInferenceRunner:
             )
             return None
 
+        # Extract answer from response if it contains <answer> tags
         llm_response = extract_answer(llm_response)
+
         # Format the prompt using CompassVerifier template
         try:
             formatted_prompt = CompassVerifier_PROMPT.format(
@@ -312,6 +326,25 @@ class CompassVerifierOfflineInferenceRunner:
             return formatted_prompt
         except Exception as e:
             logger.error(f'Error formatting CompassVerifier prompt: {e}')
+            return None
+
+    def _extract_llm_response(self, llm_response_raw: Any) -> Optional[str]:
+        """
+        Extract LLM response from various input formats.
+
+        Args:
+            llm_response_raw: Raw LLM response in various formats.
+
+        Returns:
+            Extracted response string or None if extraction fails.
+        """
+        if isinstance(llm_response_raw, list) and llm_response_raw:
+            return llm_response_raw[0]
+        elif isinstance(llm_response_raw, str):
+            return llm_response_raw
+        else:
+            logger.warning(
+                f'Invalid response format: {type(llm_response_raw)}')
             return None
 
     def _write_batch_results(self, original_items: List[Dict[str, Any]],
@@ -324,8 +357,11 @@ class CompassVerifierOfflineInferenceRunner:
         the model's judgment.
 
         Args:
-            original_items: List of original data items
-            outputs: List of model outputs from vLLM
+            original_items: List of original data items.
+            outputs: List of model outputs from vLLM.
+
+        Raises:
+            IOError: If file writing fails.
         """
         with self._file_lock:
             try:
@@ -334,20 +370,12 @@ class CompassVerifierOfflineInferenceRunner:
                               output) in enumerate(zip(original_items,
                                                        outputs)):
                         # Extract model response
-                        model_response = ''
-                        if output.outputs:
-                            model_response = output.outputs[0].text or ''
+                        model_response = self._extract_model_response(output)
 
                         # Only write if we got a valid response
                         if model_response and model_response.strip():
-                            result = copy.deepcopy(original_item)
-                            # Safely extract answer from 'gen' field if it exists and is a string
-                            if 'gen' in result and isinstance(
-                                    result['gen'], str):
-                                result['gen'] = extract_answer(result['gen'])
-                            # result['origin_judgment'] = model_response.strip()
-                            result['judgment'] = process_judgment(
-                                model_response)
+                            result = self._prepare_result_item(
+                                original_item, model_response)
 
                             # Write to file
                             f.write(
@@ -360,7 +388,52 @@ class CompassVerifierOfflineInferenceRunner:
 
             except Exception as e:
                 logger.error(f'Error writing batch results: {e}')
-                raise
+                raise IOError(f'Failed to write batch results: {e}') from e
+
+    def _extract_model_response(self, output: RequestOutput) -> str:
+        """Extract text response from vLLM output object.
+
+        Args:
+            output: vLLM RequestOutput object.
+
+        Returns:
+            Extracted text response, empty string if extraction fails.
+        """
+        if output is None:
+            return ''
+
+        try:
+            # vLLM chat returns RequestOutput objects with `.outputs`
+            # and each contains `.text`.
+            if output.outputs and len(output.outputs) > 0:
+                return output.outputs[0].text
+            return ''
+        except (AttributeError, IndexError) as e:
+            logger.warning(f'Failed to extract response from output: {e}')
+            return ''
+
+    def _prepare_result_item(self, original_item: Dict[str, Any],
+                             model_response: str) -> Dict[str, Any]:
+        """
+        Prepare result item for writing to output file.
+
+        Args:
+            original_item: Original data item.
+            model_response: Model's response text.
+
+        Returns:
+            Processed result item ready for JSON serialization.
+        """
+        result = copy.deepcopy(original_item)
+
+        # Safely extract answer from 'gen' field if it exists and is a string
+        if 'gen' in result and isinstance(result['gen'], str):
+            result['gen'] = extract_answer(result['gen'])
+
+        # Add judgment
+        result['judgment'] = process_judgment(model_response)
+
+        return result
 
     def count_completed_samples(self) -> Dict[str, int]:
         """
@@ -371,7 +444,7 @@ class CompassVerifierOfflineInferenceRunner:
         functionality for interrupted runs.
 
         Returns:
-            Dictionary mapping question content to count of completed samples
+            Dictionary mapping question content to count of completed samples.
         """
         completed_counts: Dict[str, int] = collections.defaultdict(int)
 
@@ -406,15 +479,46 @@ class CompassVerifierOfflineInferenceRunner:
         respecting the resume functionality.
 
         Returns:
-            List of data items to be processed
+            List of data items to be processed.
 
         Raises:
-            FileNotFoundError: If input file doesn't exist
-            json.JSONDecodeError: If input file contains invalid JSON
+            FileNotFoundError: If input file doesn't exist.
+            json.JSONDecodeError: If input file contains invalid JSON.
         """
         logger.info(f'Loading data from: {self.args.input_file}')
-        input_key = getattr(self.args, 'input_key', None) or DEFAULT_INPUT_KEY
 
+        # Load raw data
+        raw_data = self._load_raw_data()
+        logger.info(f'Loaded {len(raw_data)} items from input file')
+
+        # Check for completed samples
+        completed_counts = self.count_completed_samples()
+        total_completed = sum(completed_counts.values())
+
+        if total_completed > 0:
+            logger.info(
+                f'Found {total_completed} completed samples from previous run')
+
+        # Expand data according to n_samples and resume functionality
+        expanded_data = self._expand_data_with_resume(raw_data,
+                                                      completed_counts)
+        if not expanded_data:
+            logger.warning('No data to process after expansion')
+
+        logger.info(
+            f'Total remaining samples to process: {len(expanded_data)}')
+        return expanded_data
+
+    def _load_raw_data(self) -> List[Dict[str, Any]]:
+        """Load raw data from input file.
+
+        Returns:
+            List of raw data items.
+
+        Raises:
+            FileNotFoundError: If the input file does not exist.
+            json.JSONDecodeError: If an input line is not valid JSON.
+        """
         try:
             with open(self.args.input_file, 'r', encoding='utf-8') as f:
                 data = [json.loads(line) for line in f if line.strip()]
@@ -426,29 +530,37 @@ class CompassVerifierOfflineInferenceRunner:
             logger.critical(f'Invalid JSON in input file: {e}')
             raise
 
-        logger.info(f'Loaded {len(data)} items from input file')
+        return data
 
-        # Check for completed samples
-        completed_counts = self.count_completed_samples()
-        total_completed = sum(completed_counts.values())
+    def _expand_data_with_resume(
+            self, raw_data: List[Dict[str, Any]],
+            completed_counts: Dict[str, int]) -> List[Dict[str, Any]]:
+        """Expand data according to n_samples and resume functionality.
 
-        if total_completed > 0:
-            logger.info(
-                f'Found {total_completed} completed samples from previous run')
+        Args:
+            raw_data: Raw data loaded from input file.
+            completed_counts: Count of completed samples per prompt.
 
-        # Expand data according to n_samples and resume functionality
+        Returns:
+            Expanded dataset with remaining samples to process.
+        """
         expanded_data: List[Dict[str, Any]] = []
         skipped_items = 0
 
-        for item in data:
-            question = item.get(input_key)
-            if not question:
+        for item in raw_data:
+            prompt_val = item.get(
+                self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+            prompt = str(prompt_val) if prompt_val is not None else ''
+
+            if not prompt.strip():
                 logger.warning(
-                    f'No "question" field found in item: {list(item.keys())}')
+                    f'No valid prompt found under keys [{self.args.input_key!r}, '
+                    f'"{DEFAULT_INPUT_KEY}"] for item with keys: {list(item.keys())}'
+                )
                 skipped_items += 1
                 continue
 
-            completed = completed_counts.get(question, 0)
+            completed = completed_counts.get(prompt, 0)
             remaining = max(0, self.args.n_samples - completed)
 
             for _ in range(remaining):
@@ -456,9 +568,9 @@ class CompassVerifierOfflineInferenceRunner:
 
         if skipped_items > 0:
             logger.warning(
-                f'Skipped {skipped_items} items due to missing question field')
+                f'Skipped {skipped_items} items due to missing or empty prompt'
+            )
 
-        logger.info(f'Total samples to process: {len(expanded_data)}')
         return expanded_data
 
     def process_and_write_batch(self, batch_data: List[Dict[str,
@@ -470,10 +582,10 @@ class CompassVerifierOfflineInferenceRunner:
         data conversion, model inference, and result writing.
 
         Args:
-            batch_data: List of data dictionaries for the current batch
+            batch_data: List of data dictionaries for the current batch.
 
         Raises:
-            RuntimeError: If batch processing fails
+            RuntimeError: If batch processing fails.
         """
         if not batch_data:
             logger.warning('Empty batch data provided')
@@ -493,13 +605,8 @@ class CompassVerifierOfflineInferenceRunner:
                 batch_prompts.append('')
 
         # Filter out empty prompts and corresponding original items
-        valid_prompts: List[str] = []
-        valid_original_items: List[Dict[str, Any]] = []
-
-        for i, prompt in enumerate(batch_prompts):
-            if prompt:  # Only include non-empty prompts
-                valid_prompts.append(prompt)
-                valid_original_items.append(original_items[i])
+        valid_prompts, valid_original_items = self._filter_valid_prompts(
+            batch_prompts, original_items)
 
         if not valid_prompts:
             logger.warning('No valid prompts in this batch, skipping')
@@ -532,12 +639,40 @@ class CompassVerifierOfflineInferenceRunner:
             logger.error(f'❌ Error during vLLM processing for this batch: {e}')
             raise RuntimeError(f'Batch processing failed: {e}') from e
 
+    def _filter_valid_prompts(
+        self, batch_prompts: List[str], original_items: List[Dict[str, Any]]
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        """
+        Filter out empty prompts and corresponding original items.
+
+        Args:
+            batch_prompts: List of prompt strings.
+            original_items: List of original data items.
+
+        Returns:
+            Tuple of (valid_prompts, valid_original_items).
+        """
+        valid_prompts: List[str] = []
+        valid_original_items: List[Dict[str, Any]] = []
+
+        for i, prompt in enumerate(batch_prompts):
+            if prompt:  # Only include non-empty prompts
+                valid_prompts.append(prompt)
+                valid_original_items.append(original_items[i])
+
+        return valid_prompts, valid_original_items
+
     def run(self) -> None:
         """
         Run the main inference process.
 
         This method orchestrates the complete inference pipeline including
         data loading, engine initialization, batch processing, and result writing.
+
+        Raises:
+            FileNotFoundError: If input file doesn't exist.
+            ValueError: If output file path is not provided.
+            RuntimeError: If inference process fails.
         """
         if not self.args.input_file or not Path(self.args.input_file).exists():
             raise FileNotFoundError(
@@ -592,10 +727,10 @@ def main(args: OfflineInferArguments) -> None:
     Main function to run the CompassVerifier vLLM inference process.
 
     Args:
-        args: Configuration arguments for the inference process
+        args: Configuration arguments for the inference process.
 
     Raises:
-        RuntimeError: If inference process fails
+        RuntimeError: If inference process fails.
     """
     try:
         runner = CompassVerifierOfflineInferenceRunner(args)

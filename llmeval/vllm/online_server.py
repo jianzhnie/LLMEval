@@ -29,7 +29,7 @@ from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
 
-logger = init_logger(__name__, logging.INFO)
+logger = init_logger('online_vllm_server', logging.INFO)
 
 
 class ClientError(RuntimeError):
