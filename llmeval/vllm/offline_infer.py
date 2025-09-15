@@ -144,8 +144,10 @@ class OfflineInferenceRunner:
         """
         hf_overrides: Dict[str, Any] = {}
 
-        if self.args.rope_scaling:
-            hf_overrides['rope_scaling'] = self.args.rope_scaling
+        # Use the parsed rope_scaling_dict instead of the raw string
+        if hasattr(self.args,
+                   'rope_scaling_dict') and self.args.rope_scaling_dict:
+            hf_overrides['rope_scaling'] = self.args.rope_scaling_dict
 
         if self.args.max_model_len:
             hf_overrides['max_model_len'] = self.args.max_model_len
