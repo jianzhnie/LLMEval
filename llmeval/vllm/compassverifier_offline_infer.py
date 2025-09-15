@@ -37,7 +37,12 @@ DEFAULT_LABEL_KEY: str = 'answer'
 DEFAULT_RESPONSE_KEY: str = 'gen'
 
 
-def extract_answer(response_string: str) -> str:
+def _last_n_strs(text: str, n: int) -> str:
+    tokens = text.split()
+    return ' '.join(tokens[-n:]) if tokens else ''
+
+
+def extract_answer(response_string: str, fallback_tokens: int = 200) -> str:
     """
     Extract content from <answer> tags in model response.
 
@@ -65,10 +70,22 @@ def extract_answer(response_string: str) -> str:
     pattern: re.Pattern[str] = re.compile(r'<answer>(.*?)</answer>', re.DOTALL)
     match = pattern.search(response_string)
     # 如果找到匹配项，返回第一个捕获组（括号内的内容），并去除首尾空格
-    # 如果没有找到匹配项，返回原字符串
     if match:
-        return match.group(1).strip()
-    return response_string[-100:]
+        content = match.group(1).strip()
+        if content:
+            return content
+
+    # Fallback 1: content after </think>
+    think_end_pattern = re.compile(r'</think\s*>', re.IGNORECASE)
+    match = think_end_pattern.search(response_string)
+    if match:
+        tail = response_string[match.end():].strip()
+        if tail:
+            return tail
+
+    # Fallback 2: last N tokens
+    tail = _last_n_strs(response_string, fallback_tokens).strip()
+    return tail if tail else None
 
 
 def process_judgment(judgment_str: str) -> str:
