@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from tqdm import tqdm
 from transformers import HfArgumentParser
 from vllm import LLM, SamplingParams
+from vllm.outputs import RequestOutput
 
 from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.logger import init_logger
@@ -32,6 +33,7 @@ from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
 # Initialize logger
 logger = init_logger('vllm_infer', logging.INFO)
 
+# Constants
 DEFAULT_INPUT_KEY = 'prompt'
 DEFAULT_LABEL_KEY = 'answer'
 DEFAULT_RESPONSE_KEY = 'gen'
@@ -45,13 +47,23 @@ class OfflineInferenceRunner:
     - Converts input records into vLLM chat message format.
     - Runs batched inference using vLLM.
     - Writes results to a line-delimited JSON output file in a unified schema.
+
+    Attributes:
+        args: Configuration arguments for the inference process
+        _file_lock: Thread lock for safe file writing operations
+        llm: vLLM engine instance (initialized during setup)
+        sampling_params: Sampling parameters for text generation
+        system_prompt: System prompt text (resolved from system_prompt_type)
     """
 
-    def __init__(self, args: OfflineInferArguments):
+    def __init__(self, args: OfflineInferArguments) -> None:
         """Initialize the runner with parsed CLI arguments.
 
         Args:
             args: Parsed `OfflineInferArguments` used to configure vLLM and IO.
+
+        Raises:
+            ValueError: If arguments are invalid or missing required fields.
         """
         self.args: OfflineInferArguments = args
         self._file_lock: threading.Lock = threading.Lock()
@@ -66,6 +78,9 @@ class OfflineInferenceRunner:
 
         Returns:
             A tuple containing the LLM instance and SamplingParams instance.
+
+        Raises:
+            RuntimeError: If engine initialization fails.
         """
         logger.info('=' * 60)
         logger.info('🚀 Initializing vLLM Engine')
@@ -106,7 +121,7 @@ class OfflineInferenceRunner:
 
         except Exception as e:
             # Include traceback for easier debugging
-            logger.exception(f'❌ Failed to initialize vLLM engine {e}')
+            logger.exception(f'❌ Failed to initialize vLLM engine: {e}')
             raise RuntimeError(f'Engine initialization failed: {e}') from e
 
         # Configure sampling parameters
@@ -122,11 +137,10 @@ class OfflineInferenceRunner:
         return llm, sampling_params
 
     def _prepare_hf_overrides(self) -> Dict[str, Any]:
-        """
-        Prepare HuggingFace model overrides from arguments.
+        """Prepare HuggingFace model overrides from arguments.
 
         Returns:
-            Dictionary of overrides for HuggingFace model loading
+            Dictionary of overrides for HuggingFace model loading.
         """
         hf_overrides: Dict[str, Any] = {}
 
@@ -140,14 +154,20 @@ class OfflineInferenceRunner:
 
     def convert_to_messages_format(
             self, item: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
-        """
-        Convert an input record to the vLLM chat messages format.
+        """Convert an input record to the vLLM chat messages format.
 
         Expected item keys:
             - Prefer `self.args.input_key`; fallback to 'prompt'.
+            - Prefer `self.args.label_key`; fallback to 'answer'.
+
+        Args:
+            item: Input record dictionary containing prompt and label data.
 
         Returns:
             The messages list if conversion succeeds, otherwise None.
+
+        Raises:
+            ValueError: If required fields are missing or invalid.
         """
         # Determine field keys with fallbacks
         input_key = getattr(self.args, 'input_key', None) or DEFAULT_INPUT_KEY
@@ -177,7 +197,7 @@ class OfflineInferenceRunner:
         if self.system_prompt:
             messages.append({'role': 'system', 'content': self.system_prompt})
         messages.append({'role': 'user', 'content': prompt})
-        logger.info(f'Messages: {messages}')
+        logger.debug(f'Converted to messages format: {len(messages)} messages')
         return messages
 
     def _write_batch_results(self, original_items: Sequence[Dict[str, Any]],
@@ -185,6 +205,13 @@ class OfflineInferenceRunner:
         """Write batch results to file in unified schema with a 'gen' field.
 
         The output schema appends a generated string into `gen` list for each item.
+
+        Args:
+            original_items: Original input items that were processed.
+            outputs: vLLM output objects containing generated text.
+
+        Raises:
+            IOError: If file writing fails.
         """
         with self._file_lock:
             try:
@@ -192,21 +219,13 @@ class OfflineInferenceRunner:
                     for idx, (original_item,
                               output) in enumerate(zip(original_items,
                                                        outputs)):
-                        # Defensive checks around vLLM response objects
-                        model_response: str = ''
-                        if output is not None:
-                            try:
-                                # vLLM chat returns RequestOutput objects with `.outputs`
-                                # and each contains `.text`.
-                                model_response = output.outputs[
-                                    0].text if output.outputs else ''
-                            except Exception:
-                                model_response = ''
+                        model_response = self._extract_model_response(output)
 
                         # Only write if we got a valid response
                         if model_response and model_response.strip():
                             result = copy.deepcopy(original_item)
-                            result.setdefault('gen', []).append(model_response)
+                            result.setdefault(DEFAULT_RESPONSE_KEY,
+                                              []).append(model_response)
 
                             f.write(
                                 json.dumps(result, ensure_ascii=False) + '\n')
@@ -217,18 +236,39 @@ class OfflineInferenceRunner:
                             )
             except Exception as e:
                 logger.error(f'Error writing batch results: {e}')
-                raise
+                raise IOError(f'Failed to write batch results: {e}') from e
+
+    def _extract_model_response(self, output: RequestOutput) -> str:
+        """Extract text response from vLLM output object.
+
+        Args:
+            output: vLLM RequestOutput object.
+
+        Returns:
+            Extracted text response, empty string if extraction fails.
+        """
+        if output is None:
+            return ''
+
+        try:
+            # vLLM chat returns RequestOutput objects with `.outputs`
+            # and each contains `.text`.
+            if output.outputs and len(output.outputs) > 0:
+                return output.outputs[0].text
+            return ''
+        except (AttributeError, IndexError) as e:
+            logger.warning(f'Failed to extract response from output: {e}')
+            return ''
 
     def count_completed_samples(self) -> Dict[str, int]:
-        """
-        Count completed samples for resume functionality.
+        """Count completed samples for resume functionality.
 
         This method scans the output file to determine how many samples have
         already been processed for each unique question, enabling resume
         functionality for interrupted runs.
 
         Returns:
-            Dictionary mapping question content to count of completed samples
+            Dictionary mapping question content to count of completed samples.
         """
         completed_counts: Dict[str, int] = collections.defaultdict(int)
 
@@ -244,8 +284,8 @@ class OfflineInferenceRunner:
                     try:
                         item = json.loads(line.strip())
                         prompt_key = item.get(
-                            self.args.input_key) or item.get('prompt')
-                        gen_count = len(item.get('gen', []))
+                            self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+                        gen_count = len(item.get(DEFAULT_RESPONSE_KEY, []))
                         if prompt_key is not None:
                             completed_counts[str(prompt_key)] += gen_count
                     except json.JSONDecodeError as e:
@@ -262,12 +302,47 @@ class OfflineInferenceRunner:
         Returns:
             Expanded dataset where each record appears as many times as its
             remaining required generations.
+
+        Raises:
+            FileNotFoundError: If the input file does not exist.
+            json.JSONDecodeError: If an input line is not valid JSON.
+            ValueError: If the dataset is empty or invalid.
+        """
+        logger.info(f'Loading data from: {self.args.input_file}')
+
+        # Load raw data
+        raw_data = self._load_raw_data()
+        logger.info(f'Loaded {len(raw_data)} items from input file')
+
+        # Check for completed samples
+        completed_counts = self.count_completed_samples()
+        total_completed = sum(completed_counts.values())
+
+        if total_completed > 0:
+            logger.info(
+                f'Found {total_completed} completed samples from previous run')
+
+        # Expand data according to n_samples and resume functionality
+        expanded_data = self._expand_data_with_resume(raw_data,
+                                                      completed_counts)
+
+        if not expanded_data:
+            logger.warning('No data to process after expansion')
+
+        logger.info(
+            f'Total remaining samples to process: {len(expanded_data)}')
+        return expanded_data
+
+    def _load_raw_data(self) -> List[Dict[str, Any]]:
+        """Load raw data from input file.
+
+        Returns:
+            List of raw data items.
+
         Raises:
             FileNotFoundError: If the input file does not exist.
             json.JSONDecodeError: If an input line is not valid JSON.
         """
-        logger.info(f'Loading data from: {self.args.input_file}')
-
         try:
             with open(self.args.input_file, 'r', encoding='utf-8') as f:
                 data = [json.loads(line) for line in f if line.strip()]
@@ -279,25 +354,32 @@ class OfflineInferenceRunner:
             logger.critical(f'Invalid JSON in input file: {e}')
             raise
 
-        logger.info(f'Loaded {len(data)} items from input file')
+        return data
 
-        # Check for completed samples
-        completed_counts = self.count_completed_samples()
-        total_completed = sum(completed_counts.values())
+    def _expand_data_with_resume(
+            self, raw_data: List[Dict[str, Any]],
+            completed_counts: Dict[str, int]) -> List[Dict[str, Any]]:
+        """Expand data according to n_samples and resume functionality.
 
-        if total_completed > 0:
-            logger.info(
-                f'Found {total_completed} completed samples from previous run')
+        Args:
+            raw_data: Raw data loaded from input file.
+            completed_counts: Count of completed samples per prompt.
 
-        # Expand data according to n_samples and resume functionality
+        Returns:
+            Expanded dataset with remaining samples to process.
+        """
         expanded_data: List[Dict[str, Any]] = []
         skipped_items = 0
-        for item in data:
-            prompt_val = item.get(self.args.input_key) or item.get('prompt')
+
+        for item in raw_data:
+            prompt_val = item.get(
+                self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
             prompt = str(prompt_val) if prompt_val is not None else ''
+
             if not prompt.strip():
                 logger.warning(
-                    f'No valid prompt found under keys [{self.args.input_key!r}, "prompt"] for item with keys: {list(item.keys())}'
+                    f'No valid prompt found under keys [{self.args.input_key!r}, '
+                    f'"{DEFAULT_INPUT_KEY}"] for item with keys: {list(item.keys())}'
                 )
                 skipped_items += 1
                 continue
@@ -313,14 +395,10 @@ class OfflineInferenceRunner:
                 f'Skipped {skipped_items} items due to missing or empty prompt'
             )
 
-        logger.info(
-            f'Total remaining samples to process: {len(expanded_data)}')
         return expanded_data
 
-    def process_and_write_batch(
-        self,
-        batch_data: Sequence[Dict[str, Any]],
-    ) -> None:
+    def process_and_write_batch(self, batch_data: Sequence[Dict[str,
+                                                                Any]]) -> None:
         """
         Process a single batch of data and write results to file.
 
@@ -329,6 +407,9 @@ class OfflineInferenceRunner:
             - Filter out invalid items safely.
             - Run vLLM chat inference.
             - Persist outputs for valid items.
+
+        Args:
+            batch_data: Batch of input items to process.
 
         Raises:
             RuntimeError: If the vLLM engine is not initialized or processing fails.
@@ -343,6 +424,34 @@ class OfflineInferenceRunner:
             )
 
         # Keep only items that successfully convert to message format
+        valid_items, valid_messages = self._filter_valid_items(batch_data)
+
+        if not valid_messages:
+            logger.warning(
+                'All items in this batch failed message conversion; skipping.')
+            return
+
+        try:
+            logger.debug(f'Processing batch of {len(valid_messages)} prompts')
+            outputs: List[RequestOutput] = self.llm.chat(valid_messages,
+                                                         self.sampling_params,
+                                                         use_tqdm=False)
+            self._write_batch_results(valid_items, outputs)
+        except Exception as e:
+            logger.error(f'❌ Error during vLLM processing for this batch: {e}')
+            raise RuntimeError(f'Batch processing failed: {e}') from e
+
+    def _filter_valid_items(
+        self, batch_data: Sequence[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], List[List[Dict[str, str]]]]:
+        """Filter batch data to keep only valid items that can be converted to messages.
+
+        Args:
+            batch_data: Input batch data to filter.
+
+        Returns:
+            Tuple of (valid_items, valid_messages).
+        """
         valid_items: List[Dict[str, Any]] = []
         valid_messages: List[List[Dict[str, str]]] = []
 
@@ -352,28 +461,23 @@ class OfflineInferenceRunner:
                 valid_items.append(copy.deepcopy(item))
                 valid_messages.append(messages)
 
-        if not valid_messages:
-            logger.warning(
-                'All items in this batch failed message conversion; skipping.')
-            return
-
-        try:
-            logger.debug(f'Processing batch of {len(valid_messages)} prompts')
-            outputs: List[Any] = self.llm.chat(valid_messages,
-                                               self.sampling_params,
-                                               use_tqdm=False)
-            self._write_batch_results(valid_items, outputs)
-        except Exception as e:
-            logger.error(f'❌ Error during vLLM processing for this batch: {e}')
-            raise RuntimeError(f'Batch processing failed: {e}') from e
+        return valid_items, valid_messages
 
     def run(self) -> None:
-        """Run the main inference process end-to-end."""
+        """Run the main inference process end-to-end.
+
+        Raises:
+            FileNotFoundError: If input file doesn't exist.
+            ValueError: If output file path is not provided.
+            RuntimeError: If inference process fails.
+        """
+        # Validate file paths
         if not self.args.input_file or not Path(self.args.input_file).exists():
             raise FileNotFoundError(
                 f'Input file not found: {self.args.input_file}')
         if not self.args.output_file:
             raise ValueError('Output file path is required')
+
         try:
             # Load data (including resume functionality)
             eval_dataset = self.load_data()
@@ -393,19 +497,7 @@ class OfflineInferenceRunner:
             self.llm, self.sampling_params = self.setup_vllm_engine()
 
             # Process data in batches
-            total_batches = (len(eval_dataset) + self.args.batch_size -
-                             1) // self.args.batch_size
-            logger.info(
-                f'Processing {total_batches} batches with batch size {self.args.batch_size}'
-            )
-
-            with tqdm(total=total_batches,
-                      desc='Processing batches',
-                      unit='batch') as pbar:
-                for i in range(0, len(eval_dataset), self.args.batch_size):
-                    batch = eval_dataset[i:i + self.args.batch_size]
-                    self.process_and_write_batch(batch)
-                    pbar.update(1)
+            self._process_batches(eval_dataset)
 
             logger.info(
                 f'✨ Final data processing completed. Results saved to {self.args.output_file}'
@@ -415,10 +507,28 @@ class OfflineInferenceRunner:
             logger.critical(f'❌ Fatal error during inference: {e}')
             raise
 
+    def _process_batches(self, eval_dataset: List[Dict[str, Any]]) -> None:
+        """Process the evaluation dataset in batches.
+
+        Args:
+            eval_dataset: Dataset to process.
+        """
+        total_batches = (len(eval_dataset) + self.args.batch_size -
+                         1) // self.args.batch_size
+        logger.info(
+            f'Processing {total_batches} batches with batch size {self.args.batch_size}'
+        )
+
+        with tqdm(total=total_batches, desc='Processing batches',
+                  unit='batch') as pbar:
+            for i in range(0, len(eval_dataset), self.args.batch_size):
+                batch = eval_dataset[i:i + self.args.batch_size]
+                self.process_and_write_batch(batch)
+                pbar.update(1)
+
 
 def main(args: OfflineInferArguments) -> None:
-    """
-    Main function to run the vLLM offline inference process.
+    """Main function to run the vLLM offline inference process.
 
     Args:
         args: Configuration arguments for the inference process
