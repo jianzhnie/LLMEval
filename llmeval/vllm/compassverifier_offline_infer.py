@@ -699,19 +699,7 @@ class CompassVerifierOfflineInferenceRunner:
             )
 
             # Process data in batches
-            total_batches = (len(eval_dataset) + self.args.batch_size -
-                             1) // self.args.batch_size
-            logger.info(
-                f'Processing {total_batches} batches with batch size {self.args.batch_size}'
-            )
-
-            with tqdm(total=total_batches,
-                      desc='Processing batches',
-                      unit='batch') as pbar:
-                for i in range(0, len(eval_dataset), self.args.batch_size):
-                    batch = eval_dataset[i:i + self.args.batch_size]
-                    self.process_and_write_batch(batch)
-                    pbar.update(1)
+            self._process_batches(eval_dataset)
 
             logger.info(
                 f'✨ Final data processing completed. Results saved to {self.args.output_file}'
@@ -720,6 +708,25 @@ class CompassVerifierOfflineInferenceRunner:
         except Exception as e:
             logger.critical(f'❌ Fatal error during inference: {e}')
             raise
+
+    def _process_batches(self, eval_dataset: List[Dict[str, Any]]) -> None:
+        """Process the evaluation dataset in batches.
+
+        Args:
+            eval_dataset: Dataset to process.
+        """
+        total_batches = (len(eval_dataset) + self.args.batch_size -
+                         1) // self.args.batch_size
+        logger.info(
+            f'Processing {total_batches} batches with batch size {self.args.batch_size}'
+        )
+
+        with tqdm(total=total_batches, desc='Processing batches',
+                  unit='batch') as pbar:
+            for i in range(0, len(eval_dataset), self.args.batch_size):
+                batch = eval_dataset[i:i + self.args.batch_size]
+                self.process_and_write_batch(batch)
+                pbar.update(1)
 
 
 def main(args: OfflineInferArguments) -> None:
@@ -762,7 +769,7 @@ if __name__ == '__main__':
             f'❌ A required library is missing: {e}. Please install it.')
         sys.exit(1)
     except KeyboardInterrupt:
-        logger.info('�� Process interrupted by user')
+        logger.info('Process interrupted by user')
         sys.exit(0)
     except Exception as e:
         logger.critical(
