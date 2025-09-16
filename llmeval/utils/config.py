@@ -231,7 +231,7 @@ class VLLMEngineArguments:
         default=False,
         metadata={'help': 'Enable KV cache prefix optimization.'})
     max_num_batched_tokens: Optional[int] = field(
-        default=12800, metadata={'help': 'Maximum tokens per batch.'})
+        default=512000, metadata={'help': 'Maximum tokens per batch.'})
     max_num_seqs: Optional[int] = field(
         default=4096, metadata={'help': 'Maximum parallel sequences.'})
     enforce_eager: bool = field(
