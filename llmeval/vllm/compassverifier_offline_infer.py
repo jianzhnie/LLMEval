@@ -84,8 +84,8 @@ def extract_answer(response_string: str, fallback_tokens: int = 200) -> str:
             return tail
 
     # Fallback 2: last N tokens
-    tail = _last_n_strs(response_string, fallback_tokens).strip()
-    return tail if tail else None
+    last_n_str = _last_n_strs(response_string, fallback_tokens).strip()
+    return last_n_str if last_n_str else None
 
 
 def process_judgment(judgment_str: str) -> str:
