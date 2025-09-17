@@ -31,6 +31,7 @@ import os
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from datasets import Dataset, IterableDataset, load_dataset
@@ -45,6 +46,13 @@ CORRECT_JUDGMENT: str = 'A'
 TEMP_FIELD_PREFIX: str = '__'
 ACCURACY_FIELD: str = 'accuracy'
 JUDGMENT_FIELD: str = 'compassverifier_judgment'
+
+# Fields to exclude from output records
+EXCLUDED_FIELDS: frozenset[str] = frozenset(
+    ['prompt', 'gen', 'task', 'timeout_cnt'])
+
+# Standard judgment values
+STANDARD_JUDGMENTS: frozenset[str] = frozenset(['A', 'B', 'C'])
 
 # -----------------------------
 # Data structures and utilities
@@ -68,12 +76,22 @@ class EvalStats:
     breakdown: Counter[str] = field(default_factory=Counter)
 
     def match_rate(self) -> float:
-        """Calculates the percentage of matching assessments."""
-        return (self.same / self.total) if self.total else 0.0
+        """
+        Calculate the percentage of matching assessments.
+
+        Returns:
+            The match rate as a float between 0.0 and 1.0.
+        """
+        return (self.same / self.total) if self.total > 0 else 0.0
 
     def mismatch_rate(self) -> float:
-        """Calculates the percentage of mismatching assessments."""
-        return (self.different / self.total) if self.total else 0.0
+        """
+        Calculate the percentage of mismatching assessments.
+
+        Returns:
+            The mismatch rate as a float between 0.0 and 1.0.
+        """
+        return (self.different / self.total) if self.total > 0 else 0.0
 
     def add_record(self, model_acc: int, judgment_acc: int,
                    judgment_str: str) -> None:
@@ -97,7 +115,7 @@ class EvalStats:
 
 def normalize_accuracy(value: Any, threshold: float) -> int:
     """
-    Binarizes a model's accuracy value based on a given threshold.
+    Binarize a model's accuracy value based on a given threshold.
 
     Args:
         value: The accuracy value, which may be a string, float, or other type.
@@ -116,7 +134,7 @@ def normalize_accuracy(value: Any, threshold: float) -> int:
 
 def judgment_to_accuracy(judgment: Any) -> int:
     """
-    Maps a human judgment string to a binary accuracy value.
+    Map a human judgment string to a binary accuracy value.
 
     Args:
         judgment: The human judgment value, e.g., 'A', 'B', 'C'.
@@ -131,7 +149,7 @@ def judgment_to_accuracy(judgment: Any) -> int:
 
 def get_judgment_string(judgment: Any) -> str:
     """
-    Converts a judgment value to a standardized string for breakdown keys.
+    Convert a judgment value to a standardized string for breakdown keys.
 
     Args:
         judgment: The judgment value to convert.
@@ -143,14 +161,29 @@ def get_judgment_string(judgment: Any) -> str:
         return 'OTHER'
 
     judgment_str = str(judgment).strip().upper()
-    if judgment_str in ['A', 'B', 'C']:
-        return judgment_str
-    return 'OTHER'
+    return judgment_str if judgment_str in STANDARD_JUDGMENTS else 'OTHER'
+
+
+def clean_record_for_output(record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Clean a record by removing temporary and excluded fields for output.
+
+    Args:
+        record: The record dictionary to clean.
+
+    Returns:
+        A cleaned record dictionary with temporary and excluded fields removed.
+    """
+    return {
+        k: v
+        for k, v in record.items()
+        if not k.startswith(TEMP_FIELD_PREFIX) and k not in EXCLUDED_FIELDS
+    }
 
 
 def pretty_print_stats(stats: EvalStats) -> None:
     """
-    Prints a formatted summary of the evaluation statistics.
+    Print a formatted summary of the evaluation statistics.
 
     Args:
         stats: An `EvalStats` object containing the evaluation results.
@@ -192,7 +225,7 @@ def pretty_print_stats(stats: EvalStats) -> None:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """
-    Parses command-line arguments for the evaluation script.
+    Parse command-line arguments for the evaluation script.
 
     Args:
         argv: Optional list of command line arguments. If None, uses sys.argv.
@@ -243,7 +276,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def resolve_paths(args: argparse.Namespace) -> Tuple[str, str]:
     """
-    Resolves effective input and output paths based on parsed arguments.
+    Resolve effective input and output paths based on parsed arguments.
 
     Args:
         args: The argparse namespace object.
@@ -314,38 +347,29 @@ def write_mismatches_to_file(dataset: Union[Dataset,
         dataset: The dataset to filter for mismatches.
         output_path: The output file path.
         num_proc: Number of processes for parallel operations.
+
+    Raises:
+        OSError: If there's an error writing to the output file.
     """
 
     def is_mismatch(record: Dict[str, Any]) -> bool:
         """Filter predicate for mismatches."""
         return record.get(f'{TEMP_FIELD_PREFIX}mismatch', False)
 
-    def clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove temporary fields from the record."""
-        return {
-            k: v
-            for k, v in record.items() if not k.startswith(TEMP_FIELD_PREFIX)
-        }
-
-    def clean_data(record: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove temporary fields from the record."""
-        return {
-            k: v
-            for k, v in record.items()
-            if k not in ['prompt', 'gen', 'task', 'timeout_cnt']
-        }
-
     try:
+        # Ensure output directory exists
+        output_file_path = Path(output_path)
+        output_file_path.parent.mkdir(parents=True, exist_ok=True)
+
         with open(output_path, 'w', encoding='utf-8') as output_file:
             mismatch_dataset = dataset.filter(is_mismatch, num_proc=num_proc)
 
             for record in mismatch_dataset:
-                clean_record_dict = clean_record(record)
-                clean_record_dict = clean_data(record)
+                clean_record_dict = clean_record_for_output(record)
                 output_file.write(
                     json.dumps(clean_record_dict, ensure_ascii=False) + '\n')
-    except IOError as e:
-        raise IOError(
+    except OSError as e:
+        raise OSError(
             f'Failed to write mismatches to {output_path}: {e}') from e
 
 
@@ -356,8 +380,8 @@ def process_and_evaluate(
     num_proc: Optional[int],
 ) -> EvalStats:
     """
-    Processes the dataset, identifies mismatches, writes them to a file,
-    and returns aggregate statistics.
+    Process the dataset, identify mismatches, write them to a file,
+    and return aggregate statistics.
 
     This function leverages the Hugging Face `datasets` library for efficient
     parallel processing of the data.
@@ -388,7 +412,8 @@ def process_and_evaluate(
         if isinstance(dataset, Dataset):
             processed_dataset = Dataset.from_list(processed_records)
         else:
-            processed_dataset = dataset  # For IterableDataset, we'll handle differently
+            # For IterableDataset, we'll handle differently
+            processed_dataset = dataset
     else:
         # Parallel processing
         def map_function(record: Dict[str, Any]) -> Dict[str, Any]:
