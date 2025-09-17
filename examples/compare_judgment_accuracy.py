@@ -230,7 +230,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         '--num_proc',
         type=int,
-        default=32,
+        default=None,
         help=
         'Number of processes for HF map/filter. Defaults to os.cpu_count().')
     parser.add_argument('--output_path',
