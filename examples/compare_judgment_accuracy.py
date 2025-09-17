@@ -230,7 +230,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         '--num_proc',
         type=int,
-        default=None,
+        default=32,
         help=
         'Number of processes for HF map/filter. Defaults to os.cpu_count().')
     parser.add_argument('--output_path',
@@ -263,7 +263,7 @@ def resolve_paths(args: argparse.Namespace) -> Tuple[str, str]:
         effective_output_path = args.output_path
     else:
         # Extract the first file from the pattern for default output naming
-        first_file = effective_data_files.split(',')[0].strip()
+        first_file = effective_data_files.split('.')[0].strip()
         effective_output_path = f'{first_file}_diff.jsonl'
 
     return effective_data_files, effective_output_path
@@ -327,12 +327,21 @@ def write_mismatches_to_file(dataset: Union[Dataset,
             for k, v in record.items() if not k.startswith(TEMP_FIELD_PREFIX)
         }
 
+    def clean_data(record: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove temporary fields from the record."""
+        return {
+            k: v
+            for k, v in record.items()
+            if k not in ['prompt', 'gen', 'task', 'timeout_cnt']
+        }
+
     try:
         with open(output_path, 'w', encoding='utf-8') as output_file:
             mismatch_dataset = dataset.filter(is_mismatch, num_proc=num_proc)
 
             for record in mismatch_dataset:
                 clean_record_dict = clean_record(record)
+                clean_record_dict = clean_data(record)
                 output_file.write(
                     json.dumps(clean_record_dict, ensure_ascii=False) + '\n')
     except IOError as e:
