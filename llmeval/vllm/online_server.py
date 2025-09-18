@@ -38,6 +38,12 @@ class ClientError(RuntimeError):
     def __init__(self,
                  message: str,
                  original_error: Optional[Exception] = None) -> None:
+        """Initialize ClientError with message and optional original error.
+
+        Args:
+            message: Error message describing the issue
+            original_error: The original exception that caused this error
+        """
         super().__init__(message)
         self.original_error = original_error
 
@@ -50,18 +56,17 @@ class InferenceClient:
     generation parameters including thinking mode for advanced language models.
 
     Attributes:
-        api_key (str): OpenAI API key from environment variables
-        client (openai.OpenAI): The OpenAI client instance
-        timeout (int): Request timeout in seconds
-        max_retries (int): Maximum number of retry attempts
+        api_key: OpenAI API key from environment variables
+        client: The OpenAI client instance
+        timeout: Request timeout in seconds
+        max_retries: Maximum number of retry attempts
     """
 
     def __init__(self,
                  base_url: str,
                  timeout: int,
                  max_retries: int = 3) -> None:
-        """
-        Initialize the inference client.
+        """Initialize the inference client.
 
         Args:
             base_url: Base URL for the OpenAI-compatible API
@@ -80,6 +85,83 @@ class InferenceClient:
         self.timeout: int = timeout
         self.max_retries: int = max_retries
 
+    def calculate_wait_time(self, attempt: int, error_type: str) -> float:
+        """Calculate retry wait time with exponential backoff.
+
+        Args:
+            attempt: Current retry attempt (0-based)
+            error_type: Error type ('rate_limit' or 'connection')
+
+        Returns:
+            Wait time in seconds
+        """
+        # Base wait time varies by error type
+        if error_type == 'rate_limit':
+            base_min, base_max = 1.0, 3.0  # Rate limit: shorter wait
+        else:  # connection error
+            base_min, base_max = 2.0, 5.0  # Connection error: longer wait
+
+        # Exponential backoff with maximum multiplier limit
+        max_multiplier = 8
+        multiplier = min(2**attempt, max_multiplier)
+
+        # Calculate wait time with jitter
+        wait_time = random.uniform(base_min, base_max) * multiplier
+
+        # Cap maximum wait time
+        max_wait = 60.0
+        wait_time = min(wait_time, max_wait)
+        return wait_time
+
+    def _validate_generation_params(self, query: str, model_name: str,
+                                    max_tokens: int, temperature: float,
+                                    top_p: float, top_k: int) -> None:
+        """Validate generation parameters.
+
+        Args:
+            query: User's input query
+            model_name: The model to use for generation
+            max_tokens: Maximum tokens to generate
+            temperature: The sampling temperature
+            top_p: The top-p value for nucleus sampling
+            top_k: The top-k value for sampling
+
+        Raises:
+            ValueError: If any parameter is invalid
+        """
+        if not query or not query.strip():
+            raise ValueError('Query cannot be empty')
+        if not model_name:
+            raise ValueError('Model name cannot be empty')
+        if max_tokens <= 0:
+            raise ValueError(f'Max tokens must be positive, got: {max_tokens}')
+        if not 0.0 <= temperature <= 2.0:
+            raise ValueError(
+                f'Temperature must be between 0.0 and 2.0, got: {temperature}')
+        if not 0.0 <= top_p <= 1.0:
+            raise ValueError(
+                f'Top-p must be between 0.0 and 1.0, got: {top_p}')
+        if top_k <= 0:
+            raise ValueError(f'Top-k must be positive, got: {top_k}')
+
+    def _prepare_messages(
+            self, query: str,
+            system_prompt: Optional[str]) -> List[Dict[str, str]]:
+        """Prepare messages for the API call.
+
+        Args:
+            query: User's input query
+            system_prompt: System prompt for the conversation
+
+        Returns:
+            List of message dictionaries
+        """
+        messages: List[Dict[str, str]] = []
+        if system_prompt:
+            messages.append({'role': 'system', 'content': system_prompt})
+        messages.append({'role': 'user', 'content': query})
+        return messages
+
     def get_content(
         self,
         query: str,
@@ -91,8 +173,7 @@ class InferenceClient:
         top_k: int,
         enable_thinking: bool,
     ) -> str:
-        """
-        Fetch content from the OpenAI API with comprehensive retry logic.
+        """Fetch content from the OpenAI API with comprehensive retry logic.
 
         Args:
             query: User's input query
@@ -112,15 +193,11 @@ class InferenceClient:
             ValueError: If input parameters are invalid
         """
         # Validate input parameters
-        if not query or not query.strip():
-            raise ValueError('Query cannot be empty')
-        if not model_name:
-            raise ValueError('Model name cannot be empty')
+        self._validate_generation_params(query, model_name, max_tokens,
+                                         temperature, top_p, top_k)
+
         # Prepare messages
-        messages: List[Dict[str, str]] = []
-        if system_prompt:
-            messages.append({'role': 'system', 'content': system_prompt})
-        messages.append({'role': 'user', 'content': query})
+        messages = self._prepare_messages(query, system_prompt)
 
         # Retry logic with exponential backoff
         for attempt in range(self.max_retries):
@@ -149,11 +226,13 @@ class InferenceClient:
 
             except (APIConnectionError, RateLimitError) as e:
                 if attempt < self.max_retries - 1:
-                    # Exponential backoff with jitter
-                    wait_time = random.uniform(25, 35) * (2**attempt)
+                    # 根据错误类型确定等待策略
+                    error_type = 'rate_limit' if isinstance(
+                        e, RateLimitError) else 'connection'
+                    wait_time = self.calculate_wait_time(attempt, error_type)
+
                     logger.warning(
-                        f'API connection error or rate limit exceeded '
-                        f'(attempt {attempt + 1}/{self.max_retries}): {e.message}. '
+                        f'API {error_type} error (attempt {attempt + 1}/{self.max_retries}): {e.message}. '
                         f'Retrying in {wait_time:.1f}s...')
                     time.sleep(wait_time)
                     continue
@@ -200,8 +279,7 @@ class InferenceRunner:
     """
 
     def __init__(self, args: OnlineInferArguments) -> None:
-        """
-        Initialize the inference runner.
+        """Initialize the inference runner.
 
         Args:
             args: Configuration arguments containing all necessary settings
@@ -216,12 +294,11 @@ class InferenceRunner:
                                                        args.max_retries)
         self.system_prompt: Optional[str] = SYSTEM_PROMPT_FACTORY.get(
             args.system_prompt_type)
-        # 使用类级别的锁，确保线程安全
+        # Use class-level lock for thread safety
         self._file_lock: threading.Lock = threading.Lock()
 
     def count_completed_samples(self) -> Dict[str, int]:
-        """
-        Count the number of completed samples for each prompt in the output file.
+        """Count the number of completed samples for each prompt in the output file.
 
         Returns:
             A dictionary mapping prompts to their completion counts
@@ -261,8 +338,7 @@ class InferenceRunner:
         return completed_counts
 
     def load_data(self) -> List[Dict[str, Any]]:
-        """
-        Load and prepare the dataset, handling resume functionality.
+        """Load and prepare the dataset, handling resume functionality.
 
         Returns:
             List of data items to process, with resume logic applied
@@ -310,9 +386,19 @@ class InferenceRunner:
 
         return expanded_data
 
-    def process_item(self, item: Dict[str, Any]) -> None:
+    def _write_result(self, result: Dict[str, Any]) -> None:
+        """Write result to output file in a thread-safe manner.
+
+        Args:
+            result: The result dictionary to write
         """
-        Process a single item and write the result to the output file.
+        with self._file_lock:
+            with open(self.args.output_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                f.flush()  # Ensure data is immediately written
+
+    def process_item(self, item: Dict[str, Any]) -> None:
+        """Process a single item and write the result to the output file.
 
         Args:
             item: The data item to process
@@ -339,16 +425,10 @@ class InferenceRunner:
             if response and response.strip():
                 result = copy.deepcopy(item)
                 result.setdefault('gen', []).append(response)
-
-                # 使用类级别的锁确保线程安全
-                with self._file_lock:
-                    with open(self.args.output_file, 'a',
-                              encoding='utf-8') as f:
-                        f.write(json.dumps(result, ensure_ascii=False) + '\n')
-                        f.flush()  # 确保数据立即写入
+                self._write_result(result)
             else:
                 logger.warning(
-                    f'Empty or invalid response for item : {item}, skipping write'
+                    f'Empty or invalid response for item: {item}, skipping write'
                 )
 
         except ClientError as e:
@@ -358,12 +438,12 @@ class InferenceRunner:
             logger.error(f'Unexpected error processing item: {e}')
             # Don't write error entries - just log and continue
 
-    def run(self) -> None:
-        """
-        Run the main inference process using a thread pool.
+    def _validate_arguments(self) -> None:
+        """Validate runner arguments.
 
-        This method orchestrates the entire inference process, including data loading,
-        concurrent processing, and progress tracking.
+        Raises:
+            FileNotFoundError: If input file doesn't exist
+            ValueError: If output file path is not provided
         """
         if not self.args.input_file or not Path(self.args.input_file).exists():
             raise FileNotFoundError(
@@ -371,22 +451,20 @@ class InferenceRunner:
         if not self.args.output_file:
             raise ValueError('Output file path is required')
 
-        expanded_data = self.load_data()
-        total_tasks = len(expanded_data)
-
-        if total_tasks == 0:
-            logger.info(
-                'All samples have already been processed, skipping inference. Exiting.'
-            )
-            return
-
-        logger.info(f'Total remaining samples to process: {total_tasks}')
-
-        # Create output directory if it doesn't exist
+    def _setup_output_directory(self) -> None:
+        """Create output directory if it doesn't exist."""
         output_path = Path(self.args.output_file)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Process items concurrently
+    def _process_concurrently(self, expanded_data: List[Dict[str,
+                                                             Any]]) -> None:
+        """Process items concurrently using thread pool.
+
+        Args:
+            expanded_data: List of data items to process
+        """
+        total_tasks = len(expanded_data)
+
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.args.max_workers) as executor:
             futures = [
@@ -404,6 +482,29 @@ class InferenceRunner:
                         logger.error(
                             f'An unexpected error occurred in a thread: {e}')
                     pbar.update(1)
+
+    def run(self) -> None:
+        """
+        Run the main inference process using a thread pool.
+
+        This method orchestrates the entire inference process, including data loading,
+        concurrent processing, and progress tracking.
+        """
+        self._validate_arguments()
+
+        expanded_data = self.load_data()
+        total_tasks = len(expanded_data)
+
+        if total_tasks == 0:
+            logger.info(
+                'All samples have already been processed, skipping inference. Exiting.'
+            )
+            return
+
+        logger.info(f'Total remaining samples to process: {total_tasks}')
+
+        self._setup_output_directory()
+        self._process_concurrently(expanded_data)
 
         logger.info(f'All {total_tasks} samples have been processed.')
         logger.info(f'Results saved to {self.args.output_file}')
