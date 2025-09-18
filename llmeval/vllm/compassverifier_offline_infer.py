@@ -445,7 +445,6 @@ class CompassVerifierOfflineInferenceRunner:
         result = copy.deepcopy(original_item)
 
         # Safely extract answer from 'gen' field if it exists and is a string
-        result.setdefault(DEFAULT_RESPONSE_KEY, []).append(model_response)
         if not self.args.keep_origin_data:
             result[DEFAULT_INPUT_KEY] = ''
             result[DEFAULT_RESPONSE_KEY] = ''
