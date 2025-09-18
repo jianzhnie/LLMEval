@@ -27,7 +27,8 @@ from transformers import HfArgumentParser
 
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.logger import init_logger
-from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
+from llmeval.utils.template import (SYSTEM_PROMPT_FACTORY,
+                                    is_chat_template_applied)
 
 logger = init_logger('online_vllm_server', logging.INFO)
 
@@ -113,37 +114,6 @@ class InferenceClient:
         wait_time = min(wait_time, max_wait)
         return wait_time
 
-    def _validate_generation_params(self, query: str, model_name: str,
-                                    max_tokens: int, temperature: float,
-                                    top_p: float, top_k: int) -> None:
-        """Validate generation parameters.
-
-        Args:
-            query: User's input query
-            model_name: The model to use for generation
-            max_tokens: Maximum tokens to generate
-            temperature: The sampling temperature
-            top_p: The top-p value for nucleus sampling
-            top_k: The top-k value for sampling
-
-        Raises:
-            ValueError: If any parameter is invalid
-        """
-        if not query or not query.strip():
-            raise ValueError('Query cannot be empty')
-        if not model_name:
-            raise ValueError('Model name cannot be empty')
-        if max_tokens <= 0:
-            raise ValueError(f'Max tokens must be positive, got: {max_tokens}')
-        if not 0.0 <= temperature <= 2.0:
-            raise ValueError(
-                f'Temperature must be between 0.0 and 2.0, got: {temperature}')
-        if not 0.0 <= top_p <= 1.0:
-            raise ValueError(
-                f'Top-p must be between 0.0 and 1.0, got: {top_p}')
-        if top_k <= 0:
-            raise ValueError(f'Top-k must be positive, got: {top_k}')
-
     def _prepare_messages(
             self, query: str,
             system_prompt: Optional[str]) -> List[Dict[str, str]]:
@@ -155,7 +125,20 @@ class InferenceClient:
 
         Returns:
             List of message dictionaries
+
+        Raises:
+            ValueError: If chat template is already applied to the query
         """
+        if is_chat_template_applied(query):
+            logger.warning(
+                'Chat template appears to be already applied to the query. '
+                'Please use the raw prompt, as vLLM will apply the Hugging Face '
+                'chat template automatically.')
+            raise ValueError(
+                'Your query has been applied with chat_template, please use the raw prompt, '
+                'because the vLLM will apply the Hugging Face chat template automatically!'
+            )
+
         messages: List[Dict[str, str]] = []
         if system_prompt:
             messages.append({'role': 'system', 'content': system_prompt})
@@ -193,8 +176,10 @@ class InferenceClient:
             ValueError: If input parameters are invalid
         """
         # Validate input parameters
-        self._validate_generation_params(query, model_name, max_tokens,
-                                         temperature, top_p, top_k)
+        if not query or not query.strip():
+            raise ValueError('Query cannot be empty')
+        if not model_name:
+            raise ValueError('Model name cannot be empty')
 
         # Prepare messages
         messages = self._prepare_messages(query, system_prompt)
@@ -226,7 +211,7 @@ class InferenceClient:
 
             except (APIConnectionError, RateLimitError) as e:
                 if attempt < self.max_retries - 1:
-                    # 根据错误类型确定等待策略
+                    # Determine wait strategy based on error type
                     error_type = 'rate_limit' if isinstance(
                         e, RateLimitError) else 'connection'
                     wait_time = self.calculate_wait_time(attempt, error_type)

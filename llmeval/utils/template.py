@@ -34,3 +34,32 @@ SYSTEM_PROMPT_FACTORY: Dict[str, Optional[str]] = {
     'default': default_system_prompt,
     'empty': None
 }
+
+
+def is_chat_template_applied(query: str) -> bool:
+    """Check if the query has already been processed with a chat template.
+
+    Args:
+        query: The input query string
+
+    Returns:
+        True if chat template appears to be applied, False otherwise
+    """
+    # Common chat template markers that indicate the query is already formatted
+    template_markers = [
+        '<|im_start|>',
+        '<|im_end|>',  # ChatML format
+        '<s>',
+        '</s>',  # Some models use these
+        '[INST]',
+        '[/INST]',  # Llama format
+        '<|user|>',
+        '<|assistant|>',  # Other formats
+        '### Human:',
+        '### Assistant:',  # Alpaca format
+        'Human:',
+        'Assistant:',  # Simple format
+    ]
+
+    # Check if any template markers are present
+    return any(marker in query for marker in template_markers)
