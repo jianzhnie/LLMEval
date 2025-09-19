@@ -20,10 +20,10 @@ Here are some evaluation criteria:
    For multiple-select questions and multi-blank fill-in-the-blank questions, all corresponding options or
    blanks must be answered correctly and match the standard answer exactly to be deemed correct.
 
-5. If the prediction is given with \\boxed{{}}, please ignore the \\boxed{{}} and only judge whether the
+5. If the prediction is given with \\boxed{}, please ignore the \\boxed{} and only judge whether the
    candidate's answer is consistent with the standard answer.
 
-6. If the candidate's answer is invalid (e.g., incomplete (cut off mid-response), lots of unnormal repetitive
+6. If the candidate's answer is invalid (e.g., incomplete (cut off mid-response), lots of abnormal repetitive
    content, or irrelevant to the question, saying it can't answer the question because some irresistible
    factors, like ethical issues, no enough information, etc.), select option C (INVALID).
 
@@ -34,9 +34,6 @@ B: INCORRECT
 C: INVALID
 
 Just return the letters "A", "B", or "C", with no text around it.
-
-Here is your task. Simply reply with either CORRECT, INCORRECT, or INVALID. Don't apologize or correct
-yourself if there was a mistake; we are just trying to grade the answer.
 
 <Original Question Begin>:
 {question}
@@ -53,30 +50,40 @@ yourself if there was a mistake; we are just trying to grade the answer.
 Judging the correctness of the candidate's answer:
 """
 
-CompassVerifier_PROMPT_ZH = """
-请作为评分专家，判断下面候选人的最终答案是否与标准答案一致，即候选人是否回答正确。
+CompassVerifier_PROMPT_ZH = """请作为评分专家，判断下面候选人的最终答案是否与标准答案一致，即候选人是否回答正确。
+
 以下是一些评估标准：
 1. 请参考给定的标准答案。您不需要重新生成问题的答案，因为标准答案已经给出。您只需要根据问题的形式判断候选人的答案是否与标准答案一致。标准答案总是正确的，问题是完全有效的。永远不要质疑它们。
+
 2. 只比较最终答案 - 完全忽略推理过程中的任何潜在错误。
+
 3. 一些答案可能以不同的方式表达，比如一些答案可能是数学表达式，一些答案可能是文本描述，只要表达的含义相同即可。在做出判断之前，请先理解问题和标准答案，然后判断候选人的答案是否正确。
+
 4. 一些答案可能包含多个项目，如多选题、多选问题、填空题等。无论问题类型如何，只要最终答案与标准答案匹配，就认为答案正确，无论推理过程是否正确。对于多选题和多空填空题，所有对应的选项或空白都必须正确回答并与标准答案完全匹配才能被视为正确。
-5. 如果预测结果用\\boxed{{}}给出，请忽略\\boxed{{}}，只判断候选人的答案是否与标准答案一致。
+
+5. 如果预测结果用\\boxed{}给出，请忽略\\boxed{}，只判断候选人的答案是否与标准答案一致。
+
 6. 如果候选人的答案无效（例如，不完整（在回答中途被截断）、大量不正常的重复内容，或与问题无关，说由于一些不可抗拒的因素无法回答问题，如伦理问题、信息不足等），选择选项C（无效）。
+
 请根据上述标准判断以下答案是否与标准答案一致。将此新问题的预测答案评为以下之一：
 A: 正确
 B: 不正确
 C: 无效
+
 只返回字母"A"、"B"或"C"，周围不要有任何文字。
-这是您的任务。只需回复正确、不正确或无效。如果出现错误，不要道歉或纠正自己；我们只是在尝试评分。
+
 <原始问题开始>：
 {question}
 <原始问题结束>
+
 <标准答案开始>：
 {gold_answer}
 <标准答案结束>
+
 <候选人答案开始>：
 {llm_response}
 <候选人答案结束>
+
 判断候选人答案的正确性：
 """
 
@@ -112,19 +119,19 @@ Evaluation Protocol:
      * Repetitive (repetition of words or phrases in a loop) → Label as REPETITIVE
      * Explicit refusals (e.g., directly return "I cannot answer/provide/access ...") →
        Label as REFUSAL
-   - For invalid answers, specify the type in the judgment (e.g., \\boxed{{C}} - INCOMPLETE).
+   - For invalid answers, specify the type in the judgment (e.g., \\boxed{C} - INCOMPLETE).
 
 Grading Scale:
-\\boxed{{A}} - CORRECT:
+\\boxed{A} - CORRECT:
    - Answer matches standard exactly (including equivalent expressions)
    - For numerical answers: consider as equivalent if values match when rounded appropriately
    - Semantically equivalent responses
 
-\\boxed{{B}} - INCORRECT:
+\\boxed{B} - INCORRECT:
    - Any deviation from standard answer
    - Partial matches for multi-part questions
 
-\\boxed{{C}} - INCOMPLETE/REPETITIVE/REFUSAL:
+\\boxed{C} - INCOMPLETE/REPETITIVE/REFUSAL:
    - Fails validity criteria above (must specify: INCOMPLETE/REPETITIVE/REFUSAL)
 
 Execution Steps and Output Formats:
@@ -132,7 +139,7 @@ Execution Steps and Output Formats:
 Analysis step by step: [
 Thoroughly evaluate the candidate's answer including:
 (1) First check if the answer is INCOMPLETE (cut off mid-sentence), REPETITIVE (looping repetition),
-    or a REFUSAL (explicit denial) - if so, immediately classify as \\boxed{{C}} with the
+    or a REFUSAL (explicit denial) - if so, immediately classify as \\boxed{C} with the
     corresponding type.
 (2) Analyze the question's core requirements and the standard answer's structure, for example:
 - Strict requirements: Identify mandatory constraints (e.g., simplification, answer order,
@@ -145,7 +152,7 @@ Thoroughly evaluate the candidate's answer including:
 - Content equivalence
 - Permitted variations in numerical precision
 - Allowed expression formats]
-Final Judgment: \\boxed{{A/B/C}} - <CORRECT/INCORRECT/INCOMPLETE/REPETITIVE/REFUSAL>
+Final Judgment: \\boxed{A/B/C} - <CORRECT/INCORRECT/INCOMPLETE/REPETITIVE/REFUSAL>
 
 Here is your task.
 <Original Question Begin>
@@ -190,26 +197,26 @@ CompassVerifier_COT_PROMPT_ZH = """作为评分专家，您的任务是确定候
      * 不完整（在最终句子中中途截断，缺乏完整回答）→ 标记为不完整
      * 重复（单词或短语循环重复）→ 标记为重复
      * 明确拒绝（例如，直接返回"我无法回答/提供/访问..."）→ 标记为拒绝
-   - 对于无效答案，在判断中指定类型（例如，\\boxed{{C}} - 不完整）。
+   - 对于无效答案，在判断中指定类型（例如，\\boxed{C} - 不完整）。
 
 评分标准：
-\\boxed{{A}} - 正确：
+\\boxed{A} - 正确：
    - 答案与标准完全匹配（包括等价表达式）
    - 对于数值答案：如果值在适当舍入时匹配，则视为等价
    - 语义等价的回答
 
-\\boxed{{B}} - 不正确：
+\\boxed{B} - 不正确：
    - 与标准答案的任何偏差
    - 多部分问题的部分匹配
 
-\\boxed{{C}} - 不完整/重复/拒绝：
+\\boxed{C} - 不完整/重复/拒绝：
    - 不符合上述有效性标准（必须指定：不完整/重复/拒绝）
 
 执行步骤和输出格式：
 
 逐步分析：[
 彻底评估候选人的答案，包括：
-(1) 首先检查答案是否不完整（中途截断）、重复（循环重复）或拒绝（明确否认）- 如果是，立即分类为\\boxed{{C}}并指定相应类型。
+(1) 首先检查答案是否不完整（中途截断）、重复（循环重复）或拒绝（明确否认）- 如果是，立即分类为\\boxed{C}并指定相应类型。
 (2) 分析问题的核心要求和标准答案的结构，例如：
 - 严格要求：识别强制性约束（例如，简化、答案顺序、多部分完整性）
 - 宽容允许：忽略非关键偏差（例如，选择题中缺少选项标签、等价但未格式化的表达式）
@@ -218,7 +225,7 @@ CompassVerifier_COT_PROMPT_ZH = """作为评分专家，您的任务是确定候
 - 内容等价性
 - 数值精度的允许变化
 - 允许的表达式格式]
-最终判断：\\boxed{{A/B/C}} - <正确/不正确/不完整/重复/拒绝>
+最终判断：\\boxed{A/B/C} - <正确/不正确/不完整/重复/拒绝>
 
 这是您的任务。
 <原始问题开始>
@@ -358,9 +365,9 @@ Don't apologize or correct yourself if there was a mistake; we are just trying t
 
 Please clean the problem description and place the cleaned description within
 <Cleaned Problem Begin>...<Cleaned Problem End>, do not try to modify the question.
-Then, simply return one of A, B, C or D as required and put it in the \\boxed{{}} without any
+Then, simply return one of A, B, C or D as required and put it in the \\boxed{} without any
 explanation or description. Remember do not try to solve the question. Just clean the problem
-and return one specific option within the \\boxed{{}}.
+and return one specific option within the \\boxed{}.
 """
 
 FDD_PROMPT_ZH = """作为问题设置专家，给定一个数学问题、标准答案和候选人答案，您需要完成以下任务：
@@ -410,17 +417,17 @@ D: 不合理 - 问题有缺失信息、逻辑混乱或矛盾
 <候选人答案结束>
 
 请清理问题描述并将清理后的描述放在<清理后问题开始>...<清理后问题结束>内，不要尝试修改问题。
-然后，根据需要简单地返回A、B、C或D之一，并将其放在\\boxed{{}}中，不要任何解释或描述。
-记住不要尝试解决问题。只需清理问题并在\\boxed{{}}内返回一个特定选项。
+然后，根据需要简单地返回A、B、C或D之一，并将其放在\\boxed{}中，不要任何解释或描述。
+记住不要尝试解决问题。只需清理问题并在\\boxed{}内返回一个特定选项。
 """
 
 FDD_Verify_PROMPT = """As a math scoring expert, given a standard answer and a candidate answer, you need to
 compare whether the standard answer and the candidate answer are consistent. If they are consistent,
-return 1; if not, return 0. Remember the returned value should always be put in the \\boxed{{}}.
+return 1; if not, return 0. Remember the returned value should always be put in the \\boxed{}.
 
 Here are the evaluation criteria:
-1. For the candidate answer, only consider the content inside \\boxed{{}}, ignoring any other text or
-   error. If no \\boxed{{}} found, return 0 directly.
+1. For the candidate answer, only consider the content inside \\boxed{}, ignoring any other text or
+   error. If no \\boxed{} found, return 0 directly.
 
 2. If the standard answer and the candidate answer are different but mathematically equivalent,
    return 1.
@@ -445,15 +452,15 @@ Don't apologize or correct yourself if there was a mistake; we are just trying t
 {llm_response}
 <Candidate Answer End>
 
-Please put your return value (0 or 1) as required above in the \\boxed{{}} without any explanation
+Please put your return value (0 or 1) as required above in the \\boxed{} without any explanation
 or description.
 """
 
 FDD_Verify_PROMPT_ZH = """作为数学评分专家，给定标准答案和候选人答案，您需要比较标准答案和候选人答案是否一致。
-如果一致，返回1；如果不一致，返回0。记住返回值应始终放在\\boxed{{}}中。
+如果一致，返回1；如果不一致，返回0。记住返回值应始终放在\\boxed{}中。
 
 以下是评估标准：
-1. 对于候选人答案，只考虑\\boxed{{}}内的内容，忽略任何其他文本或错误。如果没有找到\\boxed{{}}，直接返回0。
+1. 对于候选人答案，只考虑\\boxed{}内的内容，忽略任何其他文本或错误。如果没有找到\\boxed{}，直接返回0。
 
 2. 如果标准答案和候选人答案不同但在数学上等价，返回1。
 
@@ -475,7 +482,7 @@ FDD_Verify_PROMPT_ZH = """作为数学评分专家，给定标准答案和候选
 {llm_response}
 <候选人答案结束>
 
-请将您的返回值（0或1）按要求放在\\boxed{{}}中，不要任何解释或描述。
+请将您的返回值（0或1）按要求放在\\boxed{}中，不要任何解释或描述。
 """
 
 PROMPT_FACTORY = {
