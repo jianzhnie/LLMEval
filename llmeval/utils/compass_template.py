@@ -236,6 +236,70 @@ CompassVerifier_COT_PROMPT_ZH = """作为评分专家，您的任务是确定候
 逐步分析和最终判断：
 """
 
+FDD_PROMPT_CURSOR = """You are a mathematical problem evaluation expert. Given a math problem, standard answer, and candidate answer,
+perform the following tasks with precision and consistency.
+
+## CORE TASKS
+1. **Problem Cleaning**: Remove unnecessary text, formatting artifacts, or embedded answers while preserving
+   the mathematical essence and solvability of the problem.
+
+2. **Problem Validation**: Assess problem quality for:
+   - Completeness (sufficient information provided)
+   - Logical consistency (no contradictions)
+   - Solvability (mathematically tractable)
+   - Single focus (one clear question, not multiple subproblems)
+
+3. **Answer Comparison**: Evaluate candidate answer against standard answer using flexible mathematical
+   equivalence criteria.
+
+## EVALUATION CRITERIA
+
+### Problem Quality Assessment:
+- **D (UNREASONABLE)**: Missing critical information, logical contradictions, or unsolvable problems
+- **C (MULTIPLE_SUBPROBLEMS)**: Contains multiple distinct questions or subproblems requiring separate solutions
+
+### Answer Comparison Logic:
+- **A (CORRECT)**: Mathematically equivalent to standard answer, considering:
+  * Different but equivalent expressions (e.g., 1/2 vs 0.5)
+  * Missing units when standard includes them
+  * Option content matching option labels
+  * Minor decimal precision differences (last 1-2 digits)
+  * Different but equivalent forms (factored vs expanded)
+
+- **B (INCORRECT)**: Substantially different from standard answer
+
+### Answer Extraction:
+- Focus exclusively on content within \\boxed{} tags
+- Ignore formatting, explanations, or work shown outside the box
+
+## OUTPUT FORMAT
+1. Clean the problem and place result between:
+   <Cleaned Problem Begin>
+   [cleaned problem text]
+   <Cleaned Problem End>
+
+2. Provide evaluation result in \\boxed{[A|B|C|D]} with no additional explanation
+
+## IMPORTANT CONSTRAINTS
+- Do NOT attempt to solve the mathematical problem
+- Do NOT provide explanations for your evaluation
+- Do NOT apologize for or correct previous responses
+- Maintain consistency in evaluation standards
+
+<Original Question Begin>:
+{question}
+<Original Question End>
+
+<Standard Answer Begin>:
+{gold_answer}
+<Standard Answer End>
+
+<Candidate's Answer Begin>:
+{llm_response}
+<Candidate's Answer End>
+
+Execute the evaluation following the specified format and constraints."""
+
 FDD_PROMPT = """As a question-setting expert, given a math problem, a standard answer, and a candidate answer,
 you need to accomplish the following tasks:
 
@@ -413,3 +477,14 @@ FDD_Verify_PROMPT_ZH = """作为数学评分专家，给定标准答案和候选
 
 请将您的返回值（0或1）按要求放在\\boxed{{}}中，不要任何解释或描述。
 """
+
+PROMPT_FACTORY = {
+    'compassverify_prompt': CompassVerifier_PROMPT,
+    'compassverify_prompt_zh': CompassVerifier_PROMPT_ZH,
+    'compassverify_cot_prompt': CompassVerifier_COT_PROMPT,
+    'compassverify_cot_prompt_zh': CompassVerifier_COT_PROMPT_ZH,
+    'fdd_prompt_cursor': FDD_PROMPT_CURSOR,
+    'fdd_prompt': FDD_PROMPT,
+    'fdd_verify_prompt': FDD_Verify_PROMPT,
+    'fdd_verify_prompt_zh': FDD_Verify_PROMPT_ZH
+}
