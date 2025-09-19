@@ -16,7 +16,7 @@ import sys
 import threading
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from tqdm import tqdm
 from transformers import AutoTokenizer, HfArgumentParser
@@ -31,13 +31,14 @@ from llmeval.utils.verifier_template import VERIFY_PROMPT_FACTORY
 logger = init_logger('compass_verifier_infer', logging.INFO)
 
 # Constants
-VALID_JUDGMENTS: frozenset[str] = frozenset({'A', 'B', 'C'})
+VALID_JUDGMENTS: FrozenSet[str] = frozenset({'A', 'B', 'C', 'D'})
 DEFAULT_INPUT_KEY: str = 'prompt'
 DEFAULT_LABEL_KEY: str = 'answer'
 DEFAULT_RESPONSE_KEY: str = 'gen'
 
 
 def _last_n_strs(text: str, n: int) -> str:
+    """Return the last n whitespace-separated tokens as a string."""
     tokens = text.split()
     return ' '.join(tokens[-n:]) if tokens else ''
 
@@ -47,19 +48,20 @@ def extract_answer(response_string: str, fallback_tokens: int = 200) -> str:
     Extract content from <answer> tags in model response.
 
     This function searches for <answer> tags in the response string and extracts
-    the content within them. If no tags are found, returns the original string.
+    the content within them. If no tags are found, it attempts sensible fallbacks.
 
     Args:
         response_string: Complete string containing <answer> tags.
+        fallback_tokens: Number of trailing tokens to return as a last fallback.
 
     Returns:
-        Extracted content from <answer> tags, or original string if no tags found.
+        Extracted content from <answer> tags, or a fallback string if no tags found.
 
     Example:
         >>> extract_answer("Some text <answer>42</answer> more text")
         "42"
         >>> extract_answer("No tags here")
-        "No tags here"
+        "<last 200 tokens of the string, if any>"
     """
     if not response_string or not isinstance(response_string, str):
         return ''
@@ -85,7 +87,7 @@ def extract_answer(response_string: str, fallback_tokens: int = 200) -> str:
 
     # Fallback 2: last N tokens
     last_n_str = _last_n_strs(response_string, fallback_tokens).strip()
-    return last_n_str if last_n_str else None
+    return last_n_str if last_n_str else ''
 
 
 def process_judgment(judgment_str: str) -> str:
@@ -93,13 +95,13 @@ def process_judgment(judgment_str: str) -> str:
     Extract and clean judgment from model response.
 
     This function processes the raw model output to extract a clean judgment
-    (A, B, or C) using multiple extraction strategies in order of preference.
+    (A, B, C, or D) using multiple extraction strategies in order of preference.
 
     Args:
         judgment_str: Raw judgment string from the model.
 
     Returns:
-        Clean judgment string (A, B, or C) or empty string if no valid judgment found.
+        Clean judgment string ('A' | 'B' | 'C' | 'D') or '' if no valid judgment found.
 
     Examples:
         >>> process_judgment("\\boxed{A}")
@@ -116,8 +118,8 @@ def process_judgment(judgment_str: str) -> str:
 
     judgment_str = judgment_str.strip()
 
-    # Strategy 1: Look for \boxed{letter} pattern
-    boxed_pattern: re.Pattern[str] = re.compile(r'\\boxed\{([A-C])\}')
+    # Strategy 1: Look for \boxed{letter} pattern, prefer the last
+    boxed_pattern: re.Pattern[str] = re.compile(r'\\boxed\{([A-D])\}')
     boxed_matches = boxed_pattern.findall(judgment_str)
     if boxed_matches:
         return boxed_matches[-1]
@@ -130,23 +132,82 @@ def process_judgment(judgment_str: str) -> str:
     if 'Final Judgment:' in judgment_str:
         final_section = judgment_str.split('Final Judgment:')[-1]
 
-        # Look for (A), (B), (C) pattern
-        paren_pattern: re.Pattern[str] = re.compile(r'\(([A-C])\)')
+        # Look for (A), (B), (C), (D) pattern
+        paren_pattern: re.Pattern[str] = re.compile(r'\(([A-D])\)')
         paren_matches = paren_pattern.findall(final_section)
         if paren_matches:
             return paren_matches[-1]
 
-        # Look for any A, B, or C in the final section
-        letter_pattern: re.Pattern[str] = re.compile(r'([A-C])')
+        # Look for any A-D in the final section
+        letter_pattern: re.Pattern[str] = re.compile(r'([A-D])')
         letter_matches = letter_pattern.findall(final_section)
         if letter_matches:
             return letter_matches[-1]
 
-    # Strategy 4: Look for any A, B, or C in the entire string
-    letter_pattern: re.Pattern[str] = re.compile(r'([A-C])')
-    all_matches = letter_pattern(judgment_str)
+    # Strategy 4: Look for any A-D in the entire string
+    letter_pattern: re.Pattern[str] = re.compile(r'([A-D])')
+    all_matches = letter_pattern.findall(judgment_str)
     if all_matches:
         return all_matches[-1]
+
+    return ''
+
+
+def process_judgment_cursor(judgment_str: str) -> str:
+    """
+    Extract and normalize the final judgment from model output.
+
+    According to the Verifier prompt, the model must output its decision in:
+        \\boxed{[A|B|C|D]}
+    with no extra explanation. We therefore:
+    1) Prefer the last occurrence of content inside \\boxed{...}.
+    2) From that content, extract the last A-D letter (case-insensitive).
+    3) Fallbacks (if no \\boxed{} is present):
+       - Look for (A), (B), (C), (D)
+       - Look for any standalone A-D character
+    Returns uppercase 'A' | 'B' | 'C' | 'D' or '' if nothing valid is found.
+
+    Examples:
+        >>> process_judgment("\\boxed{A}")
+        'A'
+        >>> process_judgment("some text \\boxed{  c }")
+        'C'
+        >>> process_judgment("Final: (D)")
+        'D'
+        >>> process_judgment("noise only")
+        ''
+    """
+    if not isinstance(judgment_str, str) or not judgment_str:
+        return ''
+
+    s = judgment_str.strip()
+
+    # Primary: extract the last boxed content, then find a valid letter within it.
+    boxed_content_pattern: re.Pattern[str] = re.compile(
+        r'\\boxed\s*\{([^}]*)\}', re.DOTALL | re.IGNORECASE)
+    boxed_contents = boxed_content_pattern.findall(s)
+    if boxed_contents:
+        last_box = boxed_contents[-1]
+        # From the boxed content, pick the last A-D letter (case-insensitive)
+        letter_in_box_pattern: re.Pattern[str] = re.compile(
+            r'([A-D])', re.IGNORECASE)
+        candidates = letter_in_box_pattern.findall(last_box)
+        if candidates:
+            return candidates[-1].upper()
+
+    # Fallback 1: explicit parenthesized letter like (A), (b), etc.
+    paren_pattern: re.Pattern[str] = re.compile(r'\(([A-D])\)', re.IGNORECASE)
+    paren_matches = paren_pattern.findall(s)
+    if paren_matches:
+        return paren_matches[-1].upper()
+
+    # Fallback 2: any standalone A-D letter (avoid letters embedded in words).
+    # This is more permissive but helps salvage partially formatted outputs.
+    standalone_letter_pattern: re.Pattern[str] = re.compile(
+        r'(?<![A-Za-z])([A-D])(?![A-Za-z])', re.IGNORECASE)
+    all_matches = standalone_letter_pattern.findall(s)
+    if all_matches:
+        return all_matches[-1].upper()
 
     return ''
 
@@ -164,6 +225,7 @@ class VerifierOfflineInferenceRunner:
         llm: vLLM engine instance for model inference.
         tokenizer: HuggingFace tokenizer instance for text processing.
         sampling_params: Sampling parameters for generation control.
+        verifier_prompt: String template used to format verifier prompts.
     """
 
     def __init__(self, args: VerifierInferArguments) -> None:
@@ -182,7 +244,7 @@ class VerifierOfflineInferenceRunner:
         self.tokenizer: Optional[AutoTokenizer] = None
         self.sampling_params: Optional[SamplingParams] = None
         self.verifier_prompt: Optional[str] = VERIFY_PROMPT_FACTORY.get(
-            self.verifier_prompt_type)
+            args.verifier_prompt_type)
 
     def setup_vllm_engine(self) -> Tuple[LLM, AutoTokenizer, SamplingParams]:
         """
@@ -281,6 +343,14 @@ class VerifierOfflineInferenceRunner:
 
         return hf_overrides
 
+    def _effective_keys(self) -> Tuple[str, str, str]:
+        """Resolve the effective input/label/response keys with fallbacks."""
+        input_key = getattr(self.args, 'input_key', None) or DEFAULT_INPUT_KEY
+        label_key = getattr(self.args, 'label_key', None) or DEFAULT_LABEL_KEY
+        response_key = getattr(self.args, 'response_key',
+                               None) or DEFAULT_RESPONSE_KEY
+        return input_key, label_key, response_key
+
     def convert_to_compass_verifier_format(
             self, item: Dict[str, Any]) -> Optional[str]:
         """
@@ -300,10 +370,7 @@ class VerifierOfflineInferenceRunner:
             ValueError: If required fields are empty or invalid.
         """
         # Determine field keys with fallbacks
-        input_key = getattr(self.args, 'input_key', None) or DEFAULT_INPUT_KEY
-        label_key = getattr(self.args, 'label_key', None) or DEFAULT_LABEL_KEY
-        response_key = getattr(self.args, 'response_key',
-                               None) or DEFAULT_RESPONSE_KEY
+        input_key, label_key, response_key = self._effective_keys()
 
         # Check for required keys
         required_keys = [input_key, label_key, response_key]
@@ -316,7 +383,6 @@ class VerifierOfflineInferenceRunner:
             return None
 
         # Extract required fields
-
         prompt = item.get(input_key)
         ground_truth = item.get(label_key)
         llm_response_raw = item.get(response_key)
@@ -336,6 +402,11 @@ class VerifierOfflineInferenceRunner:
 
         # Extract answer from response if it contains <answer> tags
         llm_response = extract_answer(llm_response)
+
+        # Ensure we have a verifier prompt template
+        if not self.verifier_prompt:
+            logger.error('Verifier prompt template is not configured.')
+            return None
 
         # Format the prompt using Verifier template
         try:
@@ -362,6 +433,9 @@ class VerifierOfflineInferenceRunner:
             return llm_response_raw[0]
         elif isinstance(llm_response_raw, str):
             return llm_response_raw
+        elif llm_response_raw is None:
+            logger.warning('Invalid response format: None')
+            return None
         else:
             logger.warning(
                 f'Invalid response format: {type(llm_response_raw)}')
@@ -445,14 +519,32 @@ class VerifierOfflineInferenceRunner:
             Processed result item ready for JSON serialization.
         """
         result = copy.deepcopy(original_item)
+        result['Verifier_response'] = model_response
 
-        # Safely extract answer from 'gen' field if it exists and is a string
+        # Optionally strip original large fields to reduce output size
         if not self.args.keep_origin_data:
-            result[DEFAULT_INPUT_KEY] = ''
-            result[DEFAULT_RESPONSE_KEY] = ''
+            input_key, _, response_key = self._effective_keys()
+            # Clear only the original input/response fields from the source data, not Verifier fields
+            if input_key in result:
+                result[input_key] = ''
+            if response_key in result:
+                result[response_key] = ''
+            result['Verifier_response'] = ''
 
         # Add judgment
-        result['Verifier_judgment'] = process_judgment(model_response)
+        if self.args.verifier_prompt_type in [
+                'fdd_prompt_cursor', 'fdd_prompt'
+        ]:
+            result['Verifier_judgment'] = process_judgment_cursor(
+                model_response)
+        elif self.args.verifier_prompt_type in [
+                'compassverify_prompt', 'compassverify_cot_prompt'
+        ]:
+            result['Verifier_judgment'] = process_judgment(model_response)
+        else:
+            raise NotImplementedError(
+                f'Unknown verifier_prompt_type: {self.args.verifier_prompt_type}'
+            )
 
         return result
 
@@ -482,9 +574,12 @@ class VerifierOfflineInferenceRunner:
                         item = json.loads(line.strip())
                         prompt_key = item.get(
                             self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
-                        gen_count = len(item.get(DEFAULT_RESPONSE_KEY, []))
-                        if prompt_key is not None and 'judgment' in item:
-                            completed_counts[str(prompt_key)] += gen_count
+
+                        # Each written line represents a single completed judgment.
+                        # Only count entries that contain a non-empty 'Verifier_judgment'.
+                        if prompt_key is not None and item.get(
+                                'Verifier_judgment'):
+                            completed_counts[str(prompt_key)] += 1
                     except json.JSONDecodeError as e:
                         logger.warning(f'Invalid JSON on line {line_num}: {e}')
                         continue
@@ -616,8 +711,13 @@ class VerifierOfflineInferenceRunner:
             logger.warning('Empty batch data provided')
             return
 
+        if self.llm is None or self.tokenizer is None or self.sampling_params is None:
+            raise RuntimeError(
+                'Engine is not initialized. Call setup_vllm_engine() before processing.'
+            )
+
         original_items = copy.deepcopy(batch_data)
-        batch_prompts: List[str] = []
+        batch_prompts: List[Optional[str]] = []
 
         # Convert data format and filter invalid items
         for item in batch_data:
@@ -664,13 +764,14 @@ class VerifierOfflineInferenceRunner:
             raise RuntimeError(f'Batch processing failed: {e}') from e
 
     def _filter_valid_prompts(
-        self, batch_prompts: List[str], original_items: List[Dict[str, Any]]
+        self, batch_prompts: Iterable[Optional[str]],
+        original_items: List[Dict[str, Any]]
     ) -> Tuple[List[str], List[Dict[str, Any]]]:
         """
         Filter out empty prompts and corresponding original items.
 
         Args:
-            batch_prompts: List of prompt strings.
+            batch_prompts: Iterable of prompt strings (some may be None/empty).
             original_items: List of original data items.
 
         Returns:
