@@ -1,8 +1,8 @@
 """
-CompassVerifier Offline Inference Module
+Verifier Offline Inference Module
 
 This module provides functionality for running offline inference using vLLM engine
-for the CompassVerifier evaluation system. It supports batch processing, resume
+for the Verifier evaluation system. It supports batch processing, resume
 functionality, and robust error handling.
 """
 
@@ -23,9 +23,9 @@ from transformers import AutoTokenizer, HfArgumentParser
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
-from llmeval.utils.compass_template import CompassVerifier_PROMPT
-from llmeval.utils.config import CompassVerifierInferArguments
+from llmeval.utils.config import VerifierInferArguments
 from llmeval.utils.logger import init_logger
+from llmeval.utils.verifier_template import VERIFY_PROMPT_FACTORY
 
 # Initialize logger
 logger = init_logger('compass_verifier_infer', logging.INFO)
@@ -151,11 +151,11 @@ def process_judgment(judgment_str: str) -> str:
     return ''
 
 
-class CompassVerifierOfflineInferenceRunner:
+class VerifierOfflineInferenceRunner:
     """
-    Main class for handling offline inference with vLLM engine for CompassVerifier.
+    Main class for handling offline inference with vLLM engine for Verifier.
 
-    This class provides a comprehensive solution for running CompassVerifier inference
+    This class provides a comprehensive solution for running Verifier inference
     with support for batch processing, resume functionality, and robust error handling.
 
     Attributes:
@@ -166,9 +166,9 @@ class CompassVerifierOfflineInferenceRunner:
         sampling_params: Sampling parameters for generation control.
     """
 
-    def __init__(self, args: CompassVerifierInferArguments) -> None:
+    def __init__(self, args: VerifierInferArguments) -> None:
         """
-        Initialize the CompassVerifier inference runner.
+        Initialize the Verifier inference runner.
 
         Args:
             args: Configuration arguments containing model settings, file paths, etc.
@@ -176,11 +176,13 @@ class CompassVerifierOfflineInferenceRunner:
         Raises:
             ValueError: If required arguments are invalid.
         """
-        self.args: CompassVerifierInferArguments = args
+        self.args: VerifierInferArguments = args
         self._file_lock: threading.Lock = threading.Lock()
         self.llm: Optional[LLM] = None
         self.tokenizer: Optional[AutoTokenizer] = None
         self.sampling_params: Optional[SamplingParams] = None
+        self.verifier_prompt: Optional[str] = VERIFY_PROMPT_FACTORY.get(
+            self.verifier_prompt_type)
 
     def setup_vllm_engine(self) -> Tuple[LLM, AutoTokenizer, SamplingParams]:
         """
@@ -200,7 +202,7 @@ class CompassVerifierOfflineInferenceRunner:
             ImportError: If required dependencies are missing.
         """
         logger.info('=' * 60)
-        logger.info('🚀 Initializing CompassVerifier vLLM Engine')
+        logger.info('🚀 Initializing Verifier vLLM Engine')
         logger.info(f'Model: {self.args.model_name_or_path}')
         logger.info(f'Max Model Length: {self.args.max_model_len}')
         logger.info(f'Max tokens: {self.args.max_tokens}')
@@ -258,7 +260,7 @@ class CompassVerifierOfflineInferenceRunner:
             repetition_penalty=self.args.repetition_penalty,
         )
 
-        logger.info('✅ CompassVerifier vLLM engine initialization completed')
+        logger.info('✅ Verifier vLLM engine initialization completed')
         return llm, tokenizer, sampling_params
 
     def _prepare_hf_overrides(self) -> Dict[str, Any]:
@@ -282,16 +284,16 @@ class CompassVerifierOfflineInferenceRunner:
     def convert_to_compass_verifier_format(
             self, item: Dict[str, Any]) -> Optional[str]:
         """
-        Convert input data item to CompassVerifier prompt format.
+        Convert input data item to Verifier prompt format.
 
         This method extracts the required fields from the input data and formats
-        them according to the CompassVerifier template.
+        them according to the Verifier template.
 
         Args:
             item: Input data item containing question, gold_answer, and llm_response.
 
         Returns:
-            Formatted prompt string for CompassVerifier or None if conversion fails.
+            Formatted prompt string for Verifier or None if conversion fails.
 
         Raises:
             KeyError: If required keys are missing from the input item.
@@ -335,15 +337,15 @@ class CompassVerifierOfflineInferenceRunner:
         # Extract answer from response if it contains <answer> tags
         llm_response = extract_answer(llm_response)
 
-        # Format the prompt using CompassVerifier template
+        # Format the prompt using Verifier template
         try:
-            formatted_prompt = CompassVerifier_PROMPT.format(
+            formatted_prompt = self.verifier_prompt.format(
                 question=prompt,
                 gold_answer=ground_truth,
                 llm_response=llm_response)
             return formatted_prompt
         except Exception as e:
-            logger.error(f'Error formatting CompassVerifier prompt: {e}')
+            logger.error(f'Error formatting Verifier prompt: {e}')
             return None
 
     def _extract_llm_response(self, llm_response_raw: Any) -> Optional[str]:
@@ -450,7 +452,7 @@ class CompassVerifierOfflineInferenceRunner:
             result[DEFAULT_RESPONSE_KEY] = ''
 
         # Add judgment
-        result['compassverifier_judgment'] = process_judgment(model_response)
+        result['Verifier_judgment'] = process_judgment(model_response)
 
         return result
 
@@ -623,8 +625,7 @@ class CompassVerifierOfflineInferenceRunner:
             if prompt is not None:
                 batch_prompts.append(prompt)
             else:
-                logger.warning(
-                    'Failed to convert item to CompassVerifier format')
+                logger.warning('Failed to convert item to Verifier format')
                 batch_prompts.append('')
 
         # Filter out empty prompts and corresponding original items
@@ -754,9 +755,9 @@ class CompassVerifierOfflineInferenceRunner:
                 pbar.update(1)
 
 
-def main(args: CompassVerifierInferArguments) -> None:
+def main(args: VerifierInferArguments) -> None:
     """
-    Main function to run the CompassVerifier vLLM inference process.
+    Main function to run the Verifier vLLM inference process.
 
     Args:
         args: Configuration arguments for the inference process.
@@ -765,7 +766,7 @@ def main(args: CompassVerifierInferArguments) -> None:
         RuntimeError: If inference process fails.
     """
     try:
-        runner = CompassVerifierOfflineInferenceRunner(args)
+        runner = VerifierOfflineInferenceRunner(args)
         runner.run()
     except Exception as e:
         logger.critical(f'❌ Inference process failed: {e}')
@@ -773,15 +774,15 @@ def main(args: CompassVerifierInferArguments) -> None:
 
 
 if __name__ == '__main__':
-    """Command-line interface for CompassVerifier offline inference."""
+    """Command-line interface for Verifier offline inference."""
     try:
         # Parse command line arguments
-        parser = HfArgumentParser(CompassVerifierInferArguments)
+        parser = HfArgumentParser(VerifierInferArguments)
         eval_args, = parser.parse_args_into_dataclasses()
 
         # Log configuration
         logger.info(
-            'Initializing CompassVerifier CompassVerifierInferArguments with parsed command line arguments...'
+            'Initializing Verifier VerifierInferArguments with parsed command line arguments...'
         )
         logger.info('\n--- Parsed Arguments ---')
         logger.info(json.dumps(asdict(eval_args), indent=2, default=str))

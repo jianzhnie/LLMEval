@@ -485,7 +485,7 @@ FDD_Verify_PROMPT_ZH = """作为数学评分专家，给定标准答案和候选
 请将您的返回值（0或1）按要求放在\\boxed{}中，不要任何解释或描述。
 """
 
-PROMPT_FACTORY = {
+VERIFY_PROMPT_FACTORY = {
     'compassverify_prompt': CompassVerifier_PROMPT,
     'compassverify_prompt_zh': CompassVerifier_PROMPT_ZH,
     'compassverify_cot_prompt': CompassVerifier_COT_PROMPT,
