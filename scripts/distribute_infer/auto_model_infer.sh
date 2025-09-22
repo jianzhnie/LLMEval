@@ -31,8 +31,7 @@ readonly SSH_OPTS="-o StrictHostKeyChecking=no \
                    -o ConnectTimeout=5 \
                    -o ServerAliveInterval=30 \
                    -o ServerAliveCountMax=3 \
-                   -o ControlMaster=auto \
-                   -o ControlPersist=60s"
+                   -o ControlMaster"
 
 # SSH 用户配置（可通过环境变量覆盖）
 readonly SSH_USER="${SSH_USER:-$(whoami)}"
@@ -268,10 +267,14 @@ check_node_port_alignment() {
 check_remote_port_free() {
     local node="$1"
     local port="$2"
-    # 若端口被占用则尝试干预杀进程
     local used
-    used=$(ssh_run "$node" "ss -ltn '( sport = :$port )' | tail -n +2 | wc -l" 2>/dev/null || echo 0)
-
+    used=$(ssh_run "$node" "ss -ltn '( sport = :$port )' 2>/dev/null | tail -n +2 | wc -l" 2>/dev/null || echo 0)
+    if [[ "${used:-0}" -eq 0 ]]; then
+        used=$(ssh_run "$node" "netstat -ltn 2>/dev/null | awk '{print \$4}' | grep -E '[:.]${port}\$' | wc -l" 2>/dev/null || echo 0)
+    fi
+    if [[ "${used:-0}" -eq 0 ]]; then
+        used=$(ssh_run "$node" "lsof -iTCP:${port} -sTCP:LISTEN -nP 2>/dev/null | wc -l" 2>/dev/null || echo 0)
+    fi
     if [[ "${used:-0}" -gt 0 ]]; then
         echo "⚠️  节点 ${node} 端口 ${port} 已被占用，尝试清理旧 vLLM 进程..."
         ssh_run "$node" "pkill -f 'vllm.entrypoints.openai.api_server.*--port ${port}' || true" >/dev/null 2>&1 || true
