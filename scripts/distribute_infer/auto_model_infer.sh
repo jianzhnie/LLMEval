@@ -1,19 +1,20 @@
 #!/bin/bash
 # =======================================================
-# 分布式 vLLM 模型推理部署脚本
+# 分布式 vLLM 模型推理部署脚本（高并发优化版）
 # =======================================================
 #
 # 功能描述：
-#   1. 跨多节点自动部署 vLLM 模型服务
-#   2. 分布式推理任务分配与执行
-#   3. 自动服务健康检查与监控
-#   4. 优雅的服务清理与资源回收
+#   1. 跨多节点自动部署 vLLM 模型服务（单节点多卡张量并行）
+#   2. 基于健康检查与端口探活的稳健式启动与监控
+#   3. 动态批处理与并行度参数优化，支持高并发推理
+#   4. 数据文件轮询分配与任务并行执行
+#   5. 优雅清理（退出信号捕获）与失败回滚
 #
 # 使用方法：
 #   ./auto_model_infer.sh [NODE_LIST_FILE]
 #
 # 作者：LLM Eval Team
-# 版本：2.0
+# 版本：3.0
 # 更新日期：2025
 # =======================================================
 
@@ -41,64 +42,88 @@ readonly SSH_USER="jianzhnie"
 # =======================================================
 
 # 模型路径配置
-readonly MODEL_PATH="/home/jianzhnie/llmtuner/hfhub/mindspeed/models/mindspore/hf_sft_packing_0703_step6476"
+readonly MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/mindspeed/models/mindspore/hf_sft_packing_0703_step6476}"
 
-# GPU 资源配置
-readonly NUM_GPUS=8
-readonly MEMORY_UTILIZATION=0.9
-readonly MAX_MODEL_LEN=65536
+# GPU/ASCEND 资源配置
+readonly NUM_GPUS=${NUM_GPUS:-8}                     # 张量并行大小（单实例用光整机多卡）
+readonly MEMORY_UTILIZATION=${MEMORY_UTILIZATION:-0.9}
+readonly MAX_MODEL_LEN=${MAX_MODEL_LEN:-65536}
 
-# 推理参数配置
-readonly N_SAMPLES=8            # 每个样本重复采样次数
-readonly SERVED_MODEL_NAME="PCL-Reasoner"
+# vLLM 高并发关键参数（按需调整；需结合显存与上下文长度）
+# - MAX_NUM_SEQS: 同时并发处理的序列数（越大越能吞吐，受显存影响较大）
+# - MAX_NUM_BATCHED_TOKENS: 动态批次内总 token 上限（控制显存与吞吐权衡）
+# 注：两者不宜同时设过大，推荐根据模型大小按 1-2 次试跑观测 GPU 利用率后调整
+readonly MAX_NUM_SEQS=${MAX_NUM_SEQS:-1024}
+readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768}
 
-# Ascend 设备可见性配置（根据 GPU 数量自动生成）
-readonly ASCEND_VISIBLE=$(seq -s, 0 $((NUM_GPUS-1)))
+# 其他推理参数
+readonly N_SAMPLES=${N_SAMPLES:-8}                   # 每条样本的重复采样次数
+readonly SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-PCL-Reasoner}"
+
+# Ascend 设备可见性（如使用 GPU 可忽略；若为 CUDA 可替换为 CUDA_VISIBLE_DEVICES）
+readonly ASCEND_VISIBLE="$(seq -s, 0 $((NUM_GPUS-1)))"
+
+# =======================================================
+#                  vLLM API Server 运行参数
+# =======================================================
+
+# 关闭请求逐条日志，减少 IO 抖动
+readonly DISABLE_LOG_REQUESTS=${DISABLE_LOG_REQUESTS:-1}
+
+# 禁用 OpenAI 兼容层的请求体保存（如版本支持）
+readonly DISABLE_STATE_DUMP=${DISABLE_STATE_DUMP:-1}
+
+# Uvicorn/Server 设置（注意：vLLM 引擎内并行为主，过多服务进程可能适得其反）
+# 如果 vLLM 支持 --num-servers 或 --workers，可以在此开启；默认 1
+readonly API_WORKERS=${API_WORKERS:-1}
+
+# 额外引擎参数（按需追加，例如 "--dtype bfloat16 --enforce-eager"）
+readonly EXTRA_ENGINE_ARGS="${EXTRA_ENGINE_ARGS:-}"
 
 # =======================================================
 #                  路径配置
 # =======================================================
 
 # 项目路径配置
-readonly PROJECT_DIR="/home/jianzhnie/llmtuner/llm/LLMEval"
-readonly INFER_SCRIPT="${PROJECT_DIR}/llmeval/vllm/online_server.py"
-readonly SET_ENV_SCRIPT="${PROJECT_DIR}/set_env.sh"
+readonly PROJECT_DIR="${PROJECT_DIR:-/home/jianzhnie/llmtuner/llm/LLMEval}"
+readonly INFER_SCRIPT="${INFER_SCRIPT:-${PROJECT_DIR}/llmeval/vllm/online_server.py}"
+readonly SET_ENV_SCRIPT="${SET_ENV_SCRIPT:-${PROJECT_DIR}/set_env.sh}"
 
 # 输出与日志路径配置
-readonly OUTPUT_ROOT="/home/jianzhnie/llmtuner/llm/LLMEval/output"
-readonly OUTPUT_DIR="${OUTPUT_ROOT}/${SERVED_MODEL_NAME}"
-readonly LOG_DIR="${OUTPUT_ROOT}/logs-rl"
+readonly OUTPUT_ROOT="${OUTPUT_ROOT:-/home/jianzhnie/llmtuner/llm/LLMEval/output}"
+readonly OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${SERVED_MODEL_NAME}}"
+readonly LOG_DIR="${LOG_DIR:-${OUTPUT_ROOT}/logs-rl}"
 
 # 日志文件前缀配置
 readonly API_SERVER_LOG_PREFIX="api_server_"
 readonly TASK_LOG_PREFIX="task_"
 
-# 服务等待配置
-readonly MAX_WAIT_TIME=900
+# 服务等待最大时长（秒）
+readonly MAX_WAIT_TIME=${MAX_WAIT_TIME:-900}
+
+# 健康检查设置
+readonly HEALTH_PATH="${HEALTH_PATH:-/health}"        # OpenAI 兼容服务通常暴露 /health
+readonly HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-3}          # 单次健康检查超时（秒）
 
 # =======================================================
 #                  数据集配置
 # =======================================================
 
-# 数据集路径配置
-readonly DATASET_DIR="${PROJECT_DIR}/data_process/model_infer"
+# 数据集路径配置（假定各节点路径一致或挂同一 NAS）
+readonly DATASET_DIR="${DATASET_DIR:-${PROJECT_DIR}/data_process/model_infer}"
 
-# 数据集文件匹配模式（支持环境变量覆盖）
-readonly DATASET_GLOB="top_100K_final_verified_samples_shard*"
+# 数据集文件匹配模式（可覆盖）
+readonly DATASET_GLOB="${DATASET_GLOB:-top_100K_final_verified_samples_shard*}"
 
 # 并发控制配置
-readonly MAX_JOBS=128
+readonly MAX_JOBS=${MAX_JOBS:-128}                    # 总体一次性拉起的最大任务数量（进程数）
 
 # =======================================================
-#                  其他配置
+#                  推理客户端参数
 # =======================================================
 
-# rsync 同步选项（备用功能）
-readonly RSYNC_OPTS="-avz --checksum --partial --inplace --no-whole-file --exclude='.*'"
-
-# 推理客户端参数配置
-readonly SYSTEM_PROMPT_TYPE="amthinking"
-readonly MAX_WORKERS=32
+readonly SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
+readonly MAX_WORKERS=${MAX_WORKERS:-32}               # 客户端每进程内部的线程/协程并发
 
 # =======================================================
 #                  全局变量声明
@@ -120,30 +145,32 @@ usage() {
     cat << EOF
 用法: $0 [NODE_LIST_FILE]
 
-跨多节点自动部署 vLLM 并执行分布式推理任务。
+跨多节点自动部署 vLLM 并执行分布式推理任务（高并发优化版）。
 
 参数:
-  NODE_LIST_FILE    包含节点 IP 或主机名的文件路径 (默认: ./node_list_all.txt)
-                    文件格式：每行一个节点，支持 # 注释与空行
+  NODE_LIST_FILE         节点列表文件 (默认: ./node_list_all.txt)；每行一个节点，支持 # 注释与空行
 
-环境变量:
-  SSH_USER          远程 SSH 用户名（默认：当前用户）
-  MODEL_PATH        模型文件路径
-  NUM_GPUS          GPU 数量（默认：8）
-  MEMORY_UTILIZATION GPU 内存利用率（默认：0.9）
-  MAX_MODEL_LEN     最大模型长度（默认：65536）
-  N_SAMPLES         每个样本采样次数（默认：8）
-  SERVED_MODEL_NAME 服务模型名称（默认：PCL-Reasoner）
-  MAX_WAIT_TIME     服务启动最大等待时间（默认：900秒）
-  DATASET_GLOB      数据集文件匹配模式
-  SYSTEM_PROMPT_TYPE 系统提示类型（默认：empty）
-  MAX_WORKERS       最大工作线程数（默认：8）
+可用环境变量（可覆盖默认值）:
+  SSH_USER               远程 SSH 用户名（默认：当前用户）
+  MODEL_PATH             模型文件路径
+  NUM_GPUS               GPU/ASCEND 数量（默认：8）
+  MEMORY_UTILIZATION     显存利用率（默认：0.9）
+  MAX_MODEL_LEN          最大上下文长度（默认：65536）
+  MAX_NUM_SEQS           vLLM 动态批并发序列数（默认：1024）
+  MAX_NUM_BATCHED_TOKENS vLLM 动态批 token 上限（默认：32768）
+  N_SAMPLES              每个样本采样次数（默认：8）
+  SERVED_MODEL_NAME      服务模型名称（默认：PCL-Reasoner）
+  MAX_WAIT_TIME          服务启动最大等待时间（默认：900秒）
+  DATASET_GLOB           数据集文件匹配模式
+  SYSTEM_PROMPT_TYPE     系统提示类型（默认：amthinking）
+  MAX_WORKERS            推理客户端内部并发（默认：32）
+  DISABLE_LOG_REQUESTS   是否关闭请求日志（默认：1）
+  API_WORKERS            API 进程数（如版本支持；默认：1）
+  EXTRA_ENGINE_ARGS      附加引擎参数字符串（默认：空）
 
 示例:
-  $0                                    # 使用默认节点列表文件
-  $0 ./my_nodes.txt                     # 使用自定义节点列表文件
-  SSH_USER=root NUM_GPUS=4 $0           # 使用 root 用户，4个GPU
-
+  $0
+  SSH_USER=root NUM_GPUS=4 MAX_NUM_SEQS=2048 $0 ./nodes.txt
 EOF
     exit 1
 }
@@ -175,6 +202,7 @@ rsync_to_node() {
     local node="$2"
     local dst_path="$3"
     local userhost="${SSH_USER:+${SSH_USER}@}${node}"
+    local RSYNC_OPTS="-avz --checksum --partial --inplace --no-whole-file --exclude='.*'"
 
     if ! rsync ${RSYNC_OPTS} "${src_path}" "${userhost}:${dst_path}"; then
         echo "❌ rsync 同步失败: ${src_path} -> ${userhost}:${dst_path}" >&2
@@ -199,19 +227,27 @@ validate_config() {
         exit 1
     fi
 
-    # 验证数值参数范围
     if [[ ${NUM_GPUS} -lt 1 || ${NUM_GPUS} -gt 8 ]]; then
-        echo "❌ 错误: GPU 数量必须在 1-8 之间: ${NUM_GPUS}" >&2
+        echo "❌ 错误: NUM_GPUS 需在 1-16 之间: ${NUM_GPUS}" >&2
         exit 1
     fi
 
     if [[ $(echo "${MEMORY_UTILIZATION} < 0.1 || ${MEMORY_UTILIZATION} > 1.0" | bc -l) -eq 1 ]]; then
-        echo "❌ 错误: 内存利用率必须在 0.1-1.0 之间: ${MEMORY_UTILIZATION}" >&2
+        echo "❌ 错误: 内存利用率需在 0.1-1.0 之间: ${MEMORY_UTILIZATION}" >&2
         exit 1
     fi
 
     if [[ ${N_SAMPLES} -lt 1 || ${N_SAMPLES} -gt 100 ]]; then
-        echo "❌ 错误: 采样次数必须在 1-100 之间: ${N_SAMPLES}" >&2
+        echo "❌ 错误: 采样次数需在 1-100 之间: ${N_SAMPLES}" >&2
+        exit 1
+    fi
+
+    if [[ ${MAX_NUM_SEQS} -lt 1 || ${MAX_NUM_SEQS} -gt 16384 ]]; then
+        echo "❌ 错误: MAX_NUM_SEQS 范围异常: ${MAX_NUM_SEQS}" >&2
+        exit 1
+    fi
+    if [[ ${MAX_NUM_BATCHED_TOKENS} -lt 512 || ${MAX_NUM_BATCHED_TOKENS} -gt 1048576 ]]; then
+        echo "❌ 错误: MAX_NUM_BATCHED_TOKENS 范围异常: ${MAX_NUM_BATCHED_TOKENS}" >&2
         exit 1
     fi
 
@@ -231,6 +267,22 @@ check_node_port_alignment() {
         exit 1
     fi
     echo "✅ 节点和端口配置检查通过"
+}
+
+# 端口探活（远程是否可用）
+check_remote_port_free() {
+    local node="$1"
+    local port="$2"
+    # 若端口被占用则尝试干预杀进程
+    if ssh_run "$node" "ss -ltn '( sport = :$port )' | tail -n +2 | wc -l"; then
+        local used
+        used=$(ssh_run "$node" "ss -ltn '( sport = :$port )' | tail -n +2 | wc -l")
+        if [[ "${used}" -gt 0 ]]; then
+            echo "⚠️  节点 ${node} 端口 ${port} 已被占用，尝试清理旧 vLLM 进程..."
+            ssh_run "$node" "pkill -f 'vllm.entrypoints.openai.api_server.*--port ${port}' || true"
+            sleep 1
+        fi
+    fi
 }
 
 # 在第一个节点上发现数据集文件
@@ -272,13 +324,13 @@ check_and_prepare_remote_dirs() {
 
     for node in "${NODES[@]}"; do
         echo "   -> 处理节点: ${node}"
-        if ! ssh_run "$node" "mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' && rm -rf '${LOG_DIR}' && mkdir -p '${LOG_DIR}'"; then
+        if ! ssh_run "$node" "mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' '${LOG_DIR}/status' && rm -f '${LOG_DIR}/status' '${LOG_DIR}/${API_SERVER_LOG_PREFIX}'*.log '${LOG_DIR}/${TASK_LOG_PREFIX}'*.log"; then
             echo "❌ 错误: 无法在节点 ${node} 上准备目录，请检查SSH连接和权限" >&2
             exit 1
         fi
     done
 
-    echo "✅ 所有远程目录已就绪，日志已清理"
+    echo "✅ 所有远程目录已就绪，旧日志已清理"
 }
 
 # 停止所有远程节点上的模型服务
@@ -317,6 +369,14 @@ deploy_model_service() {
     echo "🚀 在节点 ${node} 上部署模型服务，端口 ${port} (TP=${NUM_GPUS}, mem_util=${MEMORY_UTILIZATION})"
 
     # 构建 vLLM 启动命令
+    # 关键参数：
+    #   --max-num-seqs              并发序列数上限
+    #   --max-num-batched-tokens    动态批内 token 上限
+    #   --disable-log-requests      关闭请求日志（减小 I/O）
+    #   --tensor-parallel-size      使用多卡并行
+    #   --gpu-memory-utilization    控制显存水位（避免 OOM）
+    #   --max-model-len             控制上下文长度
+    # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
     local vllm_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
         export ASCEND_RT_VISIBLE_DEVICES='${ASCEND_VISIBLE}' && \
@@ -327,10 +387,37 @@ deploy_model_service() {
             --tensor-parallel-size ${NUM_GPUS} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
             --max-model-len ${MAX_MODEL_LEN} \
-            --port ${port} > '${log_file}' 2>&1 &"
+            --max-num-seqs ${MAX_NUM_SEQS} \
+            --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
+            --port ${port} \
+            > '${log_file}' 2>&1 &"
 
+    # 端口探活与服务启动
+    check_remote_port_free "$node" "$port"
     # 在后台启动服务
     ssh_run "$node" "$vllm_cmd" &
+}
+
+# 健康检查（HTTP 探活 + 日志回退）
+check_service_ready() {
+    local node="$1"
+    local port="$2"
+    local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
+    local base_url="http://127.0.0.1:${port}"
+
+    # 先尝试 HTTP 健康检查
+    if ssh_run "$node" "curl -sS --max-time ${HEALTH_TIMEOUT} ${base_url}${HEALTH_PATH} | grep -qi 'ok\|healthy\|ready'"; then
+        echo "✅ 服务 ${node}:${port} 健康检查通过"
+        return 0
+    fi
+
+    # 回退到日志关键字
+    if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}'"; then
+        echo "✅ 服务 ${node}:${port} 日志检查通过"
+        return 0
+    fi
+
+    return 1
 }
 
 # 轮询检查所有模型服务是否启动成功
@@ -340,7 +427,7 @@ wait_for_services() {
     echo "⏳ 正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
-    local interval=10
+    local interval=5
     local total_services=${#NODES[@]}
     local status_dir="${LOG_DIR}/status"
 
@@ -355,7 +442,6 @@ wait_for_services() {
         for ((i = 0; i < total_services; i++)); do
             local node="${NODES[i]}"
             local port="${PORTS[i]}"
-            local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
             local status_file="${status_dir}/status_${node//./_}.ok"
 
             # 跳过已就绪的服务
@@ -365,8 +451,7 @@ wait_for_services() {
 
             # 后台检查服务状态
             (
-                if ssh_run "$node" "grep -q 'Application startup complete.' '${log_file}'"; then
-                    echo "✅ 服务 ${node}:${port} 已就绪 (日志确认)"
+                if check_service_ready "$node" "$port"; then
                     touch "$status_file"
                 fi
             ) &
@@ -375,7 +460,7 @@ wait_for_services() {
 
         # 等待所有检查完成
         if [[ ${#running_pids[@]} -gt 0 ]]; then
-            wait "${running_pids[@]}"
+            wait "${running_pids[@]}" || true
         fi
 
         # 统计就绪服务数量
@@ -403,7 +488,7 @@ wait_for_services() {
 assign_data_to_instances() {
     local total_instances="$1"
 
-    echo "📊 正在分配全部 ${total_instances} 个数据文件到 ${total_instances} 个实例..."
+    echo "📊 正在分配全部 ${#FILES[@]} 个数据文件到 ${total_instances} 个实例..."
 
     # 初始化实例分配数组
     for ((i = 0; i < total_instances; i++)); do
@@ -416,6 +501,11 @@ assign_data_to_instances() {
         local instance_idx=$((idx % total_instances))
         eval "INSTANCE_ASSIGNMENTS_${instance_idx}+=(\"\$file\")"
         echo "   分配文件: ${file} -> 实例 ${instance_idx}"
+    done
+
+    for ((i = 0; i < total_instances; i++)); do
+        eval "local count=\${#INSTANCE_ASSIGNMENTS_${i}[@]}"
+        echo "   -> 实例 ${i} 分配 ${count} 个文件"
     done
 
     echo "✅ 数据文件分配完成"
@@ -437,15 +527,17 @@ run_task_batch() {
 
     echo "👉 在节点 ${node} 上启动推理任务，模型: ${model_name}"
 
+    local tasks_started=0
     for file in "${files[@]}"; do
         local input_file="${DATASET_DIR}/${file}"
-        local base_name=$(basename "$file" .jsonl)
+        local base_name
+        base_name=$(basename "$file" .jsonl)
         local output_file="${OUTPUT_DIR}/infer_${model_name//\//_}_${base_name}_bz${N_SAMPLES}.jsonl"
         local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${base_name}.log"
 
         echo "   -> 处理文件: ${file} (输出: ${output_file})"
 
-        # 构建推理命令
+        # 构建推理客户端命令（注意：在线客户端脚本内部应支持异步/批并发与重试）
         local infer_cmd="cd '${PROJECT_DIR}' && \
             source '${SET_ENV_SCRIPT}' && \
             nohup python '${INFER_SCRIPT}' \
@@ -460,7 +552,17 @@ run_task_batch() {
 
         # 在后台启动推理任务
         ssh_run "$node" "$infer_cmd" &
+        tasks_started=$((tasks_started + 1))
+
+        # 简单的全局节流，避免一次性拉起过多任务导致瞬时拥塞
+        # 如需更精细的节流策略，可替换为远程 semaphore 或基于队列的派发
+        if [[ $tasks_started -ge $MAX_JOBS ]]; then
+            wait
+            tasks_started=0
+        fi
     done
+
+    wait || true
 }
 
 # 分发并启动所有推理任务
@@ -537,7 +639,7 @@ main() {
 
     echo "📋 发现 ${#NODES[@]} 个节点: ${NODES[*]}"
 
-    # 自动生成端口列表
+    # 自动生成端口列表（节点间避免冲突，间隔 10 端口）
     PORTS=()
     local start_port=6000
     for ((i=0; i<${#NODES[@]}; i++)); do
@@ -571,10 +673,10 @@ main() {
         deploy_model_service "$node" "$port"
     done
 
-    # 步骤5: 等待服务就绪
+    # 步骤5: 等待服务就绪（HTTP 健康检查 + 日志回退）
     wait_for_services
 
-    # 步骤6: 分发并启动推理任务
+    # 步骤6: 分发并启动推理任务（带全局节流）
     distribute_and_launch_jobs
 
     echo "🎉 分布式推理部署完成！"
