@@ -35,8 +35,7 @@ readonly SSH_OPTS="-o StrictHostKeyChecking=no \
                    -o ControlPersist=60s"
 
 # SSH 用户配置（可通过环境变量覆盖）
-readonly SSH_USER="jianzhnie"
-
+readonly SSH_USER="${SSH_USER:-$(whoami)}"
 # =======================================================
 #                  模型与资源配置
 # =======================================================
@@ -184,11 +183,7 @@ ssh_run() {
     local node="$1"
     shift
     local userhost="${SSH_USER:+${SSH_USER}@}${node}"
-
-    if ! ssh ${SSH_OPTS} "${userhost}" "$@"; then
-        echo "❌ SSH 执行失败: ${userhost} - $*" >&2
-        return 1
-    fi
+    ssh ${SSH_OPTS} "${userhost}" "$@"
 }
 
 # 通过 rsync 同步文件到远程节点
@@ -228,7 +223,7 @@ validate_config() {
     fi
 
     if [[ ${NUM_GPUS} -lt 1 || ${NUM_GPUS} -gt 8 ]]; then
-        echo "❌ 错误: NUM_GPUS 需在 1-16 之间: ${NUM_GPUS}" >&2
+        echo "❌ 错误: NUM_GPUS 需在 1-8 之间: ${NUM_GPUS}" >&2
         exit 1
     fi
 
@@ -274,14 +269,13 @@ check_remote_port_free() {
     local node="$1"
     local port="$2"
     # 若端口被占用则尝试干预杀进程
-    if ssh_run "$node" "ss -ltn '( sport = :$port )' | tail -n +2 | wc -l"; then
-        local used
-        used=$(ssh_run "$node" "ss -ltn '( sport = :$port )' | tail -n +2 | wc -l")
-        if [[ "${used}" -gt 0 ]]; then
-            echo "⚠️  节点 ${node} 端口 ${port} 已被占用，尝试清理旧 vLLM 进程..."
-            ssh_run "$node" "pkill -f 'vllm.entrypoints.openai.api_server.*--port ${port}' || true"
-            sleep 1
-        fi
+    local used
+    used=$(ssh_run "$node" "ss -ltn '( sport = :$port )' | tail -n +2 | wc -l" 2>/dev/null || echo 0)
+
+    if [[ "${used:-0}" -gt 0 ]]; then
+        echo "⚠️  节点 ${node} 端口 ${port} 已被占用，尝试清理旧 vLLM 进程..."
+        ssh_run "$node" "pkill -f 'vllm.entrypoints.openai.api_server.*--port ${port}' || true" >/dev/null 2>&1 || true
+        sleep 1
     fi
 }
 
@@ -324,7 +318,7 @@ check_and_prepare_remote_dirs() {
 
     for node in "${NODES[@]}"; do
         echo "   -> 处理节点: ${node}"
-        if ! ssh_run "$node" "mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' '${LOG_DIR}/status' && rm -f '${LOG_DIR}/status' '${LOG_DIR}/${API_SERVER_LOG_PREFIX}'*.log '${LOG_DIR}/${TASK_LOG_PREFIX}'*.log"; then
+        if ! ssh_run "$node" "mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && rm -rf '${LOG_DIR}/status' && mkdir -p '${LOG_DIR}/status' && rm -f '${LOG_DIR}/${API_SERVER_LOG_PREFIX}'*.log '${LOG_DIR}/${TASK_LOG_PREFIX}'*.log 2>/dev/null || true"; then
             echo "❌ 错误: 无法在节点 ${node} 上准备目录，请检查SSH连接和权限" >&2
             exit 1
         fi
@@ -408,6 +402,11 @@ check_service_ready() {
     # 先尝试 HTTP 健康检查
     if ssh_run "$node" "curl -sS --max-time ${HEALTH_TIMEOUT} ${base_url}${HEALTH_PATH} | grep -qi 'ok\|healthy\|ready'"; then
         echo "✅ 服务 ${node}:${port} 健康检查通过"
+        return 0
+    fi
+    # 兼容部分版本：尝试 /v1/models
+    if ssh_run "$node" "curl -sS --max-time ${HEALTH_TIMEOUT} ${base_url}/v1/models | grep -qi '${SERVED_MODEL_NAME}\|data'"; then
+        echo "✅ 服务 ${node}:${port} /v1/models 检查通过"
         return 0
     fi
 
@@ -576,7 +575,9 @@ distribute_and_launch_jobs() {
     # 分配数据文件
     assign_data_to_instances "$total_instances"
 
-    # 为每个节点启动对应的推理任务
+    # 为每个节点启动对应的推理任务（并行）
+    local pids=()
+    local submitted=0
     for ((i = 0; i < total_instances; i++)); do
         local node="${NODES[i]}"
         local port="${PORTS[i]}"
@@ -593,13 +594,72 @@ distribute_and_launch_jobs() {
         fi
 
         echo "   -> 节点 ${node} 分配到 ${#ASSIGNED[@]} 个文件"
-        run_task_batch "$node" "$model_name" "$base_url" "${ASSIGNED[@]:-}"
+
+        # 并行提交每个节点的任务批次（本地后台，远端内部再并行）
+        (
+            run_task_batch "$node" "$model_name" "$base_url" "${ASSIGNED[@]:-}"
+        ) &
+        pids+=($!)
+        submitted=$((submitted + 1))
+
+        # 简单本地节流：限制同时存在的提交批次数量，避免本地进程过多
+        if [[ $submitted -ge $MAX_JOBS ]]; then
+            wait "${pids[@]}" || true
+            pids=()
+            submitted=0
+        fi
     done
 
-    # 等待所有任务启动完成
-    wait
+    # 等待所有节点的任务提交完成（不等待远端具体推理完成）
+    if [[ ${#pids[@]} -gt 0 ]]; then
+        wait "${pids[@]}" || true
+    fi
+
     echo "✅ 所有推理任务已启动"
 }
+
+# 监控远端推理任务直至完成（基于进程存活）
+# 返回值：无（阻塞直到所有节点上不再存在 INFER_SCRIPT 进程）
+wait_for_remote_jobs() {
+    echo "⏳ 等待所有远端推理任务完成..."
+    local interval=10
+
+    while true; do
+        local running_total=0
+        local pids=()
+        for node in "${NODES[@]}"; do
+            (
+                # 统计匹配推理客户端脚本的存活进程数
+                # 用 basename 兼容符号链接/不同路径
+                cnt=$(ssh_run "$node" "pgrep -fal 'python .*${INFER_SCRIPT##*/}' | wc -l" 2>/dev/null || echo 0)
+                echo "${node}:${cnt}"
+            ) &
+            pids+=($!)
+        done
+        wait "${pids[@]}" || true
+
+        # 汇总
+        while read -r line; do
+            [[ -z "$line" ]] && continue
+            c=${line##*:}
+            running_total=$((running_total + c))
+        done < <(
+            for node in "${NODES[@]}"; do
+                # 再次获取，避免 subshell输出竞争；轻微重复成本可接受
+                ssh_run "$node" "pgrep -fal 'python .*${INFER_SCRIPT##*/}' | wc -l" 2>/dev/null || echo 0
+            done
+        )
+
+        if [[ ${running_total} -eq 0 ]]; then
+            echo "✅ 所有远端推理任务已完成"
+            break
+        fi
+        echo "   -> 仍有 ${running_total} 个远端推理进程在运行，${interval}s 后重试..."
+        sleep "${interval}"
+    done
+}
+
+
 
 # =======================================================
 #                  主程序入口
@@ -676,8 +736,12 @@ main() {
     # 步骤5: 等待服务就绪（HTTP 健康检查 + 日志回退）
     wait_for_services
 
-    # 步骤6: 分发并启动推理任务（带全局节流）
+    # 步骤6: 分发并启动推理任务（远端并行 + 本地节流）
     distribute_and_launch_jobs
+
+    # 步骤7: 等待远端推理任务完成后再关闭服务
+    wait_for_remote_jobs
+    stop_services
 
     echo "🎉 分布式推理部署完成！"
     echo "📊 部署统计:"
