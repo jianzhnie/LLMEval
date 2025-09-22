@@ -43,7 +43,7 @@ readonly DATASET_DIR="${PROJECT_DIR}/data_process/model_infer"  # 远程节点�
 # 自动发现的数据文件通配（可通过环境变量覆盖），支持 part1 和 part_001 等两种命名
 readonly DATASET_GLOB="${DATASET_GLOB:-top_100K_final_verified_samples_shard*}"
 # 并发度限制（节点任务提交时本地 wait 的节流）
-readonly MAX_JOBS=8
+readonly MAX_JOBS=24
 
 # rsync 选项（如有需要可复用；当前逻辑不再主动下发数据）
 readonly RSYNC_OPTS="-avz --checksum --partial --inplace --no-whole-file --exclude='.*'"
@@ -272,7 +272,6 @@ distribute_and_launch_jobs() {
     local total_instances=${#NODES[@]}
     assign_data_to_instances "$total_instances"
 
-    local in_flight=0
     for ((i = 0; i < total_instances; i++)); do
         local node=${NODES[i]}
         local port=${PORTS[i]}
@@ -286,14 +285,9 @@ distribute_and_launch_jobs() {
         fi
 
         run_task_batch "$node" "$model_name" "$base_url" "${ASSIGNED[@]:-}"
-
-        in_flight=$((in_flight + 1))
-        if [ $in_flight -ge $MAX_JOBS ]; then
-            wait
-            in_flight=0
-        fi
     done
 
+    # 等待所有任务启动完成（不等待推理完成）
     wait
     echo "✅ All inference jobs launched."
 }
