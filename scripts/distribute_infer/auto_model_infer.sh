@@ -31,7 +31,9 @@ readonly SSH_OPTS="-o StrictHostKeyChecking=no \
                    -o ConnectTimeout=5 \
                    -o ServerAliveInterval=30 \
                    -o ServerAliveCountMax=3 \
-                   -o ControlMaster"
+                   -o ControlMaster \
+                   -o LogLevel=ERROR \
+                   -q"
 
 # SSH 用户配置（可通过环境变量覆盖）
 readonly SSH_USER="${SSH_USER:-$(whoami)}"
@@ -403,12 +405,12 @@ check_service_ready() {
     local base_url="http://127.0.0.1:${port}"
 
     # 先尝试 HTTP 健康检查
-    if ssh_run "$node" "curl -sS --max-time ${HEALTH_TIMEOUT} ${base_url}${HEALTH_PATH} | grep -qi 'ok\|healthy\|ready'"; then
+    if ssh_run "$node" "curl -s --max-time ${HEALTH_TIMEOUT} ${base_url}${HEALTH_PATH} 2>/dev/null | grep -qi 'ok\|healthy\|ready'"; then
         echo "✅ 服务 ${node}:${port} 健康检查通过"
         return 0
     fi
     # 兼容部分版本：尝试 /v1/models
-    if ssh_run "$node" "curl -sS --max-time ${HEALTH_TIMEOUT} ${base_url}/v1/models | grep -qi '${SERVED_MODEL_NAME}\|data'"; then
+    if ssh_run "$node" "curl -s --max-time ${HEALTH_TIMEOUT} ${base_url}/v1/models 2>/dev/null | grep -qi '${SERVED_MODEL_NAME}\|data'"; then
         echo "✅ 服务 ${node}:${port} /v1/models 检查通过"
         return 0
     fi
