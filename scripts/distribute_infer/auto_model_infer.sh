@@ -22,24 +22,26 @@ readonly SERVED_MODEL_NAME="PCL-Reasoner"
 readonly ASCEND_VISIBLE=$(seq -s, 0 $((NUM_GPUS-1)))
 
 # === 项目与脚本路径（确保远程节点与本机一致）===
-readonly PROJECT_DIR="/home/jianzhengnie/llmtuner/llm/LLMEval"
+readonly PROJECT_DIR="/home/jianzhnie/llmtuner/llm/LLMEval"
 readonly INFER_SCRIPT="${PROJECT_DIR}/llmeval/vllm/online_server.py"
 readonly SET_ENV_SCRIPT="${PROJECT_DIR}/set_env.sh"
 
 # === 输出与日志目录（在远程节点上创建与写入）===
-readonly OUTPUT_ROOT="/home/jianzhengnie/llmtuner/llm/LLMEval/eval/output"
-readonly OUTPUT_DIR="${OUTPUT_ROOT}/"
+readonly OUTPUT_ROOT="/home/jianzhnie/llmtuner/llm/LLMEval/output"
+readonly OUTPUT_DIR="${OUTPUT_ROOT}/$SERVED_MODEL_NAME"
 readonly LOG_DIR="${OUTPUT_ROOT}/logs-rl"
+mkdir -p ${OUTPUT_DIR}
 # 仅清理本地残留目录（避免干扰本地状态文件）；远程清理会在后续专门执行
-rm -rf "${LOG_DIR}" || true
+rm -rf ${LOG_DIR}
+mkdir -p ${LOG_DIR}
 readonly API_SERVER_LOG_PREFIX="api_server_"
 readonly TASK_LOG_PREFIX="task_"
 readonly MAX_WAIT_TIME=900
 
 # === 数据集相关（数据已在远程各节点同步，自动发现文件）===
-readonly DATASET_DIR="${PROJECT_DIR}/data"  # 远程节点上的数据目录
+readonly DATASET_DIR="${PROJECT_DIR}/data_process/model_infer"  # 远程节点上的数据目录
 # 自动发现的数据文件通配（可通过环境变量覆盖），支持 part1 和 part_001 等两种命名
-readonly DATASET_GLOB="${DATASET_GLOB:-math_top_30K_rl_verify_part*.jsonl}"
+readonly DATASET_GLOB="${DATASET_GLOB:-top_100K_final_verified_samples_shard*}"
 # 并发度限制（节点任务提交时本地 wait 的节流）
 readonly MAX_JOBS=8
 
@@ -110,7 +112,7 @@ discover_remote_dataset_files() {
         echo "❌ 错误: 无法在 ${head_node} 上列出数据文件，请检查路径与权限。" >&2
         exit 1
     fi
-    mapfile -t FILES < <(printf "%s\n" "$out" | grep -E '\.jsonl$' || true)
+    mapfile -t FILES < <(printf "%s\n" "$out" || true)
     if [[ ${#FILES[@]} -eq 0 ]]; then
         echo "❌ 错误: 未发现任何匹配的数据文件（glob: ${DATASET_GLOB}）。" >&2
         exit 1
@@ -256,6 +258,7 @@ run_task_batch() {
             nohup python '${INFER_SCRIPT}' \
             --input_file '${input_file}' \
             --output_file '${output_file}' \
+            --input_key "question" \
             --base_url '${base_url}' \
             --model_name '${model_name}' \
             --n_samples ${N_SAMPLES} \
@@ -273,7 +276,7 @@ distribute_and_launch_jobs() {
     for ((i = 0; i < total_instances; i++)); do
         local node=${NODES[i]}
         local port=${PORTS[i]}
-        local base_url="http://${node}:${port}/v1"
+        local base_url="http://127.0.0.1:${port}/v1"
         local model_name="${SERVED_MODEL_NAME}"
 
         IFS=$'\n' read -r -d '' -a ASSIGNED < <(eval "printf '%s\0' \"\${INSTANCE_ASSIGNMENTS_${i}[@]}\"")
@@ -338,7 +341,7 @@ main() {
     check_node_port_alignment
 
     # 步骤2: 创建远程目录并清理日志
-    check_and_prepare_remote_dirs
+    # check_and_prepare_remote_dirs
 
     # 步骤4: 在所有节点上并行部署模型服务
     echo "🔄 正在并行部署所有模型服务..."
