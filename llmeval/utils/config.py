@@ -358,7 +358,7 @@ class ServerArguments:
         default=3,
         metadata={'help': 'Maximum number of retries for API calls.'})
     request_timeout: int = field(
-        default=600, metadata={'help': 'Timeout for requests to VLLM server.'})
+        default=60, metadata={'help': 'Timeout for requests to VLLM server.'})
 
     def __post_init__(self) -> None:
         """
