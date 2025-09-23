@@ -31,9 +31,8 @@ readonly SSH_OPTS="-o StrictHostKeyChecking=no \
                    -o ConnectTimeout=5 \
                    -o ServerAliveInterval=30 \
                    -o ServerAliveCountMax=3 \
-                   -o ControlMaster \
-                   -o LogLevel=ERROR \
-                   -q"
+                   -o ControlMaster=auto \
+                   -o ControlPersist=60s"
 
 # SSH 用户配置（可通过环境变量覆盖）
 readonly SSH_USER="${SSH_USER:-$(whoami)}"
@@ -426,7 +425,7 @@ check_service_ready() {
 
 # 轮询检查所有模型服务是否启动成功
 # 参数：无
-# 返回值：无（超时或失败时退出）
+# 返回值：就绪节点的索引数组
 wait_for_services() {
     echo "⏳ 正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
 
@@ -434,6 +433,7 @@ wait_for_services() {
     local interval=5
     local total_services=${#NODES[@]}
     local status_dir="${LOG_DIR}/status"
+    local -a ready_indices=()
 
     # 清理并创建状态目录
     rm -rf "${status_dir}" || true
@@ -467,12 +467,20 @@ wait_for_services() {
             wait "${running_pids[@]}" || true
         fi
 
-        # 统计就绪服务数量
-        local ready_count
-        ready_count=$(ls -1 "${status_dir}" 2>/dev/null | wc -l | tr -d ' ')
+        # 收集就绪节点索引
+        ready_indices=()
+        for ((i = 0; i < total_services; i++)); do
+            local node="${NODES[i]}"
+            local status_file="${status_dir}/status_${node//./_}.ok"
+            if [[ -f "$status_file" ]]; then
+                ready_indices+=($i)
+            fi
+        done
 
+        local ready_count=${#ready_indices[@]}
         if [[ $ready_count -eq $total_services ]]; then
             echo "✅ 所有 ${total_services} 个服务已就绪"
+            echo "${ready_indices[@]}"
             return 0
         fi
 
@@ -481,7 +489,13 @@ wait_for_services() {
         total_wait_time=$((total_wait_time + interval))
     done
 
-    echo "❌ 超时: 服务在 ${MAX_WAIT_TIME} 秒内未完全就绪，请检查远程日志" >&2
+    if [[ ${#ready_indices[@]} -gt 0 ]]; then
+        echo "⚠️ 超时但有 ${#ready_indices[@]} 个节点已就绪，将继续使用可用节点"
+        echo "${ready_indices[@]}"
+        return 0
+    fi
+
+    echo "❌ 错误: 没有任何节点成功启动，请检查远程日志" >&2
     exit 1
 }
 
@@ -738,10 +752,49 @@ main() {
         deploy_model_service "$node" "$port"
     done
 
-    # 步骤5: 等待服务就绪（HTTP 健康检查 + 日志回退）
-    wait_for_services
+    # 步骤5: 等待服务就绪并获取可用节点（HTTP 健康检查 + 日志回退）
+    local -a ready_indices
+    mapfile -t ready_indices < <(wait_for_services)
 
-    # 步骤6: 分发并启动推理任务（远端并行 + 本地节流）
+    if [[ ${#ready_indices[@]} -eq 0 ]]; then
+        echo "❌ 错误: 没有可用的服务节点" >&2
+        exit 1
+    fi
+
+    # 构建可用节点数组
+    local -a available_nodes=()
+    local -a available_ports=()
+    for idx in "${ready_indices[@]}"; do
+        available_nodes+=("${NODES[idx]}")
+        available_ports+=("${PORTS[idx]}")
+    done
+
+    # 找出未成功部署的节点
+    local -a failed_nodes=()
+    local -a failed_ports=()
+    for ((i = 0; i < ${#NODES[@]}; i++)); do
+        if [[ ! " ${available_nodes[@]} " =~ " ${NODES[i]} " ]]; then
+            failed_nodes+=("${NODES[i]}")
+            failed_ports+=("${PORTS[i]}")
+        fi
+    done
+
+    # 输出部署失败的节点信息
+    if [[ ${#failed_nodes[@]} -gt 0 ]]; then
+        echo "⚠️ 以下节点未能成功部署:"
+        for ((i = 0; i < ${#failed_nodes[@]}; i++)); do
+            echo "   - ${failed_nodes[i]} (端口: ${failed_ports[i]})"
+        done
+        echo "❗ 请检查这些节点的日志文件: ${LOG_DIR}/${API_SERVER_LOG_PREFIX}<节点名>.log"
+    fi
+
+    # 更新全局节点和端口数组
+    NODES=("${available_nodes[@]}")
+    PORTS=("${available_ports[@]}")
+
+    echo "ℹ️ 将使用 ${#NODES[@]} 个可用节点进行推理"
+
+    # 步骤6: 使用可用节点分发并启动推理任务
     distribute_and_launch_jobs
 
     # 步骤7: 等待远端推理任务完成后再关闭服务
