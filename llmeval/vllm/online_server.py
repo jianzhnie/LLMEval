@@ -33,6 +33,11 @@ from llmeval.utils.template import (SYSTEM_PROMPT_FACTORY,
 
 logger = init_logger('online_vllm_server', logging.INFO)
 
+# Constants
+DEFAULT_INPUT_KEY: str = 'prompt'
+DEFAULT_LABEL_KEY: str = 'answer'
+DEFAULT_RESPONSE_KEY: str = 'gen'
+
 
 class ClientError(RuntimeError):
     """Custom exception class for client-related errors."""
@@ -194,7 +199,7 @@ class InferenceClient:
         except APIError as e:
             err_msg = e.message
             if 'maximum context length' in err_msg:  # or "Expecting value: line 1 column 1 (char 0)" in err_msg:
-                logging.warn(f'max length exceeded. Error: {err_msg}')
+                logger.warning(f'max length exceeded. Error: {err_msg}')
                 return {'gen': '', 'end_reason': 'max length exceeded'}
             time.sleep(1)
             raise ClientError(err_msg) from e
@@ -235,69 +240,77 @@ class InferenceRunner:
         self._file_lock: threading.Lock = threading.Lock()
 
     def count_completed_samples(self) -> Dict[str, int]:
-        """Count the number of completed samples for each prompt in the output file.
+        """Count completed samples for resume functionality.
+
+        This method scans the output file to determine how many samples have
+        already been processed for each unique question, enabling resume
+        functionality for interrupted runs.
+
+        The method handles:
+        - File existence and size checks
+        - JSON parsing with error recovery
+        - Prompt key resolution with fallbacks
+        - Comprehensive error handling
 
         Returns:
-            A dictionary mapping prompts to their completion counts
+            Dictionary mapping question content to count of completed samples.
         """
-        # Count completed samples from a previous run
         completed_counts: Dict[str, int] = collections.defaultdict(int)
-        if not os.path.exists(self.args.output_file) or os.path.getsize(
-                self.args.output_file) == 0:
+
+        if not os.path.exists(self.args.output_file):
             return completed_counts
+
+        if os.path.getsize(self.args.output_file) == 0:
+            return completed_counts
+
         try:
             with open(self.args.output_file, 'r', encoding='utf-8') as f:
                 for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
-
                     try:
-                        item = json.loads(line)
-                        prompt = item.get(
-                            self.args.input_key) or item.get('prompt')
-                        if not prompt:
-                            logger.warning(
-                                f'No {self.args.input_key} found in item at line {line_num}: {item}'
-                            )
-                            continue
-
-                        gen_count = len(item.get('gen', []))
-                        completed_counts[prompt] += gen_count
+                        item: Dict[str, Any] = json.loads(line.strip())
+                        prompt: Any = item.get(
+                            self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+                        gen_response = item.get(
+                            self.args.response_key) or item.get(
+                                DEFAULT_RESPONSE_KEY)
+                        gen_count: int = len(gen_response)
+                        if prompt is not None:
+                            completed_counts[str(prompt)] += gen_count
                     except json.JSONDecodeError as e:
-                        logger.warning(f'Invalid JSON at line {line_num}: {e}')
+                        logger.warning(f'Invalid JSON on line {line_num}: {e}')
                         continue
         except Exception as e:
-            logger.error(
-                f'Error reading output file {self.args.output_file}: {e}')
-            raise
+            logger.error(f'Error reading output file for resume check: {e}')
 
         return completed_counts
 
     def load_data(self) -> List[Dict[str, Any]]:
         """Load and prepare the dataset, handling resume functionality.
 
+        This method performs several key operations:
+        1. Loads and validates the input data file
+        2. Checks for previously completed samples
+        3. Expands the dataset based on required sample count
+        4. Validates data structure and content
+
         Returns:
-            List of data items to process, with resume logic applied
+            List[Dict[str, Any]]: List of data items to process, with resume logic applied
 
         Raises:
             FileNotFoundError: If input file doesn't exist
             json.JSONDecodeError: If input file contains invalid JSON
+            ValueError: If input data structure is invalid
         """
-        try:
-            with open(self.args.input_file, 'r', encoding='utf-8') as f:
-                data = [json.loads(line) for line in f if line.strip()]
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.critical(
-                f"Error loading input file '{self.args.input_file}': {e}")
-            raise
+        # Input file validation and loading
+        if not os.path.exists(self.args.input_file):
+            raise FileNotFoundError(
+                f'Input file not found: {self.args.input_file}')
 
-        if not data:
-            logger.warning(
-                f'No data found in input file: {self.args.input_file}')
-            return []
+        # Load raw data
+        raw_data: List[Dict[str, Any]] = self._load_raw_data()
+        logger.info(f'Loaded {len(raw_data)} items from input file')
 
-        # Handle resume functionality
+        # Resume functionality handling
         completed_counts = self.count_completed_samples()
         total_completed = sum(completed_counts.values())
 
@@ -306,20 +319,87 @@ class InferenceRunner:
                 f'Found {total_completed} completed samples from previous run.'
             )
 
-        # Expand data based on remaining samples needed
+        # Expand data according to n_samples and resume functionality
+        expanded_data: List[Dict[str, Any]] = self._expand_data_with_resume(
+            raw_data, completed_counts)
+
+        if not expanded_data:
+            logger.warning('No data to process after expansion')
+
+        logger.info(
+            f'Total remaining samples to process: {len(expanded_data)}')
+        return expanded_data
+
+    def _load_raw_data(self) -> List[Dict[str, Any]]:
+        """Load raw data from input file.
+
+        This method handles the loading of raw JSONL data from the input file
+        with comprehensive error handling.
+
+        Returns:
+            List of raw data items.
+
+        Raises:
+            FileNotFoundError: If the input file does not exist.
+            json.JSONDecodeError: If an input line is not valid JSON.
+        """
+        try:
+            with open(self.args.input_file, 'r', encoding='utf-8') as f:
+                data: List[Dict[str, Any]] = [
+                    json.loads(line) for line in f if line.strip()
+                ]
+        except FileNotFoundError as e:
+            logger.critical(
+                f'Input file not found: {self.args.input_file}, {e}')
+            raise
+        except json.JSONDecodeError as e:
+            logger.critical(f'Invalid JSON in input file: {e}')
+            raise
+
+        return data
+
+    def _expand_data_with_resume(
+            self, raw_data: List[Dict[str, Any]],
+            completed_counts: Dict[str, int]) -> List[Dict[str, Any]]:
+        """Expand data according to n_samples and resume functionality.
+
+        This method processes the raw data and expands it based on the number
+        of samples needed per prompt, taking into account already completed
+        samples for resume functionality.
+
+        Args:
+            raw_data: Raw data loaded from input file.
+            completed_counts: Count of completed samples per prompt.
+
+        Returns:
+            Expanded dataset with remaining samples to process.
+        """
         expanded_data: List[Dict[str, Any]] = []
-        for item in data:
-            prompt = item.get(self.args.input_key) or item.get('prompt')
-            if not prompt:
+        skipped_items: int = 0
+
+        for item in raw_data:
+            prompt_val: Any = item.get(
+                self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+            prompt: str = str(prompt_val) if prompt_val is not None else ''
+
+            if not prompt.strip():
                 logger.warning(
-                    f'No {self.args.input_key} found in item: {item}')
+                    f'No valid prompt found under keys [{self.args.input_key!r}, '
+                    f'"{DEFAULT_INPUT_KEY}"] for item with keys: {list(item.keys())}'
+                )
+                skipped_items += 1
                 continue
 
-            completed = completed_counts.get(prompt, 0)
-            remaining = max(0, self.args.n_samples - completed)
+            completed: int = completed_counts.get(prompt, 0)
+            remaining: int = max(0, self.args.n_samples - completed)
 
             for _ in range(remaining):
                 expanded_data.append(copy.deepcopy(item))
+
+        if skipped_items > 0:
+            logger.warning(
+                f'Skipped {skipped_items} items due to missing or empty prompt'
+            )
 
         return expanded_data
 
@@ -330,23 +410,50 @@ class InferenceRunner:
             result: The result dictionary to write
         """
         with self._file_lock:
-            with open(self.args.output_file, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(result, ensure_ascii=False) + '\n')
-                f.flush()  # Ensure data is immediately written
+            try:
+                with open(self.args.output_file, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                    f.flush()  # Ensure data is immediately written
+            except Exception as e:
+                logger.error(f'Error writing batch results: {e}')
+                raise IOError(f'Failed to write batch results: {e}') from e
 
-    def process_item(self, item: Dict[str, Any]) -> None:
+    def process_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single item and write the result to the output file.
 
+        This method handles the complete processing pipeline for a single input item:
+        1. Extracts the query from the item
+        2. Makes the API call through the client
+        3. Processes and validates the response
+        4. Writes the result to the output file
+
         Args:
-            item: The data item to process
+            item: The data item to process, must contain either input_key or 'prompt'
+
+        Returns:
+            Optional[Dict[str, Any]]: The processed result if successful, None if processing failed
+
+        Note:
+            - Errors are logged but don't stop execution
+            - Failed items are skipped but logged
+            - Empty or invalid responses are logged and skipped
         """
+        if not isinstance(item, dict):
+            logger.error(f'Invalid item type: {type(item)}, expected dict')
+            return None
+
         try:
-            query = item.get(self.args.input_key) or item.get('prompt')
+            # Extract query with detailed validation
+            query = item.get(self.args.input_key)
+            if not query:
+                query = item.get('prompt')
             if not query:
                 logger.warning(
-                    f'No {self.args.input_key} found in item: {item}')
-                return
+                    f'No {self.args.input_key} or "prompt" found in item: {item}'
+                )
+                return None
 
+            # Make API call with all necessary parameters
             response = self.client.get_content(
                 query=query,
                 system_prompt=self.system_prompt,
@@ -369,29 +476,18 @@ class InferenceRunner:
                 )
 
         except ClientError as e:
-            logger.error(f'Failed to get content for item. Error: {e}')
-            # Don't write error entries - just log and continue
+            logger.error(f'API client error processing item: {str(e)}')
+            if hasattr(e, 'original_error'):
+                logger.debug(f'Original error: {e.original_error}')
+            return None
+
+        except (ValueError, TypeError) as e:
+            logger.error(f'Validation error processing item: {str(e)}')
+            return None
+
         except Exception as e:
-            logger.error(f'Unexpected error processing item: {e}')
-            # Don't write error entries - just log and continue
-
-    def _validate_arguments(self) -> None:
-        """Validate runner arguments.
-
-        Raises:
-            FileNotFoundError: If input file doesn't exist
-            ValueError: If output file path is not provided
-        """
-        if not self.args.input_file or not Path(self.args.input_file).exists():
-            raise FileNotFoundError(
-                f'Input file not found: {self.args.input_file}')
-        if not self.args.output_file:
-            raise ValueError('Output file path is required')
-
-    def _setup_output_directory(self) -> None:
-        """Create output directory if it doesn't exist."""
-        output_path = Path(self.args.output_file)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.error(f'Unexpected error processing item: {str(e)}',
+                         exc_info=True)
 
     def _process_concurrently(self, expanded_data: List[Dict[str,
                                                              Any]]) -> None:
@@ -450,24 +546,35 @@ class InferenceRunner:
         This method orchestrates the entire inference process, including data loading,
         concurrent processing, and progress tracking.
         """
-        self._validate_arguments()
+        if not self.args.input_file or not Path(self.args.input_file).exists():
+            raise FileNotFoundError(
+                f'Input file not found: {self.args.input_file}')
+        if not self.args.output_file:
+            raise ValueError('Output file path is required')
 
-        expanded_data = self.load_data()
-        total_tasks = len(expanded_data)
+        try:
+            # Load data (including resume functionality)
+            eval_dataset: List[Dict[str, Any]] = self.load_data()
+            if not eval_dataset:
+                logger.info(
+                    'All samples have already been processed, skipping inference'
+                )
+                return
 
-        if total_tasks == 0:
+            output_path = Path(self.args.output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            logger.info(f'⏳ Starting to process {len(eval_dataset)} entries')
+
+            self._process_concurrently(eval_dataset)
+
             logger.info(
-                'All samples have already been processed, skipping inference. Exiting.'
-            )
-            return
+                f'All {len(eval_dataset)} samples have been processed.')
+            logger.info(f'Results saved to {self.args.output_file}')
 
-        logger.info(f'Total remaining samples to process: {total_tasks}')
-
-        self._setup_output_directory()
-        self._process_concurrently(expanded_data)
-
-        logger.info(f'All {total_tasks} samples have been processed.')
-        logger.info(f'Results saved to {self.args.output_file}')
+        except Exception as e:
+            logger.critical(f'❌ Fatal error during inference: {e}')
+            raise
 
 
 def main() -> None:
