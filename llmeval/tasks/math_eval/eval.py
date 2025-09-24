@@ -5,13 +5,19 @@ It takes a JSONL file as input, processes the data, and computes scores based on
 Currently, it supports evaluation for 'math_opensource' tasks.
 """
 
-import argparse
+import dataclasses
 import json
 import os
 import sys
 from typing import Any, Dict, List
 
+from transformers import HfArgumentParser
+
 from llmeval.tasks.math_eval.math_score import compute_scores
+from llmeval.utils.config import EvalTaskArguments
+from llmeval.utils.logger import init_logger
+
+logger = init_logger('math_eval')
 
 
 def _get_after_think(text: str) -> str:
@@ -73,30 +79,16 @@ def main() -> None:
     """
     Main function to parse arguments, load data, and run evaluation.
     """
-    parser = argparse.ArgumentParser(
-        description='Evaluate model outputs based on a specified task.')
-    parser.add_argument('--input_path',
-                        type=str,
-                        required=True,
-                        help='Path to the input JSONL file.')
-    parser.add_argument('--cache_path',
-                        type=str,
-                        required=True,
-                        help='Path to save cache results.')
-    parser.add_argument(
-        '--max_workers',
-        type=int,
-        default=128,
-        help='Maximum number of worker threads for parallel processing.')
-    parser.add_argument(
-        '--task_name',
-        type=str,
-        required=True,
-        help=
-        "Task must be in ['math_opensource/aime24', 'math_opensource/aime25' , 'livecodebench', 'ifeval']."
-    )
 
-    args = parser.parse_args()
+    # Parse command line arguments into a strongly typed dataclass
+    parser = HfArgumentParser(EvalTaskArguments)
+    args, = parser.parse_args_into_dataclasses()
+
+    # Log initialization with formatted argument display
+    logger.info(
+        'Initializing EvalTaskArguments with parsed command line arguments...')
+    logger.info('\n--- Parsed Arguments ---')
+    logger.info(json.dumps(dataclasses.asdict(args), indent=2))
 
     # Create the directory for the cache file if it doesn't exist
     os.makedirs(os.path.dirname(args.cache_path), exist_ok=True)
@@ -106,7 +98,7 @@ def main() -> None:
         with open(args.input_path, 'r', encoding='utf-8') as f:
             data = [json.loads(line) for line in f]
     except FileNotFoundError:
-        print(f"❌ Error: Input file not found at '{args.input_path}'")
+        logger.error(f"❌ Error: Input file not found at '{args.input_path}'")
         sys.exit(1)
     except json.JSONDecodeError:
         print(f"❌ Error: Invalid JSON format in '{args.input_path}'")

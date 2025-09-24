@@ -18,9 +18,12 @@ All configuration classes include validation logic to ensure parameter
 consistency and prevent runtime errors.
 """
 
+import dataclasses
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from transformers import HfArgumentParser
 
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
@@ -35,7 +38,7 @@ __all__ = [
     'OnlineInferArguments',
     'OfflineInferArguments',
     'VerifierInferArguments',
-    'EvaluationArguments',
+    'EvalTaskArguments',
 ]
 
 logger = init_logger('eval_config')
@@ -508,57 +511,100 @@ class VerifierInferArguments(DataArguments, PromptArguments,
             'VERIFY_PROMPT_FACTORY in llmeval/utils/verifier_template.py')
 
 
-# Backward compatibility: keep the old name but warn; default to offline behavior.
 @dataclass
-class EvaluationArguments(OfflineInferArguments):
+class EvalTaskArguments:
     """
-    Deprecated: Use OnlineInferArguments or OfflineInferArguments instead.
+    Arguments for task-specific evaluation configuration.
 
-    This class is kept for backward compatibility but will emit a warning.
-    It defaults to offline inference behavior.
+    This class handles the configuration parameters for evaluating model outputs
+    on specific tasks like math problems or code benchmarks.
+
+    Attributes:
+        input_path (str): Path to the input JSONL file containing evaluation data.
+        cache_path (str): Directory path for saving cached results.
+        max_workers (int): Maximum number of worker threads for parallel processing.
+        task_name (str): Name of the evaluation task to run.
+            Must be one of: ['math_opensource/aime24', 'math_opensource/aime25',
+                           'livecodebench', 'ifeval']
     """
+    input_path: str = field(
+        metadata={
+            'help': 'Path to the input JSONL file containing evaluation data.'
+        })
+    cache_path: str = field(
+        metadata={'help': 'Directory path for saving cached results.'})
+    max_workers: int = field(
+        default=128,
+        metadata={
+            'help': 'Maximum number of worker threads for parallel processing.'
+        })
+    task_name: str = field(
+        metadata={
+            'help':
+            'Task must be in [math_opensource/aime24, math_opensource/aime25, '
+            'livecodebench, ifeval].'
+        })
+    input_key: str = field(default='prompt',
+                           metadata={'help': 'Key for input text in dataset.'})
+    label_key: str = field(
+        default='answer',
+        metadata={'help': 'Key for target/label text in dataset.'})
+    response_key: str = field(
+        default='gen', metadata={'help': 'Key for model generated text.'})
+    VALID_TASKS: List[str] = [
+        'math_opensource/aime24', 'math_opensource/aime25', 'livecodebench',
+        'ifeval'
+    ]
 
     def __post_init__(self) -> None:
         """
-        Initialize with deprecation warning.
+        Validate evaluation task arguments after initialization.
+
+        Raises:
+            ValueError: If required fields are missing or invalid.
         """
-        logger.warning(
-            'EvaluationArguments is deprecated. Use OnlineInferArguments or '
-            'OfflineInferArguments instead.')
-        super().__post_init__()
+        if not self.input_path:
+            raise ValueError('input_path is required')
+        if not self.cache_path:
+            raise ValueError('cache_path is required')
+        if self.max_workers <= 0:
+            raise ValueError(
+                f'max_workers must be positive, got {self.max_workers}')
+
+        if self.task_name not in self.VALID_TASKS:
+            raise ValueError(f'task_name must be one of {self.VALID_TASKS}, '
+                             f'got {self.task_name}')
 
 
 # Example usage
 def main() -> None:
     """
-    Demonstrates how to initialize and use the EvaluationArguments class.
+    Example of using the configuration classes for argument parsing.
 
-    This function shows how to use the HfArgumentParser to parse command-line
-    arguments into the configuration classes.
+    This function demonstrates how to:
+    1. Parse command-line arguments into strongly-typed dataclasses
+    2. Validate configuration parameters
+    3. Handle multiple configuration types (eval, online, offline)
+    4. Process the parsed arguments
 
     Raises:
-        ImportError: If transformers library is not installed.
+        ImportError: If transformers library is not installed
+        ValueError: If required arguments are missing or invalid
     """
-    try:
-        from transformers import HfArgumentParser
-    except ImportError:
-        raise ImportError(
-            'Please install the transformers library to use HfArgumentParser: '
-            'pip install transformers')
+    # Create parser instances for different argument types
+    parser = HfArgumentParser((EvalTaskArguments, ))
 
-    # Create an HfArgumentParser instance for the EvaluationArguments class.
-    # It automatically reads all fields and metadata from the dataclass.
-    parser = HfArgumentParser(EvaluationArguments)
+    # Parse command-line arguments into respective dataclasses
+    eval_args = parser.parse_args_into_dataclasses()
 
-    # Parse the command-line arguments and get an instance of EvaluationArguments.
-    # The return value is a tuple, we only need the first element.
-    eval_args, = parser.parse_args_into_dataclasses()
+    # Log the parsed arguments
+    logger.info('Initializing with parsed command line arguments...')
+    logger.info('\n=== Evaluation Task Arguments ===')
+    logger.info(json.dumps(dataclasses.asdict(eval_args), indent=2))
 
-    logger.info(
-        'Initializing EvaluationArguments with parsed command line arguments...'
-    )
-    print('\n--- Parsed Arguments ---')
-    print(eval_args)
+    # Example of how to use the parsed arguments
+    logger.info(f'\nConfigured for task: {eval_args.task_name}')
+    logger.info(f'Processing input file: {eval_args.input_path}')
 
 
 if __name__ == '__main__':

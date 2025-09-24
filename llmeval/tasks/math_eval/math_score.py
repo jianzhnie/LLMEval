@@ -133,7 +133,7 @@ def compute_scores(jobs: List[Dict[str, Any]], max_workers: int,
             # `pool.map` submits jobs and returns a future
             future = pool.map(process_answers,
                               list(enumerate(jobs)),
-                              timeout=10)
+                              timeout=20)
 
             # Iterate over the results as they become available.
             iterator = future.result()
