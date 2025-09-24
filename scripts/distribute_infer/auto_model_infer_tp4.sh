@@ -791,42 +791,37 @@ main() {
         exit 1
     fi
 
-    # 构建可用节点数组
+    # 构建可用节点和失败节点信息
     local -a available_nodes=()
     local -a available_ports=()
+    local -a failed_nodes=()
+    declare -A failed_instances  # 关联数组存储每个节点的失败实例信息
+
+    # 使用关联数组标记就绪的节点
+    declare -A ready_node_map
     for idx in "${ready_indices[@]}"; do
+        ready_node_map["${NODES[idx]}"]=1
         available_nodes+=("${NODES[idx]}")
-        available_ports+=("${PORTS[idx]}")
+        # 添加该节点的所有实例端口
+        for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
+            available_ports+=("${PORTS[$((idx * INSTANCES_PER_NODE + j))]}")
+        done
     done
 
-    # 找出未成功部署的节点和实例
-    local -a failed_nodes=()
-    local -A failed_instances=()  # 关联数组存储每个节点的失败实例信息
-
-    # 检查每个节点的每个实例
+    # 基于ready_node_map快速识别失败的节点和实例
     for ((i = 0; i < ${#NODES[@]}; i++)); do
         local node="${NODES[i]}"
-        local node_has_failure=false
-        local failed_instance_info=""
-
-        # 检查该节点的所有实例
-        for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
-            local port_idx=$((i * INSTANCES_PER_NODE + j))
-            local port="${PORTS[port_idx]}"
-            local status_file="${LOG_DIR}/status/status_${node//./_}_${j}.ok"
-
-            if [[ ! -f "$status_file" ]]; then
-                node_has_failure=true
-                # 收集失败实例信息
+        if [[ -z "${ready_node_map[$node]}" ]]; then
+            failed_nodes+=("$node")
+            local failed_instance_info=""
+            # 收集该节点所有实例的端口信息
+            for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
+                local port_idx=$((i * INSTANCES_PER_NODE + j))
                 if [[ -n "$failed_instance_info" ]]; then
                     failed_instance_info+=", "
                 fi
-                failed_instance_info+="实例${j}(端口:${port})"
-            fi
-        done
-
-        if [[ "$node_has_failure" == true ]]; then
-            failed_nodes+=("$node")
+                failed_instance_info+="实例${j}(端口:${PORTS[port_idx]})"
+            done
             failed_instances["$node"]="$failed_instance_info"
         fi
     done
