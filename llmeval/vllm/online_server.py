@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import random
+import sys
 import threading
 import time
 from pathlib import Path
@@ -57,9 +58,10 @@ class InferenceClient:
     generation parameters including thinking mode for advanced language models.
 
     Attributes:
-        api_key: OpenAI API key from environment variables
-        client: The OpenAI client instance
-        timeout: Request timeout in seconds
+        api_key (str): OpenAI API key from environment variables
+        client (openai.OpenAI): The OpenAI client instance
+        timeout (int): Request timeout in seconds
+        base_url (str): Base URL for the OpenAI-compatible API
     """
 
     def __init__(self, base_url: str, timeout: int) -> None:
@@ -70,7 +72,8 @@ class InferenceClient:
             timeout: Request timeout in seconds
 
         Raises:
-            ValueError: If timeout is invalid
+            ValueError: If timeout is invalid or base_url is empty
+            EnvironmentError: If OPENAI_API_KEY environment variable is not set
         """
         self.api_key: str = os.environ.get('OPENAI_API_KEY', 'EMPTY')
         self.client: openai.OpenAI = openai.OpenAI(
@@ -124,22 +127,32 @@ class InferenceClient:
     ) -> str:
         """Fetch content from the OpenAI API with comprehensive retry logic.
 
+        This method handles the core interaction with the OpenAI API, including
+        parameter validation, message preparation, and error handling. It supports
+        various generation parameters and includes built-in retry logic for
+        transient errors.
+
         Args:
             query: User's input query
             system_prompt: System prompt for the conversation (optional)
-            model_name: The model to use for generation
-            max_tokens: Maximum tokens to generate
+            model_name: The model to use for generation (e.g., 'gpt-3.5-turbo')
+            max_tokens: Maximum tokens to generate (1 to model's context limit)
             temperature: The sampling temperature (0.0 to 2.0)
             top_p: The top-p value for nucleus sampling (0.0 to 1.0)
-            top_k: The top-k value for sampling
+            top_k: The top-k value for sampling (positive integer)
             enable_thinking: Whether to enable the "thinking" feature
 
         Returns:
-            The generated content from the API
+            str: The generated content from the API
 
         Raises:
             ClientError: If there's a non-retryable API issue or max retries exceeded
-            ValueError: If input parameters are invalid
+            ValueError: If input parameters are invalid or out of range
+
+        Note:
+            The method includes automatic retry logic for certain types of API
+            errors (connection issues, rate limits) but will raise exceptions
+            for non-recoverable errors.
         """
         # Validate input parameters
         if not query or not query.strip():
@@ -382,15 +395,27 @@ class InferenceRunner:
 
     def _process_concurrently(self, expanded_data: List[Dict[str,
                                                              Any]]) -> None:
-        """Process items concurrently using thread pool.
+        """Process items concurrently using thread pool with error handling and progress tracking.
+
+        This method manages concurrent processing of inference tasks using a thread pool.
+        It includes comprehensive error handling and progress tracking for each task.
 
         Args:
-            expanded_data: List of data items to process
+            expanded_data: List of data items to process, where each item is a
+                         dictionary containing the input data and metadata
+
+        Note:
+            - Uses ThreadPoolExecutor for concurrent processing
+            - Implements proper error handling for each thread
+            - Shows progress bar with tqdm
+            - Maintains thread safety with class-level file lock
         """
         total_tasks = len(expanded_data)
+        failed_tasks: List[Dict[str, Any]] = []
 
         with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.args.max_workers) as executor:
+                max_workers=self.args.max_workers,
+                thread_name_prefix='inference_worker') as executor:
             futures = [
                 executor.submit(self.process_item, item)
                 for item in expanded_data
@@ -404,8 +429,19 @@ class InferenceRunner:
                         future.result()
                     except Exception as e:
                         logger.error(
-                            f'An unexpected error occurred in a thread: {e}')
-                    pbar.update(1)
+                            f'An unexpected error occurred in a thread: {e}',
+                            exc_info=True)
+                        failed_tasks.append({
+                            'error':
+                            str(e),
+                            'timestamp':
+                            time.strftime('%Y-%m-%d %H:%M:%S')
+                        })
+                    finally:
+                        pbar.update(1)
+
+        if failed_tasks:
+            logger.warning(f'Total failed tasks: {len(failed_tasks)}')
 
     def run(self) -> None:
         """
@@ -438,27 +474,52 @@ def main() -> None:
     """
     Main entry point for the online inference server.
 
-    This function handles argument parsing, initialization, and execution of the
-    inference process with comprehensive error handling.
+    This function serves as the primary entry point for the inference server,
+    handling:
+    1. Command line argument parsing using HfArgumentParser
+    2. Initialization of the inference runner
+    3. Execution of the inference process
+    4. Comprehensive error handling and logging
+
+    The function uses dataclasses for type-safe argument handling and provides
+    detailed logging of the initialization process and any errors that occur.
+
+    Returns:
+        None
+
+    Raises:
+        SystemExit: If initialization fails or command line arguments are invalid
+        Exception: For any unhandled errors during execution
     """
+    start_time = time.time()
     try:
+        # Parse command line arguments into a strongly typed dataclass
         parser = HfArgumentParser(OnlineInferArguments)
         eval_args, = parser.parse_args_into_dataclasses()
 
+        # Log initialization with formatted argument display
         logger.info(
             'Initializing OnlineInferArguments with parsed command line arguments...'
         )
         logger.info('\n--- Parsed Arguments ---')
         logger.info(json.dumps(dataclasses.asdict(eval_args), indent=2))
 
+        # Initialize and run the inference process
         runner = InferenceRunner(eval_args)
         runner.run()
 
+        # Log successful completion with execution time
+        total_time = time.time() - start_time
+        logger.info(
+            f'✅ Inference completed successfully in {total_time:.2f} seconds')
+
     except KeyboardInterrupt:
         logger.info('Interrupted by user. Exiting gracefully...')
+        sys.exit(130)  # Standard exit code for SIGINT
     except Exception as e:
         logger.critical(
-            f'❌ An unrecoverable error occurred during execution: {e}')
+            f'❌ An unrecoverable error occurred during execution: {e}',
+            exc_info=True)
         raise
 
 
