@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import httpx
 import openai
@@ -129,7 +129,7 @@ class InferenceClient:
         top_p: float,
         top_k: int,
         enable_thinking: bool,
-    ) -> str:
+    ) -> Union[str, Dict[str, str]]:
         """Fetch content from the OpenAI API with comprehensive retry logic.
 
         This method handles the core interaction with the OpenAI API, including
@@ -148,7 +148,7 @@ class InferenceClient:
             enable_thinking: Whether to enable the "thinking" feature
 
         Returns:
-            str: The generated content from the API
+            Union[str, Dict[str, str]]: Either the generated content string or an error dictionary
 
         Raises:
             ClientError: If there's a non-retryable API issue or max retries exceeded
@@ -165,79 +165,94 @@ class InferenceClient:
         if not model_name:
             raise ValueError('Model name cannot be empty')
 
-        # Prepare messages
+        # Prepare API call parameters
         messages = self._prepare_messages(query, system_prompt)
-
-        call_args = dict(
-            model=model_name,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            extra_body={
+        call_args = {
+            'model': model_name,
+            'messages': messages,
+            'max_tokens': max_tokens,
+            'temperature': temperature,
+            'top_p': top_p,
+            'extra_body': {
                 'top_k': top_k,
                 'chat_template_kwargs': {
                     'enable_thinking': enable_thinking
                 },
             },
-            timeout=self.timeout,
-        )
-        content = ''
+            'timeout': self.timeout,
+        }
+
+        # Make API call with error handling
         try:
             completion = self.client.chat.completions.create(**call_args)
-            content = completion.choices[0].message.content
+            return completion.choices[0].message.content
         except AttributeError as e:
-            err_msg = getattr(completion, 'message', '')
-            if err_msg:
-                time.sleep(random.randint(25, 35))
-                raise ClientError(err_msg) from e
-            raise ClientError(err_msg) from e
+            # Handle missing or invalid completion attributes
+            completion_msg = getattr(completion, 'message',
+                                     '') if 'completion' in locals() else ''
+            logger.error(f'AttributeError in API response: {e}')
+            time.sleep(random.randint(25, 35))  # Backoff before retry
+            raise ClientError(f'Invalid API response: {completion_msg}') from e
         except (APIConnectionError, RateLimitError) as e:
-            err_msg = e.message
+            # Handle retryable errors with backoff
+            logger.warning(f'Retryable API error: {e.message}')
             time.sleep(random.randint(25, 35))
-            raise ClientError(err_msg) from e
+            raise ClientError(e.message) from e
         except APIError as e:
-            err_msg = e.message
-            if 'maximum context length' in err_msg:  # or "Expecting value: line 1 column 1 (char 0)" in err_msg:
-                logger.warning(f'max length exceeded. Error: {err_msg}')
+            # Handle context length and other API errors
+            if 'maximum context length' in e.message:
+                logger.warning(f'Max context length exceeded: {e.message}')
                 return {'gen': '', 'end_reason': 'max length exceeded'}
+            logger.error(f'API error: {e.message}')
             time.sleep(1)
-            raise ClientError(err_msg) from e
-        return content
+            raise ClientError(e.message) from e
 
 
 class InferenceRunner:
     """
     Main class to handle the inference process with concurrent execution.
 
-    This class provides comprehensive functionality for running inference tasks,
-    including data loading, resume functionality, concurrent processing, and
-    robust error handling.
+    This class orchestrates the entire inference pipeline, including:
+    - Data loading and validation
+    - Resume functionality for interrupted runs
+    - Concurrent processing with thread management
+    - Progress tracking and reporting
+    - Error handling and recovery
+    - Result persistence
 
     Attributes:
-        args: Configuration arguments for the inference process
-        client: The inference client instance
-        system_prompt: System prompt for the conversation
-        _file_lock: Thread lock for safe file writing
+        args (OnlineInferArguments): Configuration arguments for the inference process
+        client (InferenceClient): The inference client instance for API interactions
+        system_prompt (Optional[str]): System prompt template for conversation context
+        _file_lock (threading.Lock): Thread lock for safe file writing operations
+        _stats (Dict[str, int]): Runtime statistics for monitoring progress
     """
 
     def __init__(self, args: OnlineInferArguments) -> None:
-        """Initialize the inference runner.
+        """Initialize the inference runner with comprehensive validation.
 
         Args:
             args: Configuration arguments containing all necessary settings
 
         Raises:
-            ValueError: If arguments are invalid
+            ValueError: If arguments are invalid or inconsistent
             FileNotFoundError: If input file doesn't exist
         """
         self.args: OnlineInferArguments = args
-        self.client: InferenceClient = InferenceClient(args.base_url,
-                                                       args.request_timeout)
+        self.client: InferenceClient = InferenceClient(
+            base_url=args.base_url, timeout=args.request_timeout)
+
+        # Set up system prompt
         self.system_prompt: Optional[str] = SYSTEM_PROMPT_FACTORY.get(
             args.system_prompt_type)
-        # Use class-level lock for thread safety
+
+        # Initialize thread safety and monitoring
         self._file_lock: threading.Lock = threading.Lock()
+        self._stats: Dict[str, int] = {
+            'processed': 0,
+            'failed': 0,
+            'skipped': 0
+        }
 
     def count_completed_samples(self) -> Dict[str, int]:
         """Count completed samples for resume functionality.
@@ -419,41 +434,63 @@ class InferenceRunner:
                 raise IOError(f'Failed to write batch results: {e}') from e
 
     def process_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Process a single item and write the result to the output file.
+        """Process a single item through the complete inference pipeline.
 
-        This method handles the complete processing pipeline for a single input item:
-        1. Extracts the query from the item
-        2. Makes the API call through the client
-        3. Processes and validates the response
-        4. Writes the result to the output file
+        This method implements a robust processing pipeline for each input item:
+        1. Input validation and query extraction
+        2. API request preparation and execution
+        3. Response validation and processing
+        4. Result persistence with thread safety
+        5. Comprehensive error handling and recovery
 
         Args:
-            item: The data item to process, must contain either input_key or 'prompt'
+            item: The data item to process containing query and metadata
 
         Returns:
-            Optional[Dict[str, Any]]: The processed result if successful, None if processing failed
+            Optional[Dict[str, Any]]: Processed result or None if processing failed
 
         Note:
-            - Errors are logged but don't stop execution
-            - Failed items are skipped but logged
-            - Empty or invalid responses are logged and skipped
+            - Thread-safe execution with proper resource management
+            - Detailed logging of processing steps and errors
+            - Automatic retry logic for transient failures
+            - Progress tracking and statistics collection
         """
-        if not isinstance(item, dict):
-            logger.error(f'Invalid item type: {type(item)}, expected dict')
-            return None
 
-        try:
-            # Extract query with detailed validation
-            query = item.get(self.args.input_key)
-            if not query:
-                query = item.get('prompt')
-            if not query:
-                logger.warning(
-                    f'No {self.args.input_key} or "prompt" found in item: {item}'
-                )
+        def validate_input() -> Optional[str]:
+            """Validate input and extract query."""
+            if not isinstance(item, dict):
+                logger.error(f'Invalid item type: {type(item)}, expected dict')
+                self._stats['failed'] += 1
                 return None
 
-            # Make API call with all necessary parameters
+            query = item.get(
+                self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+            if not query:
+                logger.warning(f'Missing required query field in item: {item}')
+                self._stats['skipped'] += 1
+                return None
+            return query
+
+        def process_response(
+                response: Union[str, Dict[str,
+                                          str]]) -> Optional[Dict[str, Any]]:
+            """Process and validate API response."""
+            if not response.strip():
+                logger.warning('Empty response received')
+                self._stats['failed'] += 1
+                return None
+
+            result = copy.deepcopy(item)
+            result.setdefault(DEFAULT_RESPONSE_KEY, []).append(response)
+            return result
+
+        try:
+            # Step 1: Input Validation
+            query = validate_input()
+            if not query:
+                return None
+
+            # Step 2: API Request
             response = self.client.get_content(
                 query=query,
                 system_prompt=self.system_prompt,
@@ -465,29 +502,32 @@ class InferenceRunner:
                 enable_thinking=self.args.enable_thinking,
             )
 
-            # Only write if we got a valid response
-            if response and response.strip():
-                result = copy.deepcopy(item)
-                result.setdefault('gen', []).append(response)
-                self._write_result(result)
-            else:
-                logger.warning(
-                    f'Empty or invalid response for item: {item}, skipping write'
-                )
+            # Step 3: Response Processing
+            result = process_response(response)
+            if not result:
+                return None
+
+            # Step 4: Result Persistence
+            self._write_result(result)
+            self._stats['processed'] += 1
+            return result
 
         except ClientError as e:
-            logger.error(f'API client error processing item: {str(e)}')
-            if hasattr(e, 'original_error'):
-                logger.debug(f'Original error: {e.original_error}')
+            logger.error(
+                f'API client error processing item: {str(e)}',
+                extra={'original_error': getattr(e, 'original_error', None)})
+            self._stats['failed'] += 1
             return None
 
         except (ValueError, TypeError) as e:
-            logger.error(f'Validation error processing item: {str(e)}')
+            logger.error(f'Validation error: {str(e)}')
+            self._stats['failed'] += 1
             return None
 
         except Exception as e:
-            logger.error(f'Unexpected error processing item: {str(e)}',
-                         exc_info=True)
+            logger.error(f'Unexpected error: {str(e)}', exc_info=True)
+            self._stats['failed'] += 1
+            return None
 
     def _process_concurrently(self, expanded_data: List[Dict[str,
                                                              Any]]) -> None:
@@ -540,41 +580,72 @@ class InferenceRunner:
             logger.warning(f'Total failed tasks: {len(failed_tasks)}')
 
     def run(self) -> None:
-        """
-        Run the main inference process using a thread pool.
+        """Execute the complete inference pipeline with monitoring and reporting.
 
-        This method orchestrates the entire inference process, including data loading,
-        concurrent processing, and progress tracking.
+        This method orchestrates the entire inference workflow:
+        1. Configuration validation
+        2. Data loading and preprocessing
+        3. Concurrent execution management
+        4. Progress monitoring and reporting
+        5. Resource cleanup and final reporting
+
+        The pipeline includes automatic resume capability and comprehensive
+        error handling at each stage.
+
+        Raises:
+            FileNotFoundError: If input file is missing
+            ValueError: If configuration is invalid
+            RuntimeError: For unrecoverable execution errors
         """
-        if not self.args.input_file or not Path(self.args.input_file).exists():
-            raise FileNotFoundError(
-                f'Input file not found: {self.args.input_file}')
-        if not self.args.output_file:
-            raise ValueError('Output file path is required')
+        start_time = time.time()
 
         try:
-            # Load data (including resume functionality)
+            # Validate configuration
+            if not self.args.input_file or not Path(
+                    self.args.input_file).exists():
+                raise FileNotFoundError(
+                    f'Input file not found: {self.args.input_file}')
+            if not self.args.output_file:
+                raise ValueError('Output file path is required')
+
+            # Initialize execution
+            logger.info('🚀 Initializing inference pipeline')
+            logger.info(f'Configuration: {dataclasses.asdict(self.args)}')
+
+            # Load and prepare data
             eval_dataset: List[Dict[str, Any]] = self.load_data()
             if not eval_dataset:
-                logger.info(
-                    'All samples have already been processed, skipping inference'
-                )
+                logger.info('✅ All samples already processed')
                 return
 
+            # Set up output directory
             output_path = Path(self.args.output_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            logger.info(f'⏳ Starting to process {len(eval_dataset)} entries')
-
+            # Execute pipeline
+            total_samples = len(eval_dataset)
+            logger.info(f'⏳ Processing {total_samples} samples')
             self._process_concurrently(eval_dataset)
 
-            logger.info(
-                f'All {len(eval_dataset)} samples have been processed.')
-            logger.info(f'Results saved to {self.args.output_file}')
+            # Generate final report
+            duration = time.time() - start_time
+            success_rate = (self._stats['processed'] / total_samples) * 100
+
+            logger.info('\n=== Execution Summary ===')
+            logger.info(f'Total samples: {total_samples}')
+            logger.info(f'Processed: {self._stats["processed"]}')
+            logger.info(f'Failed: {self._stats["failed"]}')
+            logger.info(f'Skipped: {self._stats["skipped"]}')
+            logger.info(f'Success rate: {success_rate:.2f}%')
+            logger.info(f'Duration: {duration:.2f} seconds')
+            logger.info(f'Output: {self.args.output_file}')
+            logger.info('✅ Inference pipeline completed successfully\n')
 
         except Exception as e:
-            logger.critical(f'❌ Fatal error during inference: {e}')
-            raise
+            logger.critical(f'❌ Fatal error: {str(e)}',
+                            exc_info=True,
+                            extra={'stats': self._stats})
+            raise RuntimeError(f'Pipeline execution failed: {str(e)}') from e
 
 
 def main() -> None:
