@@ -4,12 +4,11 @@ import copy
 import json
 import logging
 import os
-import random
 import threading
 from typing import Any, Dict, List, Optional
 
 import httpx
-from openai import APIConnectionError, APIError, AsyncOpenAI, RateLimitError
+from openai import APIError, AsyncOpenAI
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
@@ -28,7 +27,7 @@ class ClientError(RuntimeError):
 class AsyncInferenceClient:
     """An async client to interact with the OpenAI-compatible API."""
 
-    def __init__(self, base_url: str, timeout: int, max_retries: int = 3):
+    def __init__(self, base_url: str, timeout: int):
         self.api_key = os.environ.get('OPENAI_API_KEY', 'EMPTY')
         self.client = AsyncOpenAI(
             api_key=self.api_key,
@@ -36,7 +35,6 @@ class AsyncInferenceClient:
             timeout=httpx.Timeout(timeout),
         )
         self.timeout = timeout
-        self.max_retries = max_retries
 
     async def get_content(
         self,
@@ -58,54 +56,36 @@ class AsyncInferenceClient:
             messages.append({'role': 'system', 'content': system_prompt})
         messages.append({'role': 'user', 'content': query})
 
-        for attempt in range(self.max_retries):
-            try:
-                completion = await self.client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    extra_body={
-                        'top_k': top_k,
-                        'chat_template_kwargs': {
-                            'enable_thinking': enable_thinking
-                        },
+        try:
+            completion = await self.client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                extra_body={
+                    'top_k': top_k,
+                    'chat_template_kwargs': {
+                        'enable_thinking': enable_thinking
                     },
-                    timeout=self.timeout,
-                )
-                content = completion.choices[0].message.content
-                return content
+                },
+                timeout=self.timeout,
+            )
+            content = completion.choices[0].message.content
+            return content
 
-            except (APIConnectionError, RateLimitError) as e:
-                if attempt < self.max_retries - 1:
-                    wait_time = random.uniform(0.5, 1.5) * (2**attempt)
-                    logger.warning(
-                        f'API connection error or rate limit exceeded '
-                        f'(attempt {attempt + 1}/{self.max_retries}): {str(e)}. '
-                        f'Retrying in {wait_time:.1f}s...')
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    logger.error(
-                        f'Max retries exceeded for API connection error: {str(e)}'
-                    )
-                    raise ClientError(
-                        f'Retryable error after {self.max_retries} attempts: {str(e)}'
-                    ) from e
+        except APIError as e:
+            e_str = str(e)
+            if 'maximum context length' in e_str:
+                logger.warning(
+                    f'Maximum context length exceeded. Error: {e_str}')
+                return ''
+            logger.error(f'Unrecoverable API error: {e_str}')
+            raise ClientError(f'Unrecoverable error: {e_str}') from e
 
-            except APIError as e:
-                e_str = str(e)
-                if 'maximum context length' in e_str:
-                    logger.warning(
-                        f'Maximum context length exceeded. Error: {e_str}')
-                    return ''
-                logger.error(f'Unrecoverable API error: {e_str}')
-                raise ClientError(f'Unrecoverable error: {e_str}') from e
-
-            except Exception as e:
-                logger.error(f'An unexpected error occurred: {str(e)}')
-                raise ClientError(f'Unexpected error: {str(e)}') from e
+        except Exception as e:
+            logger.error(f'An unexpected error occurred: {str(e)}')
+            raise ClientError(f'Unexpected error: {str(e)}') from e
 
 
 class InferenceRunner:
@@ -113,9 +93,7 @@ class InferenceRunner:
 
     def __init__(self, args: OnlineInferArguments):
         self.args: OnlineInferArguments = args
-        self.client = AsyncInferenceClient(args.base_url,
-                                           args.request_timeout,
-                                           max_retries=self.args.max_retries)
+        self.client = AsyncInferenceClient(args.base_url, args.request_timeout)
         self.system_prompt = SYSTEM_PROMPT_FACTORY.get(args.system_prompt_type)
         # File lock remains useful to serialize writes even in async context (thread-safe file IO)
         self._file_lock = threading.Lock()

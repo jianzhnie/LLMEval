@@ -342,7 +342,6 @@ class ServerArguments:
         max_workers (int): Maximum number of worker threads for client-side concurrency.
         base_url (str): Base URL of the OpenAI-compatible server.
         model_name (str): Model name to use on the server.
-        max_retries (int): Maximum number of retries for API calls.
         request_timeout (int): Timeout (seconds) for requests to server.
 
     Raises:
@@ -354,9 +353,6 @@ class ServerArguments:
                           metadata={'help': 'Base URL of VLLM server'})
     model_name: str = field(default='gpt-4o',
                             metadata={'help': 'Model name of VLLM server'})
-    max_retries: int = field(
-        default=3,
-        metadata={'help': 'Maximum number of retries for API calls.'})
     request_timeout: int = field(
         default=60, metadata={'help': 'Timeout for requests to VLLM server.'})
 
@@ -371,9 +367,6 @@ class ServerArguments:
             raise ValueError(
                 f'Maximum number of worker threads must be a positive integer, '
                 f'but got {self.max_workers}.')
-        if self.max_retries < 0:
-            raise ValueError(
-                f'Max retries must be non-negative, got: {self.max_retries}')
         if self.request_timeout <= 0:
             raise ValueError(f'Request timeout must be a positive integer, '
                              f'but got {self.request_timeout}.')

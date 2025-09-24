@@ -60,22 +60,17 @@ class InferenceClient:
         api_key: OpenAI API key from environment variables
         client: The OpenAI client instance
         timeout: Request timeout in seconds
-        max_retries: Maximum number of retry attempts
     """
 
-    def __init__(self,
-                 base_url: str,
-                 timeout: int,
-                 max_retries: int = 3) -> None:
+    def __init__(self, base_url: str, timeout: int) -> None:
         """Initialize the inference client.
 
         Args:
             base_url: Base URL for the OpenAI-compatible API
             timeout: Request timeout in seconds
-            max_retries: Maximum number of retry attempts for failed requests
 
         Raises:
-            ValueError: If timeout or max_retries are invalid
+            ValueError: If timeout is invalid
         """
         self.api_key: str = os.environ.get('OPENAI_API_KEY', 'EMPTY')
         self.client: openai.OpenAI = openai.OpenAI(
@@ -84,35 +79,6 @@ class InferenceClient:
             timeout=httpx.Timeout(timeout),
         )
         self.timeout: int = timeout
-        self.max_retries: int = max_retries
-
-    def calculate_wait_time(self, attempt: int, error_type: str) -> float:
-        """Calculate retry wait time with exponential backoff.
-
-        Args:
-            attempt: Current retry attempt (0-based)
-            error_type: Error type ('rate_limit' or 'connection')
-
-        Returns:
-            Wait time in seconds
-        """
-        # Base wait time varies by error type
-        if error_type == 'rate_limit':
-            base_min, base_max = 1.0, 3.0  # Rate limit: shorter wait
-        else:  # connection error
-            base_min, base_max = 2.0, 5.0  # Connection error: longer wait
-
-        # Exponential backoff with maximum multiplier limit
-        max_multiplier = 8
-        multiplier = min(2**attempt, max_multiplier)
-
-        # Calculate wait time with jitter
-        wait_time = random.uniform(base_min, base_max) * multiplier
-
-        # Cap maximum wait time
-        max_wait = 60.0
-        wait_time = min(wait_time, max_wait)
-        return wait_time
 
     def _prepare_messages(
             self, query: str,
@@ -184,68 +150,42 @@ class InferenceClient:
         # Prepare messages
         messages = self._prepare_messages(query, system_prompt)
 
-        # Retry logic with exponential backoff
-        for attempt in range(self.max_retries):
-            try:
-                completion = self.client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    extra_body={
-                        'top_k': top_k,
-                        'chat_template_kwargs': {
-                            'enable_thinking': enable_thinking
-                        },
-                    },
-                    timeout=self.timeout,
-                )
-
-                content = completion.choices[0].message.content
-                if content is None:
-                    logger.warning('Received None content from API')
-                    return ''
-
-                return content
-
-            except (APIConnectionError, RateLimitError) as e:
-                if attempt < self.max_retries - 1:
-                    # Determine wait strategy based on error type
-                    error_type = 'rate_limit' if isinstance(
-                        e, RateLimitError) else 'connection'
-                    wait_time = self.calculate_wait_time(attempt, error_type)
-
-                    logger.warning(
-                        f'API {error_type} error (attempt {attempt + 1}/{self.max_retries}): {e.message}. '
-                        f'Retrying in {wait_time:.1f}s...')
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    logger.error(
-                        f'Max retries exceeded for API connection error: {e.message}'
-                    )
-                    raise ClientError(
-                        f'Retryable error after {self.max_retries} attempts: {e.message}',
-                        original_error=e) from e
-
-            except APIError as e:
-                if 'maximum context length' in e.message:
-                    logger.warning(
-                        f'Maximum context length exceeded. Error: {e.message}')
-                    return ''
-                logger.error(f'Unrecoverable API error: {e.message}')
-                raise ClientError(f'Unrecoverable error: {e.message}',
-                                  original_error=e) from e
-
-            except Exception as e:
-                logger.error(f'An unexpected error occurred: {e}')
-                raise ClientError(f'Unexpected error: {e}',
-                                  original_error=e) from e
-
-        # This should never be reached, but just in case
-        raise ClientError(
-            f'Unexpected end of retry loop after {self.max_retries} attempts')
+        call_args = dict(
+            model=model_name,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            extra_body={
+                'top_k': top_k,
+                'chat_template_kwargs': {
+                    'enable_thinking': enable_thinking
+                },
+            },
+            timeout=self.timeout,
+        )
+        content = ''
+        try:
+            completion = self.client.chat.completions.create(**call_args)
+            content = completion.choices[0].message.content
+        except AttributeError as e:
+            err_msg = getattr(completion, 'message', '')
+            if err_msg:
+                time.sleep(random.randint(25, 35))
+                raise ClientError(err_msg) from e
+            raise ClientError(err_msg) from e
+        except (APIConnectionError, RateLimitError) as e:
+            err_msg = e.message
+            time.sleep(random.randint(25, 35))
+            raise ClientError(err_msg) from e
+        except APIError as e:
+            err_msg = e.message
+            if 'maximum context length' in err_msg:  # or "Expecting value: line 1 column 1 (char 0)" in err_msg:
+                logging.warn(f'max length exceeded. Error: {err_msg}')
+                return {'gen': '', 'end_reason': 'max length exceeded'}
+            time.sleep(1)
+            raise ClientError(err_msg) from e
+        return content
 
 
 class InferenceRunner:
@@ -275,8 +215,7 @@ class InferenceRunner:
         """
         self.args: OnlineInferArguments = args
         self.client: InferenceClient = InferenceClient(args.base_url,
-                                                       args.request_timeout,
-                                                       args.max_retries)
+                                                       args.request_timeout)
         self.system_prompt: Optional[str] = SYSTEM_PROMPT_FACTORY.get(
             args.system_prompt_type)
         # Use class-level lock for thread safety
