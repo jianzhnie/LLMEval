@@ -58,9 +58,13 @@ def _process_item(item: Dict[str, Any],
     """
     # Validate required keys
     if input_key not in item:
-        raise ValueError(f"Input key '{input_key}' not found in item")
+        raise ValueError(f"The prompt key '{input_key}' not found in item")
+    if label_key not in item:
+        raise ValueError(
+            f"The ground truth Label key '{label_key}' not found in item")
     if response_key not in item:
-        raise ValueError(f"Response key '{response_key}' not found in item")
+        raise ValueError(
+            f"The model Response key '{response_key}' not found in item")
 
     # Create a new copy to avoid modifying the original dictionary
     processed_item = item.copy()
@@ -68,11 +72,9 @@ def _process_item(item: Dict[str, Any],
     return processed_item
 
 
-def _evaluate_task(data: List[Dict[str, Any]],
-                   task_name: str,
-                   max_workers: int,
-                   cache_path: str,
-                   label_key: str = 'answer') -> None:
+def _evaluate_task(data: List[Dict[str,
+                                   Any]], task_name: str, max_workers: int,
+                   cache_path: str, label_key: str, response_key: str) -> None:
     """
     Evaluates the data based on the specified task name.
 
@@ -82,6 +84,7 @@ def _evaluate_task(data: List[Dict[str, Any]],
         max_workers: The maximum number of worker threads for parallel processing.
         cache_path: The path to save cache results.
         label_key: The key for accessing the ground truth answer.
+        response_key: The key for accessing the model's generated response.
     """
     # Split task_name into dataset source and specific task
     task_parts = task_name.split('/')
@@ -93,7 +96,8 @@ def _evaluate_task(data: List[Dict[str, Any]],
             acc = compute_scores(data,
                                  max_workers,
                                  cache_path,
-                                 label_key=label_key)
+                                 label_key=label_key,
+                                 response_key=response_key)
             print(f'✅ Task: {task_name}, Accuracy: {acc:.4f}')
         except Exception as e:
             print(f'❌ An error occurred during evaluation: {e}')
