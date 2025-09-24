@@ -35,25 +35,44 @@ def _get_after_think(text: str) -> str:
     return text.partition('</think>\n\n')[2]
 
 
-def _process_item(item: Dict[str, Any], task_name: str) -> Dict[str, Any]:
+def _process_item(item: Dict[str, Any],
+                  task_name: str,
+                  input_key: str = 'prompt',
+                  label_key: str = 'answer',
+                  response_key: str = 'gen') -> Dict[str, Any]:
     """
-    Adds a 'task' key to a dictionary item.
+    Process and validate an item from the input data.
 
     Args:
         item: A dictionary representing a single data entry.
         task_name: The name of the evaluation task.
+        input_key: The key for accessing the input text.
+        label_key: The key for accessing the ground truth answer.
+        response_key: The key for accessing the model's generated response.
 
     Returns:
-        The updated dictionary with the 'task' key.
+        The processed dictionary with validated keys and added task field.
+
+    Raises:
+        ValueError: If required keys are missing from the input item.
     """
-    # Create a new copy to avoid modifying the original dictionary in place
+    # Validate required keys
+    if input_key not in item:
+        raise ValueError(f"Input key '{input_key}' not found in item")
+    if response_key not in item:
+        raise ValueError(f"Response key '{response_key}' not found in item")
+
+    # Create a new copy to avoid modifying the original dictionary
     processed_item = item.copy()
     processed_item['task'] = task_name
     return processed_item
 
 
-def _evaluate_task(data: List[Dict[str, Any]], task_name: str,
-                   max_workers: int, cache_path: str) -> None:
+def _evaluate_task(data: List[Dict[str, Any]],
+                   task_name: str,
+                   max_workers: int,
+                   cache_path: str,
+                   label_key: str = 'answer') -> None:
     """
     Evaluates the data based on the specified task name.
 
@@ -62,11 +81,19 @@ def _evaluate_task(data: List[Dict[str, Any]], task_name: str,
         task_name: The name of the evaluation task.
         max_workers: The maximum number of worker threads for parallel processing.
         cache_path: The path to save cache results.
+        label_key: The key for accessing the ground truth answer.
     """
-    if 'math_opensource' in task_name:
+    # Split task_name into dataset source and specific task
+    task_parts = task_name.split('/')
+    dataset_source = task_parts[0] if len(task_parts) > 0 else task_name
+
+    if dataset_source == 'math_opensource':
         # The compute_scores function is assumed to handle the evaluation for math tasks
         try:
-            acc = compute_scores(data, max_workers, cache_path)
+            acc = compute_scores(data,
+                                 max_workers,
+                                 cache_path,
+                                 label_key=label_key)
             print(f'✅ Task: {task_name}, Accuracy: {acc:.4f}')
         except Exception as e:
             print(f'❌ An error occurred during evaluation: {e}')
@@ -106,11 +133,14 @@ def main() -> None:
 
     # Process each item to add the task name
     # Using a list comprehension for a more concise and readable loop
-    processed_data = [_process_item(item, args.task_name) for item in data]
+    processed_data = [
+        _process_item(item, args.task_name, args.input_key, args.label_key,
+                      args.response_key) for item in data
+    ]
 
     # Run the evaluation
     _evaluate_task(processed_data, args.task_name, args.max_workers,
-                   args.cache_path)
+                   args.cache_path, args.label_key)
 
     print('🎉 Evaluation complete!')
 

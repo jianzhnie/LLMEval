@@ -49,21 +49,23 @@ def process_answers(
         the extracted predicted answer, and the extracted gold answer.
         Returns None if an unexpected error occurs.
     """
-    index, input_data = args
+    index, input_data, label_key, response_key = args
     data_name = input_data.get('task', '').split('/')[1]
 
     # Parse the ground truth answer from the input data
     # The first return value (cot_answer) is unused for this metric
     try:
         # The first return value (cot_answer) is unused for this metric.
-        _, gold_answer_text = parse_ground_truth(input_data, data_name)
+        _, gold_answer_text = parse_ground_truth(input_data,
+                                                 data_name,
+                                                 label_key=label_key)
     except (ValueError, NotImplementedError) as e:
         logger.error(
             f'❌ [Error] Parsing gold truth for job {index} failed: {e}')
         return index, 0.0, None, None
 
     # Get the generated text. Handles cases where 'gen' might be missing or empty.
-    generated_text = input_data.get('gen', [])
+    generated_text = input_data.get(response_key, [])
     generated_text = generated_text[0] if generated_text else ''
 
     # Initialize the verification function from math_verify
@@ -105,8 +107,11 @@ def process_answers(
         return index, 0.0, f'Error: {e}', f'Error: {e}'
 
 
-def compute_scores(jobs: List[Dict[str, Any]], max_workers: int,
-                   cache_path: str) -> float:
+def compute_scores(jobs: List[Dict[str, Any]],
+                   max_workers: int,
+                   cache_path: str,
+                   label_key: str = 'answer',
+                   response_key: str = 'gen') -> float:
     """
     Computes accuracy scores for a list of jobs using a multiprocessing pool.
 
