@@ -37,7 +37,6 @@ def _get_after_think(text: str) -> str:
 
 def _process_item(item: Dict[str, Any],
                   task_name: str,
-                  input_key: str = 'prompt',
                   label_key: str = 'answer',
                   response_key: str = 'gen') -> Dict[str, Any]:
     """
@@ -57,8 +56,6 @@ def _process_item(item: Dict[str, Any],
         ValueError: If required keys are missing from the input item.
     """
     # Validate required keys
-    if input_key not in item:
-        raise ValueError(f"The prompt key '{input_key}' not found in item")
     if label_key not in item:
         raise ValueError(
             f"The ground truth Label key '{label_key}' not found in item")
@@ -72,19 +69,24 @@ def _process_item(item: Dict[str, Any],
     return processed_item
 
 
-def _evaluate_task(data: List[Dict[str,
-                                   Any]], task_name: str, max_workers: int,
-                   cache_path: str, label_key: str, response_key: str) -> None:
+def evaluate_task(data: List[Dict[str, Any]],
+                  task_name: str,
+                  label_key: str,
+                  response_key: str,
+                  cache_path: str,
+                  max_workers: int,
+                  timeout: int = 20) -> None:
     """
     Evaluates the data based on the specified task name.
 
     Args:
         data: A list of dictionaries to be evaluated.
         task_name: The name of the evaluation task.
-        max_workers: The maximum number of worker threads for parallel processing.
-        cache_path: The path to save cache results.
         label_key: The key for accessing the ground truth answer.
         response_key: The key for accessing the model's generated response.
+        cache_path: The path to save cache results.
+        max_workers: The maximum number of worker threads for parallel processing.
+
     """
     # Split task_name into dataset source and specific task
     task_parts = task_name.split('/')
@@ -94,10 +96,11 @@ def _evaluate_task(data: List[Dict[str,
         # The compute_scores function is assumed to handle the evaluation for math tasks
         try:
             acc = compute_scores(data,
-                                 max_workers,
-                                 cache_path,
                                  label_key=label_key,
-                                 response_key=response_key)
+                                 response_key=response_key,
+                                 cache_path=cache_path,
+                                 max_workers=max_workers,
+                                 timeout=timeout)
             print(f'✅ Task: {task_name}, Accuracy: {acc:.4f}')
         except Exception as e:
             print(f'❌ An error occurred during evaluation: {e}')
@@ -138,13 +141,14 @@ def main() -> None:
     # Process each item to add the task name
     # Using a list comprehension for a more concise and readable loop
     processed_data = [
-        _process_item(item, args.task_name, args.input_key, args.label_key,
-                      args.response_key) for item in data
+        _process_item(item, args.task_name, args.label_key, args.response_key)
+        for item in data
     ]
 
     # Run the evaluation
-    _evaluate_task(processed_data, args.task_name, args.max_workers,
-                   args.cache_path, args.label_key)
+    evaluate_task(processed_data, args.task_name, args.label_key,
+                  args.response_key, args.cache_path, args.max_workers,
+                  args.timeout)
 
     print('🎉 Evaluation complete!')
 

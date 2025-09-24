@@ -64,9 +64,13 @@ def process_answers(
             f'❌ [Error] Parsing gold truth for job {index} failed: {e}')
         return index, 0.0, None, None
 
-    # Get the generated text. Handles cases where 'gen' might be missing or empty.
+    # Get the generated text. Handles cases where response might be missing or empty.
     generated_text = input_data.get(response_key, [])
-    generated_text = generated_text[0] if generated_text else ''
+    if not generated_text:
+        logger.warning(f'⚠️ No generated text found for job {index}')
+        return index, 0.0, None, None
+    generated_text = generated_text[0] if isinstance(
+        generated_text, list) else str(generated_text)
 
     # Initialize the verification function from math_verify
     verify_func = math_metric(
@@ -107,24 +111,28 @@ def process_answers(
         return index, 0.0, f'Error: {e}', f'Error: {e}'
 
 
-def compute_scores(jobs: List[Dict[str, Any]],
-                   max_workers: int,
+def compute_scores(eval_dataset: List[Dict[str, Any]],
+                   label_key: str,
+                   response_key: str,
                    cache_path: str,
-                   label_key: str = 'answer',
-                   response_key: str = 'gen') -> float:
+                   max_workers: int,
+                   timeout: int = 20) -> float:
     """
     Computes accuracy scores for a list of jobs using a multiprocessing pool.
 
     Args:
-        jobs (List[Dict[str, Any]]): A list of dictionaries, where each dictionary
+        eval_dataset (List[Dict[str, Any]]): A list of dictionaries, where each dictionary
                                      represents a job (model-generated output).
-        max_workers (int): The maximum number of worker processes to use.
+        label_key (str): The key in the input data dictionary that contains the ground truth.
+        response_key (str): The key in the input data dictionary that contains the model output.
         cache_path (str): The file path to save the processed results.
+        max_workers (int): The maximum number of worker processes to use.
+        timeout (int): The maximum time (in seconds) to wait for each job to complete
 
     Returns:
         float: The overall accuracy score, averaged across all jobs.
     """
-    total = len(jobs)
+    total = len(eval_dataset)
     if total == 0:
         logger.info('No jobs to process. Returning 0.0 accuracy.')
         return 0.0
@@ -137,8 +145,9 @@ def compute_scores(jobs: List[Dict[str, Any]],
         with ProcessPool(max_workers=max_workers) as pool:
             # `pool.map` submits jobs and returns a future
             future = pool.map(process_answers,
-                              list(enumerate(jobs)),
-                              timeout=20)
+                              [(i, data, label_key, response_key)
+                               for i, data in enumerate(eval_dataset)],
+                              timeout=timeout)
 
             # Iterate over the results as they become available.
             iterator = future.result()
@@ -147,9 +156,10 @@ def compute_scores(jobs: List[Dict[str, Any]],
                     result = next(iterator)
                     if result is not None:
                         idx, is_correct, extracted_answer, extracted_gold = result
-                        jobs[idx]['accuracy'] = is_correct
-                        jobs[idx]['extracted_gold'] = extracted_gold
-                        jobs[idx]['extracted_answer'] = extracted_answer
+                        eval_dataset[idx]['accuracy'] = is_correct
+                        eval_dataset[idx]['extracted_gold'] = extracted_gold
+                        eval_dataset[idx][
+                            'extracted_answer'] = extracted_answer
                         processed_indices.add(idx)
                         if is_correct == 0.0 and extracted_answer == 'Timeout':
                             timeout_count += 1
@@ -166,32 +176,33 @@ def compute_scores(jobs: List[Dict[str, Any]],
     # Handle any jobs that were not processed (e.g., due to a process crash or other unforeseen error).
     for idx in range(total):
         if idx not in processed_indices:
-            jobs[idx]['accuracy'] = 0.0
-            jobs[idx]['extracted_gold'] = 'Error'
-            jobs[idx]['extracted_answer'] = 'Error'
+            eval_dataset[idx]['accuracy'] = 0.0
+            eval_dataset[idx]['extracted_gold'] = 'Error'
+            eval_dataset[idx]['extracted_answer'] = 'Error'
 
-    logger.info(f'Summary: {total} jobs processed. {timeout_count} timed out.')
+    logger.info(
+        f'Summary: {total} eval_dataset processed. {timeout_count} timed out.')
 
     # Save the results to the cache file.
-    save_cache(jobs, cache_path)
+    save_cache(eval_dataset, cache_path)
 
     # Calculate the average accuracy.
-    accuracy = mean(job['accuracy'] for job in jobs)
+    accuracy = mean(data['accuracy'] for data in eval_dataset)
     return accuracy
 
 
-def save_cache(jobs: List[Dict[str, Any]], cache_path: str) -> None:
+def save_cache(eval_dataset: List[Dict[str, Any]], cache_path: str) -> None:
     """
-    Saves a list of job dictionaries to a JSONL file.
+    Saves a list of dataset dictionaries to a JSONL file.
 
     Args:
-        jobs (List[Dict[str, Any]]): The list of dictionaries to save.
+        eval_dataset (List[Dict[str, Any]]): The list of dictionaries to save.
         cache_path (str): The file path to save the data.
     """
     try:
         with open(cache_path, 'w', encoding='utf-8') as f:
-            for job in jobs:
-                f.write(json.dumps(job, ensure_ascii=False) + '\n')
+            for dataset in eval_dataset:
+                f.write(json.dumps(dataset, ensure_ascii=False) + '\n')
         logger.info(f'✅ Results successfully saved to {cache_path}')
     except IOError as e:
         logger.error(f'❌ Failed to save cache file to {cache_path}: {e}')
