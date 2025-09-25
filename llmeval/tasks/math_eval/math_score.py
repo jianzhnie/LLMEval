@@ -124,8 +124,8 @@ def process_answers(
 
         # Extract answers with validation
         try:
-            pred_ans = extracted_answers[0]
-            gold_ans = extracted_answers[1]
+            gold_ans = extracted_answers[0]
+            pred_ans = extracted_answers[1]
         except IndexError:
             logger.error(
                 f'❌ [Error] Invalid extraction format for job {index}')

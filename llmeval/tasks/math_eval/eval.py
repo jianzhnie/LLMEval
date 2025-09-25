@@ -1,15 +1,32 @@
 """
-This script evaluates model outputs for various tasks.
+Model Output Evaluation Script
 
-It takes a JSONL file as input, processes the data, and computes scores based on the specified task name.
-Currently, it supports evaluation for 'math_opensource' tasks.
+This script provides functionality to evaluate language model outputs for various tasks.
+It processes input data in JSONL format and computes performance metrics based on the
+specified task type. Currently supports evaluation for 'math_opensource' tasks with
+extensibility for additional task types.
+
+Features:
+    - JSONL input file processing
+    - Flexible task-specific evaluation
+    - Caching support for efficiency
+    - Parallel processing capabilities
+    - Robust error handling
+
+Example:
+    $ python eval.py --input_path data.jsonl --task_name math_opensource --cache_path cache/
+
+Author: jianzhnie
+Date: 2023
 """
+
+from __future__ import annotations
 
 import dataclasses
 import json
-import os
 import sys
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 from transformers import HfArgumentParser
 
@@ -17,21 +34,28 @@ from llmeval.tasks.math_eval.math_score import compute_scores
 from llmeval.utils.config import EvalTaskArguments
 from llmeval.utils.logger import init_logger
 
+# Initialize logger for the evaluation module
 logger = init_logger('math_eval')
 
 
 def _get_after_think(text: str) -> str:
     """
-    Extracts the text that comes after the '</think>' tag.
+    Extract the text content that appears after the '</think>' tag in the input string.
+
+    This helper function is used to process model outputs that may contain thinking steps
+    or reasoning enclosed in think tags. It efficiently extracts the final answer or
+    conclusion that follows the thinking process.
 
     Args:
-        text: The input string, which may contain a '</think>' tag.
+        text: The input string that may contain a '</think>' tag followed by text.
+            Example: "Let me think...\n</think>\n\nThe answer is 42"
 
     Returns:
-        The substring after '</think>\n\n', or the original text if the tag is not found.
+        str: The substring after '</think>\n\n', or the original text if the tag is not found.
+            In the example above, would return "The answer is 42"
     """
-    # Using str.partition for efficiency and clarity
-    # It returns a 3-tuple: (before, separator, after)
+    # Using str.partition for efficiency instead of split
+    # partition returns a 3-tuple: (before_separator, separator, after_separator)
     return text.partition('</think>\n\n')[2]
 
 
@@ -40,28 +64,40 @@ def _process_item(item: Dict[str, Any],
                   label_key: str = 'answer',
                   response_key: str = 'gen') -> Dict[str, Any]:
     """
-    Process and validate an item from the input data.
+    Process and validate a single data item from the input dataset.
+
+    This function performs validation checks on the input dictionary to ensure it contains
+    the required keys for evaluation. It creates a copy of the input item to avoid
+    modifying the original data and adds the task name for reference.
 
     Args:
-        item: A dictionary representing a single data entry.
-        task_name: The name of the evaluation task.
-        input_key: The key for accessing the input text.
-        label_key: The key for accessing the ground truth answer.
-        response_key: The key for accessing the model's generated response.
+        item: A dictionary containing the evaluation data with the following expected keys:
+            - label_key: Contains the ground truth answer
+            - response_key: Contains the model's generated response
+        task_name: The identifier for the evaluation task (e.g., 'math_opensource')
+        label_key: The dictionary key used to access the ground truth answer (default: 'answer')
+        response_key: The dictionary key used to access the model's response (default: 'gen')
 
     Returns:
-        The processed dictionary with validated keys and added task field.
+        Dict[str, Any]: A new dictionary containing the validated data with added task field
 
     Raises:
-        ValueError: If required keys are missing from the input item.
+        ValueError: If either the label_key or response_key is missing from the input item
+        TypeError: If the item argument is not a dictionary
     """
-    # Validate required keys
+    if not isinstance(item, dict):
+        raise TypeError(
+            f'Expected dictionary input, got {type(item).__name__}')
+
+    # Validate required keys with detailed error messages
     if label_key not in item:
         raise ValueError(
-            f"The ground truth Label key '{label_key}' not found in item")
+            f"Missing ground truth label key '{label_key}' in item. "
+            f"Available keys: {', '.join(item.keys())}")
     if response_key not in item:
         raise ValueError(
-            f"The model Response key '{response_key}' not found in item")
+            f"Missing model response key '{response_key}' in item. "
+            f"Available keys: {', '.join(item.keys())}")
 
     # Create a new copy to avoid modifying the original dictionary
     processed_item = item.copy()
@@ -69,89 +105,144 @@ def _process_item(item: Dict[str, Any],
     return processed_item
 
 
-def evaluate_task(data: List[Dict[str, Any]],
+def evaluate_task(eval_dataset: List[Dict[str, Any]],
                   task_name: str,
                   label_key: str,
                   response_key: str,
-                  cache_path: str,
+                  cache_path: Union[str, Path],
                   max_workers: int,
-                  timeout: int = 20) -> None:
+                  timeout: int = 20) -> Optional[float]:
     """
-    Evaluates the data based on the specified task name.
+    Evaluate model outputs against ground truth data for a specific task.
+
+    This function handles the evaluation process for different types of tasks.
+    Currently supports 'math_opensource' tasks, but is designed to be extensible
+    for additional task types.
 
     Args:
-        data: A list of dictionaries to be evaluated.
-        task_name: The name of the evaluation task.
-        label_key: The key for accessing the ground truth answer.
-        response_key: The key for accessing the model's generated response.
-        cache_path: The path to save cache results.
-        max_workers: The maximum number of worker threads for parallel processing.
+        eval_dataset: List of dictionaries containing the evaluation data
+        task_name: Identifier for the evaluation task (format: 'source/specific_task')
+        label_key: Dictionary key for accessing ground truth answers
+        response_key: Dictionary key for accessing model responses
+        cache_path: Path where evaluation results will be cached
+        max_workers: Maximum number of parallel workers for processing
+        timeout: Maximum time in seconds to wait for each evaluation (default: 20)
 
+    Returns:
+        Optional[float]: Evaluation accuracy score if successful, None if evaluation fails
+
+    Example:
+        >>> data = [{"input": "2+2", "answer": "4", "gen": "4"}]
+        >>> accuracy = evaluate_task(
+        ...     data, "math_opensource", "answer", "gen",
+        ...     "cache/results", max_workers=4
+        ... )
+        >>> print(f"Accuracy: {accuracy:.2f}")
     """
-    # Split task_name into dataset source and specific task
+    if not eval_dataset:
+        logger.warning('Empty dataset provided for evaluation')
+        return None
+
+    # Parse task name to determine evaluation type
     task_parts = task_name.split('/')
-    dataset_source = task_parts[0] if len(task_parts) > 0 else task_name
+    dataset_source = task_parts[0] if task_parts else task_name
+
+    # Convert cache_path to Path object for consistent handling
+    cache_path = Path(cache_path)
 
     if dataset_source == 'math_opensource':
-        # The compute_scores function is assumed to handle the evaluation for math tasks
         try:
-            acc = compute_scores(data,
-                                 label_key=label_key,
-                                 response_key=response_key,
-                                 cache_path=cache_path,
-                                 max_workers=max_workers,
-                                 timeout=timeout)
-            print(f'✅ Task: {task_name}, Accuracy: {acc:.4f}')
+            accuracy = compute_scores(
+                eval_dataset=eval_dataset,
+                label_key=label_key,
+                response_key=response_key,
+                cache_path=str(
+                    cache_path),  # compute_scores expects string path
+                max_workers=max_workers,
+                timeout=timeout)
+            logger.info(f'✅ Task: {task_name}, Accuracy: {accuracy:.4f}')
+            return accuracy
         except Exception as e:
-            print(f'❌ An error occurred during evaluation: {e}')
+            logger.error(f'❌ Evaluation failed: {str(e)}', exc_info=True)
+            return None
     else:
-        print(
-            f"🤷‍♂️ No evaluation function found for task name: '{task_name}'")
+        logger.error(f"🤷‍♂️ Unsupported task type: '{task_name}'")
+        return None
 
 
-def main() -> None:
+def main() -> int:
     """
-    Main function to parse arguments, load data, and run evaluation.
+    Main entry point for the evaluation script.
+
+    This function orchestrates the entire evaluation process:
+    1. Parses command line arguments
+    2. Sets up logging and cache directory
+    3. Loads and validates input data
+    4. Processes the data
+    5. Runs the evaluation
+    6. Reports results
+
+    Returns:
+        int: Exit code (0 for success, 1 for errors)
     """
-
-    # Parse command line arguments into a strongly typed dataclass
-    parser = HfArgumentParser(EvalTaskArguments)
-    args, = parser.parse_args_into_dataclasses()
-
-    # Log initialization with formatted argument display
-    logger.info(
-        'Initializing EvalTaskArguments with parsed command line arguments...')
-    logger.info('\n--- Parsed Arguments ---')
-    logger.info(json.dumps(dataclasses.asdict(args), indent=2))
-
-    # Create the directory for the cache file if it doesn't exist
-    os.makedirs(os.path.dirname(args.cache_path), exist_ok=True)
-
-    # Load data from the input JSONL file
     try:
-        with open(args.input_path, 'r', encoding='utf-8') as f:
-            data = [json.loads(line) for line in f]
-    except FileNotFoundError:
-        logger.error(f"❌ Error: Input file not found at '{args.input_path}'")
-        sys.exit(1)
-    except json.JSONDecodeError:
-        print(f"❌ Error: Invalid JSON format in '{args.input_path}'")
-        sys.exit(1)
+        # Parse command line arguments using HuggingFace's argument parser
+        parser = HfArgumentParser(EvalTaskArguments)
+        args, = parser.parse_args_into_dataclasses()
 
-    # Process each item to add the task name
-    # Using a list comprehension for a more concise and readable loop
-    processed_data = [
-        _process_item(item, args.task_name, args.label_key, args.response_key)
-        for item in data
-    ]
+        # Log initialization with formatted argument display
+        logger.info(
+            'Initializing evaluation with the following configuration:')
+        logger.info('\n--- Parsed Arguments ---')
+        logger.info(json.dumps(dataclasses.asdict(args), indent=2))
 
-    # Run the evaluation
-    evaluate_task(processed_data, args.task_name, args.label_key,
-                  args.response_key, args.cache_path, args.max_workers,
-                  args.timeout)
+        # Ensure cache directory exists
+        cache_dir = Path(args.cache_path).parent
+        cache_dir.mkdir(parents=True, exist_ok=True)
 
-    print('🎉 Evaluation complete!')
+        # Load and validate input data
+        try:
+            with open(args.input_path, 'r', encoding='utf-8') as f:
+                data = [json.loads(line) for line in f]
+        except FileNotFoundError:
+            logger.error(f"❌ Input file not found: '{args.input_path}'")
+            return 1
+        except json.JSONDecodeError as e:
+            logger.error(
+                f"❌ Invalid JSON format in '{args.input_path}': {str(e)}")
+            return 1
+
+        if not data:
+            logger.error('❌ Input file is empty')
+            return 1
+
+        # Process data items and handle potential errors
+        try:
+            processed_data = [
+                _process_item(item, args.task_name, args.label_key,
+                              args.response_key) for item in data
+            ]
+        except (ValueError, TypeError) as e:
+            logger.error(f'❌ Error processing data: {str(e)}')
+            return 1
+
+        # Run evaluation and get results
+        accuracy = evaluate_task(processed_data, args.task_name,
+                                 args.label_key, args.response_key,
+                                 args.cache_path, args.max_workers,
+                                 args.timeout)
+
+        if accuracy is not None:
+            logger.info('🎉 Evaluation completed successfully!')
+            return 0
+        else:
+            logger.error('❌ Evaluation failed to produce results')
+            return 1
+
+    except Exception as e:
+        logger.error(f'❌ Unexpected error: {str(e)}', exc_info=True)
+        return 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
