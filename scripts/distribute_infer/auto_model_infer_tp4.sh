@@ -418,7 +418,7 @@ deploy_model_service() {
 check_service_ready() {
     local node="$1"
     local port="$2"
-    local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
+    local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}_${3:-0}.log"
     local base_url="http://127.0.0.1:${port}"
 
     # 先尝试 HTTP 健康检查
@@ -432,8 +432,8 @@ check_service_ready() {
         return 0
     fi
 
-    # 回退到日志关键字
-    if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}'"; then
+    # 回退到日志关键字 (检查文件是否存在，避免grep错误)
+    if ssh_run "$node" "[ -f '${log_file}' ] && grep -q 'Application startup complete' '${log_file}'"; then
         echo "✅ 服务 ${node}:${port} 日志检查通过"
         return 0
     fi
@@ -475,7 +475,7 @@ wait_for_services() {
 
                 # 后台检查服务状态
                 (
-                    if check_service_ready "$node" "$port"; then
+                    if check_service_ready "$node" "$port" "$j"; then
                         touch "$status_file"
                     fi
                 ) &
