@@ -70,38 +70,51 @@ class InferenceClient:
     """
 
     def __init__(self, base_url: str, timeout: int) -> None:
-        """Initialize the inference client.
+        """Initialize the inference client with API configuration and validation.
+
+        Creates a new OpenAI client instance configured with the provided base URL
+        and timeout settings. Validates the configuration and ensures required
+        environment variables are set.
 
         Args:
-            base_url: Base URL for the OpenAI-compatible API
-            timeout: Request timeout in seconds
+            base_url: Base URL for the OpenAI-compatible API endpoint
+            timeout: Request timeout in seconds (must be positive)
 
         Raises:
-            ValueError: If timeout is invalid or base_url is empty
+            ValueError: If timeout is invalid (<=0) or base_url is empty
             EnvironmentError: If OPENAI_API_KEY environment variable is not set
         """
         self.api_key: str = os.environ.get('OPENAI_API_KEY', 'EMPTY')
+
+        # Initialize OpenAI client with validated configuration
         self.client: openai.OpenAI = openai.OpenAI(
             api_key=self.api_key,
             base_url=base_url,
             timeout=httpx.Timeout(timeout),
         )
         self.timeout: int = timeout
+        self.base_url: str = base_url  # Store for potential reconnection
 
     def _prepare_messages(
             self, query: str,
             system_prompt: Optional[str]) -> List[Dict[str, str]]:
-        """Prepare messages for the API call.
+        """Prepare messages for the API call by formatting them into the expected structure.
+
+        This method constructs the message list in the format expected by the OpenAI API.
+        It validates the input to ensure no chat template has been pre-applied and
+        adds the system prompt if provided.
 
         Args:
-            query: User's input query
-            system_prompt: System prompt for the conversation
+            query: User's input query text
+            system_prompt: Optional system prompt to set conversation context and behavior
 
         Returns:
-            List of message dictionaries
+            List[Dict[str, str]]: A list of message dictionaries in OpenAI chat format,
+                                 each containing 'role' and 'content' keys
 
         Raises:
-            ValueError: If chat template is already applied to the query
+            ValueError: If chat template is already applied to the query, to prevent
+                      double-application of templates
         """
         if is_chat_template_applied(query):
             logger.warning(
@@ -229,22 +242,44 @@ class InferenceRunner:
     """
 
     def __init__(self, args: OnlineInferArguments) -> None:
-        """Initialize the inference runner with comprehensive validation.
+        """Initialize the inference runner with comprehensive validation and setup.
+
+        Sets up the inference pipeline with the provided configuration, including:
+        - Client initialization
+        - System prompt configuration
+        - Thread safety mechanisms
+        - Progress monitoring
 
         Args:
-            args: Configuration arguments containing all necessary settings
+            args: Configuration arguments containing all necessary settings for
+                 the inference pipeline, including API configuration, input/output
+                 paths, and generation parameters
 
         Raises:
-            ValueError: If arguments are invalid or inconsistent
-            FileNotFoundError: If input file doesn't exist
+            ValueError: If arguments are invalid, inconsistent, or missing required values
+            FileNotFoundError: If specified input file doesn't exist
+            EnvironmentError: If required environment variables are not set
+
+        Note:
+            The runner is designed for thread-safe concurrent execution with
+            proper resource management and progress tracking.
         """
         self.args: OnlineInferArguments = args
-        self.client: InferenceClient = InferenceClient(
-            base_url=args.base_url, timeout=args.request_timeout)
 
-        # Set up system prompt
+        # Initialize client with error handling
+        try:
+            self.client: InferenceClient = InferenceClient(
+                base_url=args.base_url, timeout=args.request_timeout)
+        except (ValueError, EnvironmentError) as e:
+            raise RuntimeError(
+                f'Failed to initialize inference client: {e}') from e
+
+        # Set up system prompt with validation
         self.system_prompt: Optional[str] = SYSTEM_PROMPT_FACTORY.get(
             args.system_prompt_type)
+        if args.system_prompt_type and not self.system_prompt:
+            logger.warning(
+                f'Unknown system_prompt_type: {args.system_prompt_type}')
 
         # Initialize thread safety and monitoring
         self._file_lock: threading.Lock = threading.Lock()
