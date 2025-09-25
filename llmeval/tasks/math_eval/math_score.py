@@ -169,7 +169,7 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
 
     total = len(eval_dataset)
     processed_indices = set()
-    counts = {'timeout': 0, 'error': 0, 'success': 0}
+    counts = {'timeout': 0, 'error': 0, 'correct': 0}
 
     # Optimize worker count based on CPU count and dataset size
     cpu_count = os.cpu_count() or 1
@@ -204,11 +204,12 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
 
                         # Count different types of results
                         if is_correct == 1.0:
-                            counts['success'] += 1
+                            counts['correct'] += 1
                         elif extracted_answer == 'Timeout':
                             counts['timeout'] += 1
-                        elif extracted_answer and extracted_answer.startswith(
-                                'Error'):
+                        elif extracted_answer and (
+                                isinstance(extracted_answer, str)
+                                and extracted_answer.startswith('Error')):
                             counts['error'] += 1
                 except StopIteration:
                     break
@@ -236,24 +237,24 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
     logger.info(f'Summary: {total} eval_dataset processed.')
 
     # Log detailed performance statistics
-    success_rate = counts['success'] / total * 100
+    correct_rate = counts['correct'] / total * 100
     timeout_rate = counts['timeout'] / total * 100
     error_rate = counts['error'] / total * 100
 
     logger.info(f"""
-            Performance Summary:
-            -------------------
-            Total Jobs: {total}
-            Successful: {counts['success']} ({success_rate:.1f}%)
-            Timeouts: {counts['timeout']} ({timeout_rate:.1f}%)
-            Errors: {counts['error']} ({error_rate:.1f}%)
-            Workers Used: {optimal_workers}
-            """)
+    Performance Summary:
+    -------------------
+    Total Jobs: {total}
+    Correct: {counts['correct']} ({correct_rate:.1f}%)
+    Timeouts: {counts['timeout']} ({timeout_rate:.1f}%)
+    Errors: {counts['error']} ({error_rate:.1f}%)
+    Workers Used: {optimal_workers}
+    """)
 
     # Save results with performance metadata
     metadata = {
         'total_jobs': total,
-        'success_count': counts['success'],
+        'correct_count': counts['correct'],
         'timeout_count': counts['timeout'],
         'error_count': counts['error'],
         'workers_used': optimal_workers,
