@@ -636,32 +636,33 @@ distribute_and_launch_jobs() {
             local base_url="http://127.0.0.1:${port}/v1"
             local model_name="${SERVED_MODEL_NAME}"
 
-        # 获取分配给当前实例的文件列表
-        local instance_idx=$((i * INSTANCES_PER_NODE + j))
-        IFS=$'\n' read -r -d '' -a ASSIGNED < <(eval "printf '%s\0' \"\${INSTANCE_ASSIGNMENTS_${instance_idx}[@]}\"")
+            # 获取分配给当前实例的文件列表
+            local instance_idx=$((i * INSTANCES_PER_NODE + j))
+            IFS=$'\n' read -r -d '' -a ASSIGNED < <(eval "printf '%s\0' \"\${INSTANCE_ASSIGNMENTS_${instance_idx}[@]}\"")
 
-        # 跳过没有分配文件的实例
-        if [[ ${#ASSIGNED[@]} -eq 0 ]]; then
-            echo "   -> 节点 ${node} 实例 ${j} 未分配到文件，跳过"
-            continue
-        fi
+            # 跳过没有分配文件的实例
+            if [[ ${#ASSIGNED[@]} -eq 0 ]]; then
+                echo "   -> 节点 ${node} 实例 ${j} 未分配到文件，跳过"
+                continue
+            fi
 
-        echo "   -> 节点 ${node} 实例 ${j} 分配到 ${#ASSIGNED[@]} 个文件"
+            echo "   -> 节点 ${node} 实例 ${j} 分配到 ${#ASSIGNED[@]} 个文件"
 
-        # 并行提交每个节点的任务批次（本地后台，远端内部再并行）
-        (
-            run_task_batch "$node" "$model_name" "$base_url" "${ASSIGNED[@]:-}"
-        ) &
-        pids+=($!)
-        submitted=$((submitted + 1))
+            # 并行提交每个节点的任务批次（本地后台，远端内部再并行）
+            (
+                run_task_batch "$node" "$model_name" "$base_url" "${ASSIGNED[@]:-}"
+            ) &
+            pids+=($!)
+            submitted=$((submitted + 1))
 
-        # 简单本地节流：限制同时存在的提交批次数量，避免本地进程过多
-        if [[ $submitted -ge $MAX_JOBS ]]; then
-            wait "${pids[@]}" || true
-            pids=()
-            submitted=0
-        fi
-    done
+            # 简单本地节流：限制同时存在的提交批次数量，避免本地进程过多
+            if [[ $submitted -ge $MAX_JOBS ]]; then
+                wait "${pids[@]}" || true
+                pids=()
+                submitted=0
+            fi
+        done  # Close the inner for loop
+    done  # Close the outer for loop
 
     # 等待所有节点的任务提交完成（不等待远端具体推理完成）
     if [[ ${#pids[@]} -gt 0 ]]; then
