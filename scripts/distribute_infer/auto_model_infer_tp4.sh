@@ -267,8 +267,9 @@ validate_config() {
 # 参数：无
 # 返回值：无（检查失败时退出）
 check_node_port_alignment() {
-    if [[ ${#NODES[@]} -ne ${#PORTS[@]} ]]; then
-        echo "❌ 错误: 节点数量 (${#NODES[@]}) 与端口数量 (${#PORTS[@]}) 不一致" >&2
+    local expected_ports=$(( ${#NODES[@]} * INSTANCES_PER_NODE ))
+    if [[ ${#PORTS[@]} -ne $expected_ports ]]; then
+        echo "❌ 错误: 节点数量 (${#NODES[@]}) * 实例数 (${INSTANCES_PER_NODE}) 与端口数量 (${#PORTS[@]}) 不一致" >&2
         exit 1
     fi
     echo "✅ 节点和端口配置检查通过"
