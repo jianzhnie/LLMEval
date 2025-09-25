@@ -184,7 +184,7 @@ readonly MAX_JOBS=${MAX_JOBS:-128}                    # 总体一次性拉起的
 # =======================================================
 #                  推理客户端参数
 # =======================================================
-
+readonly INPUT_KEY="${INPUT_KEY:-question}"  # 输入字段键名
 readonly SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
 readonly MAX_WORKERS=${MAX_WORKERS:-32}               # 客户端每进程内部的线程/协程并发
 
@@ -403,7 +403,7 @@ validate_config() {
         handle_error 1 "显存利用率需在 0.1-1.0 之间，当前值: ${MEMORY_UTILIZATION}"
     fi
 
-    log_info "配置参数验证通过"
+    log_info "✅ 配置参数验证通过"
 }
 
 # =======================================================
@@ -732,7 +732,7 @@ run_task_batch() {
             nohup python '${INFER_SCRIPT}' \
                 --input_file '${input_file}' \
                 --output_file '${output_file}' \
-                --input_key 'question' \
+                --input_key '${INPUT_KEY}' \
                 --base_url '${base_url}' \
                 --model_name '${model_name}' \
                 --n_samples ${N_SAMPLES} \
