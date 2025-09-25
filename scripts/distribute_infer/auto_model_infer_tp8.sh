@@ -431,7 +431,7 @@ wait_for_services() {
     echo "⏳ 正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
-    local interval=5
+    local interval=10
     local total_services=${#NODES[@]}
     local status_dir="${LOG_DIR}/status"
     local -a ready_indices=()
