@@ -17,7 +17,7 @@ Example:
     $ python eval.py --input_path data.jsonl --task_name math_opensource --cache_path cache/
 
 Author: jianzhnie
-Date: 2023
+Date: 2025
 """
 
 from __future__ import annotations
