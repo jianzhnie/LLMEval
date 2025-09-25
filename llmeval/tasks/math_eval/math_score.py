@@ -33,15 +33,15 @@ except ImportError:
 
 
 def process_answers(
-    args: Tuple[int, Dict[str, Any]]
+    args: Tuple[int, Dict[str, Any], str, str]
 ) -> Optional[Tuple[int, float, Optional[str], Optional[str]]]:
     """
     Processes a single model output by extracting the answer and comparing it with the
     ground truth using the `math-verify` metric.
 
     Args:
-        args (Tuple[int, Dict[str, Any]]): A tuple containing the job index and
-                                           the input data dictionary.
+        args (Tuple[int, Dict[str, Any], str, str]): A tuple containing the job index,
+                                           the input data dictionary, label key, and response key.
 
     Returns:
         Optional[Tuple[int, float, Optional[str], Optional[str]]]: A tuple containing
@@ -50,16 +50,19 @@ def process_answers(
         Returns None if an unexpected error occurs.
     """
     index, input_data, label_key, response_key = args
-    data_name = input_data.get('task', '').split('/')[1]
+    try:
+        data_name = input_data.get('task', '').split('/')[1]
+    except (IndexError, AttributeError):
+        logger.warning(f'⚠️ Invalid task format for job {index}')
+        return index, 0.0, None, None
 
     # Parse the ground truth answer from the input data
     # The first return value (cot_answer) is unused for this metric
     try:
         # The first return value (cot_answer) is unused for this metric.
-        _, gold_answer_text = parse_ground_truth(input_data,
-                                                 data_name,
-                                                 label_key=label_key)
-    except (ValueError, NotImplementedError) as e:
+        _, gold_answer_text = parse_ground_truth(input_data, data_name,
+                                                 label_key)
+    except (ValueError, NotImplementedError, KeyError) as e:
         logger.error(
             f'❌ [Error] Parsing gold truth for job {index} failed: {e}')
         return index, 0.0, None, None
@@ -94,9 +97,9 @@ def process_answers(
         # Safely extract the predicted and gold answers from the returned tuple
         # The tuple will contain extracted answers in the order of `pred_extraction_target`
         # and `gold_extraction_target` respectively.
-        # Note: The order of `extracted_answers` is (gold_ans, pred_ans).
-        gold_ans = extracted_answers[0] if len(extracted_answers) > 0 else None
-        pred_ans = extracted_answers[1] if len(extracted_answers) > 1 else None
+        # Note: The order of `extracted_answers` is (pred_ans, gold_ans).
+        pred_ans = extracted_answers[0] if len(extracted_answers) > 0 else None
+        gold_ans = extracted_answers[1] if len(extracted_answers) > 1 else None
 
         return index, float(grade), pred_ans, gold_ans
 
