@@ -10,8 +10,29 @@
 #   4. 数据文件轮询分配与任务并行执行
 #   5. 优雅清理（退出信号捕获）与失败回滚
 #
+# 核心特性：
+#   - 自动发现与分配数据文件
+#   - 多层次并行（节点间并行 + 节点内多卡并行 + 单卡动态批处理）
+#   - 健康检查机制（HTTP探活 + 日志检查）
+#   - 进程级任务监控
+#   - 失败节点自动跳过
+#   - 资源限制与任务节流
+#
+# 配置建议：
+#   1. NUM_GPUS: 根据实际显卡数量设置
+#   2. MAX_NUM_SEQS: 结合显存大小调整
+#   3. MAX_JOBS: 依据系统资源调整并发数
+#   4. HEALTH_TIMEOUT: 根据网络情况调整检查超时
+#
 # 使用方法：
 #   ./auto_model_infer.sh [NODE_LIST_FILE]
+#
+# 环境要求：
+#   - bash 4.0+
+#   - ssh 免密配置
+#   - python 3.9+
+#   - vLLM
+#   - CUDA/NPU 驱动
 #
 # 作者：LLM Eval Team
 # 版本：3.0
@@ -206,48 +227,141 @@ rsync_to_node() {
     fi
 }
 
+# 日志函数
+log_info() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: $*"
+}
+
+log_warn() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN: $*" >&2
+}
+
+log_error() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2
+}
+
+# 错误处理函数
+handle_error() {
+    local exit_code=$1
+    local error_msg=$2
+    log_error "$error_msg"
+
+    # 清理资源
+    stop_services
+
+    exit "$exit_code"
+}
+
+# 文件锁管理
+LOCK_FILE="/tmp/vllm_deploy.lock"
+
+acquire_lock() {
+    if [ -e "$LOCK_FILE" ]; then
+        local pid
+        pid=$(cat "$LOCK_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            handle_error 1 "另一个部署进程 (PID: $pid) 正在运行"
+        fi
+        rm -f "$LOCK_FILE"
+    fi
+    echo $$ > "$LOCK_FILE"
+}
+
+release_lock() {
+    rm -f "$LOCK_FILE"
+}
+
+# 权限检查函数
+check_permissions() {
+    local dir=$1
+    if [[ ! -w "$dir" ]]; then
+        handle_error 1 "目录 $dir 没有写入权限"
+    fi
+}
+
+# 节点连通性检查
+validate_node() {
+    local node=$1
+    if ! ssh -q "$node" exit 2>/dev/null; then
+        handle_error 1 "无法连接到节点 $node"
+    fi
+}
+
+# 清理函数
+cleanup_and_exit() {
+    local exit_code=$?
+
+    log_info "开始清理资源..."
+
+    # 停止所有服务
+    stop_services
+
+    # 释放文件锁
+    release_lock
+
+    # 如果是调试模式，关闭它
+    [[ -n "$DEBUG" ]] && set +x
+
+    log_info "清理完成，退出代码: $exit_code"
+    exit "$exit_code"
+}
+
+
 # 验证配置参数
 # 参数：无
-# 返回值：无（验证失败时退出）
+# 返回值：无（验证失败时通过 handle_error 退出）
 validate_config() {
-    echo "正在验证配置参数..."
+    log_info "开始验证配置参数..."
 
-    # 验证必要的路径是否存在
-    if [[ ! -f "${INFER_SCRIPT}" ]]; then
-        echo "❌ 错误: 推理脚本不存在: ${INFER_SCRIPT}" >&2
-        exit 1
-    fi
+    # 验证必要文件存在性
+    local required_files=(
+        "$INFER_SCRIPT"
+        "$SET_ENV_SCRIPT"
+    )
 
-    if [[ ! -f "${SET_ENV_SCRIPT}" ]]; then
-        echo "❌ 错误: 环境设置脚本不存在: ${SET_ENV_SCRIPT}" >&2
-        exit 1
-    fi
+    for file in "${required_files[@]}"; do
+        if [[ ! -f "$file" ]]; then
+            handle_error 1 "必需文件不存在: $file"
+        fi
+        if [[ ! -r "$file" ]]; then
+            handle_error 1 "文件没有读取权限: $file"
+        fi
+    done
 
-    if [[ ${NUM_GPUS} -lt 1 || ${NUM_GPUS} -gt 8 ]]; then
-        echo "❌ 错误: NUM_GPUS 需在 1-8 之间: ${NUM_GPUS}" >&2
-        exit 1
-    fi
+    # 验证目录权限
+    local required_dirs=(
+        "$OUTPUT_DIR"
+        "$LOG_DIR"
+        "$DATASET_DIR"
+    )
 
+    for dir in "${required_dirs[@]}"; do
+        check_permissions "$dir"
+    done
+
+    # 验证数值参数范围
+    local param_checks=(
+        "NUM_GPUS:1:8:GPU数量"
+        "N_SAMPLES:1:100:采样次数"
+        "MAX_NUM_SEQS:1:16384:并发序列数"
+        "MAX_NUM_BATCHED_TOKENS:512:1048576:批次Token数"
+    )
+
+    for check in "${param_checks[@]}"; do
+        IFS=':' read -r param min max desc <<< "$check"
+        local value
+        value=$(eval echo "\$$param")
+        if [[ $value -lt $min || $value -gt $max ]]; then
+            handle_error 1 "$desc ($param) 需在 $min-$max 之间，当前值: $value"
+        fi
+    done
+
+    # 验证浮点数参数
     if [[ $(echo "${MEMORY_UTILIZATION} < 0.1 || ${MEMORY_UTILIZATION} > 1.0" | bc -l) -eq 1 ]]; then
-        echo "❌ 错误: 内存利用率需在 0.1-1.0 之间: ${MEMORY_UTILIZATION}" >&2
-        exit 1
+        handle_error 1 "显存利用率需在 0.1-1.0 之间，当前值: ${MEMORY_UTILIZATION}"
     fi
 
-    if [[ ${N_SAMPLES} -lt 1 || ${N_SAMPLES} -gt 100 ]]; then
-        echo "❌ 错误: 采样次数需在 1-100 之间: ${N_SAMPLES}" >&2
-        exit 1
-    fi
-
-    if [[ ${MAX_NUM_SEQS} -lt 1 || ${MAX_NUM_SEQS} -gt 16384 ]]; then
-        echo "❌ 错误: MAX_NUM_SEQS 范围异常: ${MAX_NUM_SEQS}" >&2
-        exit 1
-    fi
-    if [[ ${MAX_NUM_BATCHED_TOKENS} -lt 512 || ${MAX_NUM_BATCHED_TOKENS} -gt 1048576 ]]; then
-        echo "❌ 错误: MAX_NUM_BATCHED_TOKENS 范围异常: ${MAX_NUM_BATCHED_TOKENS}" >&2
-        exit 1
-    fi
-
-    echo "✅ 配置参数验证通过"
+    log_info "配置参数验证通过"
 }
 
 # =======================================================
@@ -365,7 +479,10 @@ deploy_model_service() {
     local port="$2"
     local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
 
-    echo "🚀 在节点 ${node} 上部署模型服务，端口 ${port} (TP=${NUM_GPUS}, mem_util=${MEMORY_UTILIZATION})"
+    log_info "正在节点 ${node} 上部署模型服务 (端口: ${port}, TP: ${NUM_GPUS}, 内存: ${MEMORY_UTILIZATION})"
+
+    # 验证节点连通性
+    validate_node "$node"
 
     # 构建 vLLM 启动命令
     # 关键参数：
@@ -690,8 +807,17 @@ wait_for_remote_jobs() {
 #   $@: 命令行参数
 # 返回值：无
 main() {
-    echo "🎯 开始执行分布式 vLLM 模型推理部署"
+    log_info "开始执行分布式 vLLM 模型推理部署"
     echo "================================================"
+
+    # 获取文件锁，确保只有一个实例在运行
+    acquire_lock
+
+    # 设置退出时的清理陷阱
+    trap 'cleanup_and_exit' EXIT TERM INT
+
+    # 设置调试模式(如果需要)
+    [[ -n "$DEBUG" ]] && set -x
 
     # 参数解析
     if [[ $# -gt 1 ]]; then
@@ -811,6 +937,7 @@ main() {
     echo "   - 日志目录: ${LOG_DIR}"
     echo "================================================"
 }
+
 
 # 脚本入口点
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
