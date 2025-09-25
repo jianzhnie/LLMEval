@@ -442,7 +442,7 @@ check_service_ready() {
 # 参数：无
 # 返回值：就绪节点的索引数组
 wait_for_services() {
-    echo "⏳ 正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
+    echo "正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
     local interval=10
@@ -488,11 +488,11 @@ wait_for_services() {
                 (
                     if check_service_ready "$node" "$port" "$j"; then
                         touch "$status_file"
-                        echo "✅ 实例就绪: 节点 ${node} 实例 ${j} (端口 ${port})"
+                        echo "[OK] 实例就绪: 节点 ${node} 实例 ${j} (端口 ${port})"
                     elif [[ $total_wait_time -gt $((MAX_WAIT_TIME / 2)) ]]; then
                         # 如果等待时间已过半，标记为失败
                         touch "$fail_file"
-                        echo "❌ 实例失败: 节点 ${node} 实例 ${j} (端口 ${port}) - 超时或启动失败"
+                        echo "[ERROR] 实例失败: 节点 ${node} 实例 ${j} (端口 ${port}) - 超时或启动失败"
                     fi
                 ) &
                 running_pids+=($!)
@@ -530,12 +530,12 @@ wait_for_services() {
                     completed_instances["${node}:${j}"]="${port}"
                     node_ready_count=$((node_ready_count + 1))
                     ready_instances=$((ready_instances + 1))
-                    node_instance_info+=("✅实例${j}(端口:${port})")
+                    node_instance_info+=("[OK]实例${j}(端口:${port})")
                 elif [[ -f "$fail_file" ]]; then
                     failed_instances["${node}:${j}"]="${port}"
                     node_failed_count=$((node_failed_count + 1))
                     failed_instance_count=$((failed_instance_count + 1))
-                    node_instance_info+=("❌实例${j}(端口:${port})")
+                    node_instance_info+=("[ERROR]实例${j}(端口:${port})")
                 fi
             done
 
@@ -552,7 +552,7 @@ wait_for_services() {
 
         # 检查是否所有节点都就绪
         if [[ ${#ready_indices[@]} -eq $total_nodes ]]; then
-            echo "✅ 所有 ${total_nodes} 个节点的 ${total_instances} 个服务实例已就绪"
+            echo "所有 ${total_nodes} 个节点的 ${total_instances} 个服务实例已就绪"
             echo "${ready_indices[@]}"
             return 0
         fi
@@ -564,7 +564,7 @@ wait_for_services() {
         # 如果等待时间过长，提前退出
         local time_threshold=$((MAX_WAIT_TIME * 8 / 10))  # 80% of MAX_WAIT_TIME
         if [[ $total_wait_time -gt $time_threshold ]] && [[ $pending_instances -gt 0 ]]; then
-            echo "⚠️  接近最大等待时间，部分实例仍未就绪"
+            echo "接近最大等待时间，部分实例仍未就绪"
         fi
 
         sleep "$interval"
@@ -572,11 +572,11 @@ wait_for_services() {
     done
 
     # 超时后收集最终状态
-    echo "⏰ 等待超时，收集最终部署状态..."
+    echo "等待超时，收集最终部署状态..."
 
     # 显示已完成的实例
     if [[ ${#completed_instances[@]} -gt 0 ]]; then
-        echo "✅ 已完成部署的实例 (${#completed_instances[@]} 个):"
+        echo "已完成部署的实例 (${#completed_instances[@]} 个):"
         for instance in "${!completed_instances[@]}"; do
             echo "   - ${instance} (端口: ${completed_instances[$instance]})"
         done
@@ -584,19 +584,19 @@ wait_for_services() {
 
     # 显示失败的实例
     if [[ ${#failed_instances[@]} -gt 0 ]]; then
-        echo "❌ 部署失败的实例 (${#failed_instances[@]} 个):"
+        echo "部署失败的实例 (${#failed_instances[@]} 个):"
         for instance in "${!failed_instances[@]}"; do
             echo "   - ${instance} (端口: ${failed_instances[$instance]})"
         done
     fi
 
     if [[ ${#ready_indices[@]} -gt 0 ]]; then
-        echo "⚠️ 超时但有 ${#ready_indices[@]} 个节点已就绪，将继续使用可用节点"
+        echo "超时但有 ${#ready_indices[@]} 个节点已就绪，将继续使用可用节点"
         echo "${ready_indices[@]}"
         return 0
     fi
 
-    echo "❌ 错误: 没有任何节点成功启动，请检查远程日志" >&2
+    echo "错误: 没有任何节点成功启动，请检查远程日志" >&2
     exit 1
 }
 
