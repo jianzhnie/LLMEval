@@ -28,6 +28,7 @@ set -euo pipefail
 # 优化选项：跳过主机密钥检查、设置连接超时、启用连接复用
 readonly SSH_OPTS="-o StrictHostKeyChecking=no \
                    -o UserKnownHostsFile=/dev/null \
+                   -o LogLevel=ERROR \
                    -o ConnectTimeout=5 \
                    -o ServerAliveInterval=30 \
                    -o ServerAliveCountMax=3 \
