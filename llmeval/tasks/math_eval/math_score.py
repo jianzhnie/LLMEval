@@ -139,10 +139,14 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
 
     processed_indices = set()
     timeout_count = 0
+    error_count = 0
+
+    # Optimize worker count based on dataset size
+    optimal_workers = min(max_workers, max(1, total // 4))
 
     with tqdm(total=total, desc='Processing jobs') as pbar:
         # Using ProcessPool to parallelize the evaluation
-        with ProcessPool(max_workers=max_workers) as pool:
+        with ProcessPool(max_workers=optimal_workers) as pool:
             # `pool.map` submits jobs and returns a future
             future = pool.map(process_answers,
                               [(i, data, label_key, response_key)
@@ -161,9 +165,17 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
                         eval_dataset[idx][
                             'extracted_answer'] = extracted_answer
                         processed_indices.add(idx)
-                        if is_correct == 0.0 and extracted_answer == 'Timeout':
-                            timeout_count += 1
+                        if is_correct == 0.0:
+                            if extracted_answer == 'Timeout':
+                                timeout_count += 1
+                            elif extracted_answer and extracted_answer.startswith(
+                                    'Error'):
+                                error_count += 1
                 except StopIteration:
+                    break
+                except TimeoutError:
+                    # Handle global timeout for the entire operation
+                    logger.warning('Global timeout reached for processing')
                     break
                 except Exception as e:
                     # Catch exceptions from the iterator, e.g., if a worker fails.
@@ -181,7 +193,8 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
             eval_dataset[idx]['extracted_answer'] = 'Error'
 
     logger.info(
-        f'Summary: {total} eval_dataset processed. {timeout_count} timed out.')
+        f'Summary: {total} eval_dataset processed. {timeout_count} timed out, {error_count} errors.'
+    )
 
     # Save the results to the cache file.
     save_cache(eval_dataset, cache_path)
