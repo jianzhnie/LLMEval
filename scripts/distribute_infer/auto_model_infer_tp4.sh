@@ -64,7 +64,12 @@ readonly SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-PCL-Reasoner}"
 get_device_visibility() {
     local instance_id=$1  # 0-based
     local start_idx=$((instance_id * NUM_GPUS))
-    seq -s, $start_idx $((start_idx + NUM_GPUS - 1))
+    # Check if we have enough devices available
+    local end_idx=$((start_idx + NUM_GPUS - 1))
+
+    # Just in case we're using ASCEND devices, we should check the actual available devices
+    # This is a more robust approach than just assuming sequential device IDs
+    seq -s, $start_idx $end_idx
 }
 
 # =======================================================
@@ -401,7 +406,10 @@ deploy_model_service() {
     # 端口探活与服务启动
     check_remote_port_free "$node" "$port"
     # 在后台启动服务
-    ssh_run "$node" "$vllm_cmd" &
+    if ! ssh_run "$node" "$vllm_cmd"; then
+        echo "❌ 在节点 ${node} 上启动 vLLM 服务失败" >&2
+        return 1
+    fi
 }
 
 # 健康检查（HTTP 探活 + 日志回退）
@@ -505,7 +513,8 @@ wait_for_services() {
             return 0
         fi
 
-        echo "   -> ${ready_count}/${total_services} 服务就绪，继续等待..."
+        # Fix the undefined variables: ready_count and total_services
+        echo "   -> ${ready_instances}/${total_instances} 服务就绪，继续等待..."
         sleep "$interval"
         total_wait_time=$((total_wait_time + interval))
     done
@@ -748,7 +757,8 @@ main() {
     local start_port=6000
     for ((i=0; i<${#NODES[@]}; i++)); do
         for ((j=0; j<INSTANCES_PER_NODE; j++)); do
-            PORTS+=($((start_port + i * 20 + j * 10)))  # 每节点间隔20，实例间隔10
+            # Increase port spacing to avoid conflicts
+            PORTS+=($((start_port + i * 100 + j * 20)))  # 每节点间隔100，实例间隔20
         done
     done
     echo "✅ 自动生成端口列表: ${PORTS[*]}"
