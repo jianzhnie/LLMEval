@@ -16,19 +16,25 @@ from tqdm import tqdm
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
 from llmeval.utils.logger import init_logger
 
-# Initialize a logger for better error handling and debugging.
+# Configure a dedicated logger for the math scoring module
 logger = init_logger(__name__)
 
+# Define package requirements for better dependency management
+REQUIRED_PACKAGES = {
+    'math-verify': 'math-verify>=1.0.0',
+    'pebble': 'pebble>=4.6.3',
+    'tqdm': 'tqdm>=4.65.0'
+}
+
 # Attempt to import necessary components from math-verify.
-# If the package is not installed, it provides instructions to the user.
+# Provides helpful error messages if dependencies are missing.
 try:
     from math_verify.metric import math_metric
     from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-except ImportError:
-    logger.error(
-        'To use Math-Verify, please install it first by running `pip install math-verify`.'
-    )
-    # Exiting the program here is crucial as the main functions will fail without it.
+except ImportError as e:
+    logger.error(f'Missing required dependency: {e}\n'
+                 f'To use Math-Verify, install required packages:\n'
+                 f'pip install {" ".join(REQUIRED_PACKAGES.values())}')
     import sys
     sys.exit(1)
 
@@ -40,23 +46,32 @@ def process_answers(
     Processes a single model output by extracting the answer and comparing it with the
     ground truth using the `math-verify` metric.
 
+    This function handles all aspects of processing a single mathematical answer:
+    1. Extracts the task name and validates input format
+    2. Parses ground truth answer from input data
+    3. Processes model-generated text
+    4. Verifies answer correctness using math-verify library
+    5. Handles various error cases and timeouts
+
     Args:
-        args (Tuple[int, Dict[str, Any], str, str]): A tuple containing:
-            - index (int): The job index for tracking
-            - input_data (Dict[str, Any]): The input data dictionary containing model output and ground truth
-            - label_key (str): The key to access ground truth in input_data
-            - response_key (str): The key to access model response in input_data
+        args (Tuple[int, Dict[str, Any], str, str]): Processing arguments containing:
+            - index (int): Unique job identifier for tracking
+            - input_data (Dict[str, Any]): Data dictionary with model output and ground truth
+            - label_key (str): Key for accessing ground truth in input_data
+            - response_key (str): Key for accessing model response in input_data
 
     Returns:
-        Optional[Tuple[int, float, Optional[str], Optional[str]]]: A tuple containing:
-            - index (int): The original job index
-            - score (float): Correctness score (1.0 for correct, 0.0 for incorrect)
-            - pred_ans (Optional[str]): The extracted predicted answer, None if extraction failed
-            - gold_ans (Optional[str]): The extracted gold answer, None if extraction failed
+        Optional[Tuple[int, float, Optional[str], Optional[str]]]: Processing results:
+            - index (int): Original job identifier
+            - score (float): Verification score (1.0=correct, 0.0=incorrect)
+            - pred_ans (Optional[str]): Extracted predicted answer, None if failed
+            - gold_ans (Optional[str]): Extracted gold answer, None if failed
 
     Note:
-        Returns None if an unexpected error occurs during processing.
-        Uses math-verify library for answer comparison with configurable precision.
+        - Returns None if any unexpected error occurs during processing
+        - Uses math-verify library with configurable precision (default=6)
+        - Handles both expression and LaTeX answer formats
+        - Implements timeout protection for long-running verifications
     """
     index, input_data, label_key, response_key = args
     try:
@@ -145,23 +160,40 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
                    max_workers: int,
                    timeout: int = 20) -> float:
     """
-    Computes accuracy scores for a list of jobs using a multiprocessing pool.
+    Computes accuracy scores for a batch of mathematical evaluation jobs using parallel processing.
+
+    This function orchestrates the parallel evaluation process:
+    1. Validates input parameters and dataset
+    2. Optimizes worker count based on system resources and workload
+    3. Processes jobs in parallel with timeout protection
+    4. Tracks statistics (correct answers, timeouts, errors)
+    5. Saves detailed results to cache
+    6. Provides comprehensive logging and progress tracking
 
     Args:
-        eval_dataset (List[Dict[str, Any]]): A list of dictionaries, where each dictionary
-                                     represents a job (model-generated output).
-        label_key (str): The key in the input data dictionary that contains the ground truth.
-        response_key (str): The key in the input data dictionary that contains the model output.
-        cache_path (str): The file path to save the processed results.
-        max_workers (int): The maximum number of worker processes to use.
-        timeout (int): The maximum time (in seconds) to wait for each job to complete.
+        eval_dataset (List[Dict[str, Any]]): Evaluation dataset where each dictionary contains:
+            - task: Task identifier (required)
+            - model output and ground truth fields (specified by label_key and response_key)
+            - Other optional metadata
+        label_key (str): Dictionary key for accessing ground truth answers
+        response_key (str): Dictionary key for accessing model-generated answers
+        cache_path (str): File system path for saving processed results
+        max_workers (int): Upper limit on parallel worker processes
+        timeout (int, optional): Maximum seconds allowed per job. Defaults to 20.
 
     Returns:
-        float: The overall accuracy score, averaged across all jobs.
+        float: Average accuracy score across all processed jobs (0.0 to 1.0)
 
     Raises:
-        ValueError: If eval_dataset is empty or required keys are missing.
-        IOError: If cache_path cannot be written to.
+        ValueError: On empty dataset or missing required data fields
+        IOError: When cache file cannot be written
+        RuntimeError: On critical parallel processing failures
+
+    Note:
+        Results are cached in JSONL format with additional metadata including:
+        - Performance statistics (correct/timeout/error counts)
+        - Processing parameters (workers, timeout)
+        - Individual job results and extracted answers
     """
     if not eval_dataset:
         logger.info('No jobs to process. Returning 0.0 accuracy.')
@@ -275,11 +307,26 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
 
 def save_cache(eval_dataset: List[Dict[str, Any]], cache_path: str) -> None:
     """
-    Saves a list of dataset dictionaries to a JSONL file.
+    Persists evaluation results and metadata to a JSONL file.
+
+    Each line in the output file contains a JSON object representing one evaluation
+    result, including the original input, computed metrics, and processing metadata.
 
     Args:
-        eval_dataset (List[Dict[str, Any]]): The list of dictionaries to save.
-        cache_path (str): The file path to save the data.
+        eval_dataset (List[Dict[str, Any]]): Evaluation results to save, where each dict contains:
+            - Original input data
+            - Computed accuracy score
+            - Extracted answers (predicted and gold)
+            - Processing metadata (e.g., worker count, timeout settings)
+        cache_path (str): Filesystem path for the output JSONL file
+
+    Raises:
+        IOError: If the cache file cannot be written due to permissions or disk space
+
+    Note:
+        - Uses UTF-8 encoding for proper handling of mathematical symbols
+        - Preserves full floating-point precision in JSON serialization
+        - Ensures one complete JSON object per line for easy streaming
     """
     try:
         with open(cache_path, 'w', encoding='utf-8') as f:
