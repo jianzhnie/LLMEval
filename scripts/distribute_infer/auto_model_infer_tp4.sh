@@ -562,7 +562,8 @@ wait_for_services() {
         echo "   -> 就绪: ${ready_instances}, 失败: ${failed_instance_count}, 等待: ${pending_instances}/${total_instances} 服务，已等待: ${total_wait_time}s"
 
         # 如果等待时间过长，提前退出
-        if [[ $total_wait_time -gt $((MAX_WAIT_TIME * 0.8)) ]] && [[ $pending_instances -gt 0 ]]; then
+        local time_threshold=$((MAX_WAIT_TIME * 8 / 10))  # 80% of MAX_WAIT_TIME
+        if [[ $total_wait_time -gt $time_threshold ]] && [[ $pending_instances -gt 0 ]]; then
             echo "⚠️  接近最大等待时间，部分实例仍未就绪"
         fi
 
