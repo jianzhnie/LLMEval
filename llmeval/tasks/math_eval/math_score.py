@@ -1,12 +1,18 @@
 """
-This module provides functionality to evaluate the accuracy of a large number of
-model-generated answers against their ground truth using the `math-verify` library.
-It leverages multiprocessing to speed up the evaluation process.
+This module provides functionality to evaluate the accuracy of model-generated mathematical answers
+against their ground truth using the `math-verify` library. It leverages multiprocessing to speed
+up the evaluation process and includes robust error handling and caching mechanisms.
+
+The module implements a parallel processing architecture to efficiently handle large batches of
+mathematical evaluation tasks while providing detailed logging and progress tracking.
 """
+
+from __future__ import annotations
 
 import json
 import os
 from concurrent.futures import TimeoutError
+from dataclasses import dataclass
 from statistics import mean
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,7 +23,7 @@ from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
 from llmeval.utils.logger import init_logger
 
 # Configure a dedicated logger for the math scoring module
-logger = init_logger(__name__)
+logger = init_logger('math_score')
 
 # Define package requirements for better dependency management
 REQUIRED_PACKAGES = {
@@ -25,7 +31,6 @@ REQUIRED_PACKAGES = {
     'pebble': 'pebble>=4.6.3',
     'tqdm': 'tqdm>=4.65.0'
 }
-
 # Attempt to import necessary components from math-verify.
 # Provides helpful error messages if dependencies are missing.
 try:
@@ -38,42 +43,67 @@ except ImportError as e:
     import sys
     sys.exit(1)
 
+# Type aliases for better code readability
+ProcessResult = Optional[Tuple[int, float, Optional[str], Optional[str]]]
+DataDict = Dict[str, Any]
+EvalDataset = List[DataDict]
 
-def process_answers(
-    args: Tuple[int, Dict[str, Any], str, str]
-) -> Optional[Tuple[int, float, Optional[str], Optional[str]]]:
+
+@dataclass
+class ProcessingStats:
+    """Container for tracking processing statistics."""
+    total: int = 0
+    correct: int = 0
+    timeout: int = 0
+    error: int = 0
+
+    @property
+    def correct_rate(self) -> float:
+        """Calculate percentage of correct answers."""
+        return (self.correct / self.total * 100) if self.total > 0 else 0.0
+
+    @property
+    def timeout_rate(self) -> float:
+        """Calculate percentage of timeouts."""
+        return (self.timeout / self.total * 100) if self.total > 0 else 0.0
+
+    @property
+    def error_rate(self) -> float:
+        """Calculate percentage of errors."""
+        return (self.error / self.total * 100) if self.total > 0 else 0.0
+
+
+def process_answers(args: Tuple[int, DataDict, str, str]) -> ProcessResult:
     """
-    Processes a single model output by extracting the answer and comparing it with the
-    ground truth using the `math-verify` metric.
+    Process a single model output by extracting and comparing with ground truth.
 
-    This function handles all aspects of processing a single mathematical answer:
-    1. Extracts the task name and validates input format
-    2. Parses ground truth answer from input data
-    3. Processes model-generated text
-    4. Verifies answer correctness using math-verify library
-    5. Handles various error cases and timeouts
+    This function handles:
+    1. Task name extraction and validation
+    2. Ground truth parsing
+    3. Model output processing
+    4. Answer verification
+    5. Error handling and timeout management
 
     Args:
-        args (Tuple[int, Dict[str, Any], str, str]): Processing arguments containing:
-            - index (int): Unique job identifier for tracking
-            - input_data (Dict[str, Any]): Data dictionary with model output and ground truth
-            - label_key (str): Key for accessing ground truth in input_data
-            - response_key (str): Key for accessing model response in input_data
+        args: Processing arguments containing:
+            - index: Unique job identifier
+            - input_data: Data dictionary with model output and ground truth
+            - label_key: Key for ground truth in input_data
+            - response_key: Key for model response in input_data
 
     Returns:
-        Optional[Tuple[int, float, Optional[str], Optional[str]]]: Processing results:
-            - index (int): Original job identifier
-            - score (float): Verification score (1.0=correct, 0.0=incorrect)
-            - pred_ans (Optional[str]): Extracted predicted answer, None if failed
-            - gold_ans (Optional[str]): Extracted gold answer, None if failed
+        A tuple containing:
+            - Original job index
+            - Verification score (1.0=correct, 0.0=incorrect)
+            - Extracted predicted answer (None if failed)
+            - Extracted gold answer (None if failed)
 
     Note:
-        - Returns None if any unexpected error occurs during processing
-        - Uses math-verify library with configurable precision (default=6)
-        - Handles both expression and LaTeX answer formats
-        - Implements timeout protection for long-running verifications
+        Uses math-verify library with configurable precision for answer verification.
     """
     index, input_data, label_key, response_key = args
+
+    # Validate and extract task name
     try:
         data_name = input_data.get('task', '').split('/')[1]
     except (IndexError, AttributeError):
@@ -153,12 +183,9 @@ def process_answers(
         return index, 0.0, f'Error: {e}', f'Error: {e}'
 
 
-def compute_scores(eval_dataset: List[Dict[str, Any]],
-                   label_key: str,
-                   response_key: str,
-                   cache_path: str,
-                   max_workers: int,
-                   timeout: int = 20) -> float:
+def compute_scores(eval_dataset: EvalDataset, label_key: str,
+                   response_key: str, cache_path: str, max_workers: int,
+                   timeout: int) -> float:
     """
     Computes accuracy scores for a batch of mathematical evaluation jobs using parallel processing.
 
@@ -200,10 +227,10 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
         return 0.0
 
     total = len(eval_dataset)
+    stats = ProcessingStats(total=total)
     processed_indices = set()
-    counts = {'timeout': 0, 'error': 0, 'correct': 0}
 
-    # Optimize worker count based on CPU count and dataset size
+    # Optimize worker count based on system resources
     cpu_count = os.cpu_count() or 1
     optimal_workers = min(max_workers, max(1, min(cpu_count - 1, total // 4)))
 
@@ -234,15 +261,15 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
                         })
                         processed_indices.add(idx)
 
-                        # Count different types of results
+                        # Update statistics
                         if is_correct == 1.0:
-                            counts['correct'] += 1
+                            stats.correct += 1
                         elif extracted_answer == 'Timeout':
-                            counts['timeout'] += 1
-                        elif extracted_answer and (
-                                isinstance(extracted_answer, str)
-                                and extracted_answer.startswith('Error')):
-                            counts['error'] += 1
+                            stats.timeout += 1
+                        elif isinstance(
+                                extracted_answer,
+                                str) and extracted_answer.startswith('Error'):
+                            stats.error += 1
                 except StopIteration:
                     break
                 except TimeoutError:
@@ -268,70 +295,54 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
 
     logger.info(f'Summary: {total} eval_dataset processed.')
 
-    # Log detailed performance statistics
-    correct_rate = counts['correct'] / total * 100
-    timeout_rate = counts['timeout'] / total * 100
-    error_rate = counts['error'] / total * 100
-
-    logger.info(f"""
+    # Log performance summary
+    logger.info(f'''
     Performance Summary:
     -------------------
-    Total Jobs: {total}
-    Correct: {counts['correct']} ({correct_rate:.1f}%)
-    Timeouts: {counts['timeout']} ({timeout_rate:.1f}%)
-    Errors: {counts['error']} ({error_rate:.1f}%)
+    Total Jobs: {stats.total}
+    Correct: {stats.correct} ({stats.correct_rate:.1f}%)
+    Timeouts: {stats.timeout} ({stats.timeout_rate:.1f}%)
+    Errors: {stats.error} ({stats.error_rate:.1f}%)
     Workers Used: {optimal_workers}
-    """)
+    ''')
 
-    # Save results with performance metadata
+    # Add metadata and save results
     metadata = {
-        'total_jobs': total,
-        'correct_count': counts['correct'],
-        'timeout_count': counts['timeout'],
-        'error_count': counts['error'],
+        'total_jobs': stats.total,
+        'correct_count': stats.correct,
+        'timeout_count': stats.timeout,
+        'error_count': stats.error,
         'workers_used': optimal_workers,
         'timeout_setting': timeout
     }
 
-    for dataset in eval_dataset:
-        dataset['_metadata'] = metadata
-
+    logger.debug(f'Processing metadata: {metadata}')
     # Save the results to the cache file
     save_cache(eval_dataset, cache_path)
 
     # Calculate and return the average accuracy
     accuracy = mean(data['accuracy'] for data in eval_dataset)
-    logger.info(f'Final Accuracy: {accuracy:.2%}')
+    logger.info(f'Final Accuracy: {accuracy:.4f}')
     return accuracy
 
 
-def save_cache(eval_dataset: List[Dict[str, Any]], cache_path: str) -> None:
+def save_cache(eval_dataset: EvalDataset, cache_path: str) -> None:
     """
-    Persists evaluation results and metadata to a JSONL file.
-
-    Each line in the output file contains a JSON object representing one evaluation
-    result, including the original input, computed metrics, and processing metadata.
+    Save evaluation results and metadata to a JSONL file.
 
     Args:
-        eval_dataset (List[Dict[str, Any]]): Evaluation results to save, where each dict contains:
-            - Original input data
-            - Computed accuracy score
-            - Extracted answers (predicted and gold)
-            - Processing metadata (e.g., worker count, timeout settings)
-        cache_path (str): Filesystem path for the output JSONL file
+        eval_dataset: Evaluation results to save
+        cache_path: Output file path for JSONL data
 
     Raises:
-        IOError: If the cache file cannot be written due to permissions or disk space
-
-    Note:
-        - Uses UTF-8 encoding for proper handling of mathematical symbols
-        - Preserves full floating-point precision in JSON serialization
-        - Ensures one complete JSON object per line for easy streaming
+        IOError: If the cache file cannot be written
     """
     try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         with open(cache_path, 'w', encoding='utf-8') as f:
             for dataset in eval_dataset:
                 f.write(json.dumps(dataset, ensure_ascii=False) + '\n')
-        logger.info(f'✅ Results successfully saved to {cache_path}')
+        logger.info(f'✅ Results saved to {cache_path}')
     except IOError as e:
-        logger.error(f'❌ Failed to save cache file to {cache_path}: {e}')
+        logger.error(f'❌ Failed to save cache: {e}')
+        raise

@@ -160,7 +160,7 @@ def evaluate_task(eval_dataset: List[Dict[str, Any]],
                     cache_path),  # compute_scores expects string path
                 max_workers=max_workers,
                 timeout=timeout)
-            logger.info(f'✅ Task: {task_name}, Accuracy: {accuracy:.4f}')
+            logger.info(f'✅ Task: {task_name}, Accuracy: {accuracy:.2%}')
             return accuracy
         except Exception as e:
             logger.error(f'❌ Evaluation failed: {str(e)}', exc_info=True)
