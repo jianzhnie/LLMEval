@@ -21,7 +21,7 @@ consistency and prevent runtime errors.
 import dataclasses
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from transformers import HfArgumentParser
 
@@ -531,14 +531,8 @@ class EvalTaskArguments:
         metadata={
             'help': 'Path to the input JSONL file containing evaluation data.'
         })
-    cache_path: str = field(
-        metadata={'help': 'Directory path for saving cached results.'})
-    max_workers: int = field(
-        default=128,
-        metadata={
-            'help': 'Maximum number of worker threads for parallel processing.'
-        })
     task_name: str = field(
+        default='math_opensource/aime24',
         metadata={
             'help':
             'Task must be in [math_opensource/aime24, math_opensource/aime25, '
@@ -551,10 +545,17 @@ class EvalTaskArguments:
         metadata={'help': 'Key for target/label text in dataset.'})
     response_key: str = field(
         default='gen', metadata={'help': 'Key for model generated text.'})
-    VALID_TASKS: List[str] = [
-        'math_opensource/aime24', 'math_opensource/aime25', 'livecodebench',
-        'ifeval'
-    ]
+
+    cache_path: str = field(
+        default='./cache',
+        metadata={'help': 'Directory path for saving cached results.'})
+    max_workers: int = field(
+        default=128,
+        metadata={
+            'help': 'Maximum number of worker threads for parallel processing.'
+        })
+    timeout: int = field(
+        default=20, metadata={'help': 'Timeout for LLM inference in seconds.'})
 
     def __post_init__(self) -> None:
         """
@@ -570,10 +571,14 @@ class EvalTaskArguments:
         if self.max_workers <= 0:
             raise ValueError(
                 f'max_workers must be positive, got {self.max_workers}')
-
-        if self.task_name not in self.VALID_TASKS:
-            raise ValueError(f'task_name must be one of {self.VALID_TASKS}, '
-                             f'got {self.task_name}')
+        valid_tasks = [
+            'math_opensource/aime24', 'math_opensource/aime25',
+            'livecodebench', 'ifeval'
+        ]
+        if self.task_name not in valid_tasks:
+            raise ValueError(
+                f'task_name must be one of {valid_tasks}, got {self.task_name}'
+            )
 
 
 # Example usage

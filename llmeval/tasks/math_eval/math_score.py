@@ -5,6 +5,7 @@ It leverages multiprocessing to speed up the evaluation process.
 """
 
 import json
+import os
 from concurrent.futures import TimeoutError
 from statistics import mean
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,14 +41,22 @@ def process_answers(
     ground truth using the `math-verify` metric.
 
     Args:
-        args (Tuple[int, Dict[str, Any], str, str]): A tuple containing the job index,
-                                           the input data dictionary, label key, and response key.
+        args (Tuple[int, Dict[str, Any], str, str]): A tuple containing:
+            - index (int): The job index for tracking
+            - input_data (Dict[str, Any]): The input data dictionary containing model output and ground truth
+            - label_key (str): The key to access ground truth in input_data
+            - response_key (str): The key to access model response in input_data
 
     Returns:
-        Optional[Tuple[int, float, Optional[str], Optional[str]]]: A tuple containing
-        the index, correctness score (1.0 for correct, 0.0 for incorrect),
-        the extracted predicted answer, and the extracted gold answer.
-        Returns None if an unexpected error occurs.
+        Optional[Tuple[int, float, Optional[str], Optional[str]]]: A tuple containing:
+            - index (int): The original job index
+            - score (float): Correctness score (1.0 for correct, 0.0 for incorrect)
+            - pred_ans (Optional[str]): The extracted predicted answer, None if extraction failed
+            - gold_ans (Optional[str]): The extracted gold answer, None if extraction failed
+
+    Note:
+        Returns None if an unexpected error occurs during processing.
+        Uses math-verify library for answer comparison with configurable precision.
     """
     index, input_data, label_key, response_key = args
     try:
@@ -90,24 +99,39 @@ def process_answers(
     )
 
     try:
-        # Run the verification. The `math_metric` returns a tuple of (grade, extracted_answers).
+        # Run the verification using math-verify metric
         grade, extracted_answers = verify_func([generated_text],
                                                [gold_answer_text])
 
-        # Safely extract the predicted and gold answers from the returned tuple
-        # The tuple will contain extracted answers in the order of `pred_extraction_target`
-        # and `gold_extraction_target` respectively.
-        # Note: The order of `extracted_answers` is (pred_ans, gold_ans).
-        pred_ans = extracted_answers[0] if len(extracted_answers) > 0 else None
-        gold_ans = extracted_answers[1] if len(extracted_answers) > 1 else None
+        if not extracted_answers:
+            logger.warning(f'⚠️ No answers could be extracted for job {index}')
+            return index, 0.0, None, None
+
+        # Extract answers with validation
+        try:
+            pred_ans = extracted_answers[0]
+            gold_ans = extracted_answers[1]
+        except IndexError:
+            logger.error(
+                f'❌ [Error] Invalid extraction format for job {index}')
+            return index, 0.0, None, None
+
+        # Validate grade value
+        if not (isinstance(grade, (int, float)) and 0 <= grade <= 1):
+            logger.error(
+                f'❌ [Error] Invalid grade value {grade} for job {index}')
+            return index, 0.0, pred_ans, gold_ans
 
         return index, float(grade), pred_ans, gold_ans
 
     except TimeoutError as te:
-        logger.warning(f'⏰ [Timeout] Job {index} timed out {te}')
+        logger.warning(f'⏰ [Timeout] Job {index} timed out after {te} seconds')
         return index, 0.0, 'Timeout', 'Timeout'
+    except ValueError as ve:
+        logger.error(
+            f'❌ [Value Error] Invalid input format for job {index}: {ve}')
+        return index, 0.0, f'Format Error: {ve}', None
     except Exception as e:
-        # Catch any other unexpected errors during processing.
         logger.error(
             f'❌ [Error] An unexpected error occurred for job {index}: {e}',
             exc_info=True)
@@ -130,25 +154,28 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
         response_key (str): The key in the input data dictionary that contains the model output.
         cache_path (str): The file path to save the processed results.
         max_workers (int): The maximum number of worker processes to use.
-        timeout (int): The maximum time (in seconds) to wait for each job to complete
+        timeout (int): The maximum time (in seconds) to wait for each job to complete.
 
     Returns:
         float: The overall accuracy score, averaged across all jobs.
+
+    Raises:
+        ValueError: If eval_dataset is empty or required keys are missing.
+        IOError: If cache_path cannot be written to.
     """
-    total = len(eval_dataset)
-    if total == 0:
+    if not eval_dataset:
         logger.info('No jobs to process. Returning 0.0 accuracy.')
         return 0.0
 
+    total = len(eval_dataset)
     processed_indices = set()
-    timeout_count = 0
-    error_count = 0
+    counts = {'timeout': 0, 'error': 0, 'success': 0}
 
-    # Optimize worker count based on dataset size
-    optimal_workers = min(max_workers, max(1, total // 4))
+    # Optimize worker count based on CPU count and dataset size
+    cpu_count = os.cpu_count() or 1
+    optimal_workers = min(max_workers, max(1, min(cpu_count - 1, total // 4)))
 
-    with tqdm(total=total, desc='Processing jobs') as pbar:
-        # Using ProcessPool to parallelize the evaluation
+    with tqdm(total=total, desc='Processing jobs', unit='job') as pbar:
         with ProcessPool(max_workers=optimal_workers) as pool:
             # `pool.map` submits jobs and returns a future
             future = pool.map(process_answers,
@@ -163,17 +190,26 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
                     result = next(iterator)
                     if result is not None:
                         idx, is_correct, extracted_answer, extracted_gold = result
-                        eval_dataset[idx]['accuracy'] = is_correct
-                        eval_dataset[idx]['extracted_gold'] = extracted_gold
-                        eval_dataset[idx][
-                            'extracted_answer'] = extracted_answer
+
+                        # Update results atomically
+                        eval_dataset[idx].update({
+                            'accuracy':
+                            is_correct,
+                            'extracted_gold':
+                            extracted_gold,
+                            'extracted_answer':
+                            extracted_answer
+                        })
                         processed_indices.add(idx)
-                        if is_correct == 0.0:
-                            if extracted_answer == 'Timeout':
-                                timeout_count += 1
-                            elif extracted_answer and extracted_answer.startswith(
-                                    'Error'):
-                                error_count += 1
+
+                        # Count different types of results
+                        if is_correct == 1.0:
+                            counts['success'] += 1
+                        elif extracted_answer == 'Timeout':
+                            counts['timeout'] += 1
+                        elif extracted_answer and extracted_answer.startswith(
+                                'Error'):
+                            counts['error'] += 1
                 except StopIteration:
                     break
                 except TimeoutError:
@@ -191,19 +227,48 @@ def compute_scores(eval_dataset: List[Dict[str, Any]],
     # Handle any jobs that were not processed (e.g., due to a process crash or other unforeseen error).
     for idx in range(total):
         if idx not in processed_indices:
-            eval_dataset[idx]['accuracy'] = 0.0
-            eval_dataset[idx]['extracted_gold'] = 'Error'
-            eval_dataset[idx]['extracted_answer'] = 'Error'
+            eval_dataset[idx].update({
+                'accuracy': 0.0,
+                'extracted_gold': 'Error',
+                'extracted_answer': 'Error'
+            })
 
-    logger.info(
-        f'Summary: {total} eval_dataset processed. {timeout_count} timed out, {error_count} errors.'
-    )
+    logger.info(f'Summary: {total} eval_dataset processed.')
 
-    # Save the results to the cache file.
+    # Log detailed performance statistics
+    success_rate = counts['success'] / total * 100
+    timeout_rate = counts['timeout'] / total * 100
+    error_rate = counts['error'] / total * 100
+
+    logger.info(f"""
+            Performance Summary:
+            -------------------
+            Total Jobs: {total}
+            Successful: {counts['success']} ({success_rate:.1f}%)
+            Timeouts: {counts['timeout']} ({timeout_rate:.1f}%)
+            Errors: {counts['error']} ({error_rate:.1f}%)
+            Workers Used: {optimal_workers}
+            """)
+
+    # Save results with performance metadata
+    metadata = {
+        'total_jobs': total,
+        'success_count': counts['success'],
+        'timeout_count': counts['timeout'],
+        'error_count': counts['error'],
+        'workers_used': optimal_workers,
+        'timeout_setting': timeout
+    }
+
+    for dataset in eval_dataset:
+        dataset['_metadata'] = metadata
+
+    # Save the results to the cache file
     save_cache(eval_dataset, cache_path)
 
-    # Calculate the average accuracy.
+    # Calculate and return the average accuracy
     accuracy = mean(data['accuracy'] for data in eval_dataset)
+    logger.info(f'Final Accuracy: {accuracy:.2%}')
     return accuracy
 
 
