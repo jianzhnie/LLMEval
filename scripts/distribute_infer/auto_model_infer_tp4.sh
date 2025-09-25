@@ -408,10 +408,7 @@ deploy_model_service() {
     # 端口探活与服务启动
     check_remote_port_free "$node" "$port"
     # 在后台启动服务
-    if ! ssh_run "$node" "$vllm_cmd"; then
-        echo "❌ 在节点 ${node} 上启动 vLLM 服务失败" >&2
-        return 1
-    fi
+    ssh_run "$node" "$vllm_cmd" &
 }
 
 # 健康检查（HTTP 探活 + 日志回退）
