@@ -581,23 +581,18 @@ discover_remote_dataset_files() {
 check_and_prepare_remote_dirs() {
     log_info "⚙️ 正在检查并创建远程目录，清理旧日志..."
 
-    local pids=()
     for node in "${NODES[@]}"; do
-        (
         log_info "处理节点: ${node}"
         # 创建目录，清理旧的状态/日志文件
-            local prep_cmd="mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && \
-                rm -rf '${LOG_DIR}/status' && mkdir -p '${LOG_DIR}/status' && \
-                rm -f '${LOG_DIR}/${API_SERVER_LOG_PREFIX}'*.log '${LOG_DIR}/${TASK_LOG_PREFIX}'*.log 2>/dev/null || true"
+        local prep_cmd="mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && \
+            rm -rf '${LOG_DIR}/status' && mkdir -p '${LOG_DIR}/status' && \
+            rm -f '${LOG_DIR}/${API_SERVER_LOG_PREFIX}'*.log '${LOG_DIR}/${TASK_LOG_PREFIX}'*.log 2>/dev/null || true"
 
         if ! ssh_run "$node" "$prep_cmd"; then
-                log_error "❌ 无法在节点 ${node} 上准备目录，请检查SSH连接和权限"
+            log_error "❌ 无法在节点 ${node} 上准备目录，请检查SSH连接和权限"
                 exit 1 # 在 subshell 中退出
         fi
-        ) &
-        pids+=($!)
     done
-    wait "${pids[@]}" || handle_error 1 "远程目录准备失败"
 
     log_info "✅ 所有远程目录已就绪，旧日志已清理"
 }
@@ -676,6 +671,12 @@ check_service_ready() {
     local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
     local base_url="http://127.0.0.1:${port}"
     local http_status models_status
+
+    # 检查日志文件是否存在
+    if ! ssh_run "$node" "[[ -f '${log_file}' ]]"; then
+        log_warn "节点 ${node} 的日志文件尚未创建: ${log_file}"
+        return 1
+    fi
 
     # 1. 检查服务进程是否存在
     if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
@@ -812,7 +813,7 @@ assign_data_to_instances() {
     # 销毁并初始化实例分配数组
     for ((i = 0; i < total_instances; i++)); do
         # 动态声明/清空数组变量
-        eval "declare -g INSTANCE_ASSIGNMENTS_${i}=()"
+        eval "INSTANCE_ASSIGNMENTS_$i=()"
     done
 
     # 轮询分配文件
@@ -851,7 +852,6 @@ run_task_batch() {
 
     log_info "👉 在节点 ${node} 上启动 ${#files[@]} 个推理任务..."
 
-    local tasks_started=0
     for file in "${files[@]}"; do
         local input_file="${DATASET_DIR}/${file}"
         # 移除文件扩展名
@@ -876,18 +876,7 @@ run_task_batch() {
 
         # 在后台启动任务
         ssh_run "$node" "$infer_cmd" &
-        tasks_started=$((tasks_started + 1))
-        # 简单的全局节流，避免一次性拉起过多任务导致瞬时拥塞
-        # 如需更精细的节流策略，可替换为远程 semaphore 或基于队列的派发
-        if [[ $tasks_started -ge $MAX_JOBS ]]; then
-            log_info "达到本地 MAX_JOBS=${MAX_JOBS} 限制，等待当前批次完成..."
-            wait
-            tasks_started=0
-        fi
     done
-
-    # 等待当前节点剩余的本地后台任务完成提交
-    wait || true
 }
 
 # 分发并启动所有推理任务
@@ -913,22 +902,17 @@ distribute_and_launch_jobs() {
         local model_name="${SERVED_MODEL_NAME}"
 
         # 获取分配给当前实例的文件列表
-        local assigned_var="INSTANCE_ASSIGNMENTS_$i"
+        IFS=$'\n' read -r -d '' -a ASSIGNED < <(eval "printf '%s\0' \"\${INSTANCE_ASSIGNMENTS_${i}[@]}\"")
 
         # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
         # Bash 技巧: 使用 -v 确保变量已定义且不为空
-        if ! declare -p "$assigned_var" &>/dev/null || [[ -z $(eval echo "\${$assigned_var[*]:-}") ]]; then
-            log_warn "节点 ${node} 未分配到文件，跳过该节点任务启动"
+        if [[ ${#ASSIGNED[@]} -eq 0 ]]; then
+            log_info "节点 ${node} 未分配到文件，跳过"
             continue
         fi
 
         # 获取分配给当前实例的文件列表 (使用 eval/间接引用)
-        # Bash 技巧: 使用 printf/mapfile/eval 安全地将数组传递给函数
-        local -a ASSIGNED
-        mapfile -t ASSIGNED < <(eval "printf '%s\n' \"\${$assigned_var[@]}\"")
-
-        log_info "节点 ${node} (实例 ${i}) 分配到 ${#ASSIGNED[@]} 个文件，开始提交任务..."
-
+        log_info "节点 ${node} 分配到 ${#ASSIGNED[@]} 个文件"
         # 在本地后台启动任务提交批次
         (
             run_task_batch "$node" "$model_name" "$base_url" "${ASSIGNED[@]:-}"
@@ -937,65 +921,8 @@ distribute_and_launch_jobs() {
     done
 
     # 3. 等待所有节点的任务提交完成（不等待远端具体推理完成）
-        wait "${pids[@]}" || true
-
+    wait "${pids[@]}" || true
     log_info "✅ 所有推理任务已启动，进入远端任务监控阶段"
-}
-
-# 监控远端推理任务直至完成（基于进程存活）
-# Args:
-#   None
-# Returns:
-#   None (阻塞直到所有节点上不再存在 INFER_SCRIPT 进程)
-wait_for_remote_jobs() {
-    log_info "⏳ 等待所有远端推理任务完成..."
-    local interval=10
-    local infer_script_name="${INFER_SCRIPT##*/}" # 推理脚本的文件名部分
-
-    while true; do
-        local running_total=0
-        local pids=()
-        local -a node_counts=() # 存储每个节点的运行任务数
-
-        # 1. 并行检查每个节点的运行进程数
-        for node in "${NODES[@]}"; do
-            (
-                # 统计匹配推理客户端脚本的存活进程数 (使用完整路径/文件名匹配，更精确)
-                local count
-                # -f: 匹配完整的参数列表, -a: 显示完整命令
-                count=$(ssh_run "$node" "pgrep -fal 'python .*${infer_script_name}' | wc -l" 2>/dev/null || echo 0)
-                echo "${node}:${count}" # 将结果输出到管道
-            ) &
-            pids+=($!)
-        done
-        # 等待所有远程检查完成
-        wait "${pids[@]}" || true
-
-        # 2. 汇总结果
-        for line in "${pids[@]}"; do
-            local result
-            # 从后台进程获取其输出
-            result=$(jobs -p | grep "$line" | xargs -r -I {} cat /proc/{}/fd/1)
-            [[ -z "$result" ]] && continue
-
-            node_counts+=("$result")
-            local count="${result##*:}"
-            running_total=$((running_total + count))
-            done
-
-        if [[ ${running_total} -eq 0 ]]; then
-            log_info "✅ 所有远端推理任务已完成"
-            break
-        fi
-
-        log_info "仍有 ${running_total} 个远端推理进程在运行:"
-        # 打印每个节点的任务数
-        for item in "${node_counts[@]}"; do
-            log_info "   -> ${item}"
-        done
-
-        sleep "${interval}"
-    done
 }
 
 
@@ -1078,10 +1005,8 @@ main() {
     wait || true
 
     # 步骤5: 等待服务就绪并获取可用节点（HTTP 健康检查 + 日志回退）
-    local -a ready_indices_str
-    # Bash 技巧: mapfile -t 接收函数输出的数组
-    mapfile -t ready_indices_str < <(wait_for_services)
-    local ready_indices=("${ready_indices_str[@]}")
+    local -a ready_indices
+    mapfile -t ready_indices < <(wait_for_services)
 
     if [[ ${#ready_indices[@]} -eq 0 ]]; then
         handle_error 1 "没有可用的服务节点"
@@ -1122,9 +1047,6 @@ main() {
 
     # 步骤6: 使用可用节点分发并启动推理任务
     distribute_and_launch_jobs
-
-    # 步骤7: 等待远端推理任务完成
-    wait_for_remote_jobs
 
     # 步骤8: 优雅关闭服务（由 EXIT 陷阱调用 stop_services）
     log_info "✅ 分布式推理部署和任务执行完成，正在退出并清理资源..."
