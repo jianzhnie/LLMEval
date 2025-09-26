@@ -807,7 +807,7 @@ assign_data_to_instances() {
 #   $3: base_url (string) - 服务 URL (如 http://127.0.0.1:port/v1)
 #   $@: files (string array) - 分配给该节点的全部文件列表
 # Returns:
-#   None (任务在远程后台启动，本地阻塞在任务节流)
+#   None (任务在远程后台启动，不等待完成)
 run_task_batch() {
     local node="$1"
     local model_name="$2"
@@ -847,7 +847,7 @@ run_task_batch() {
     # 将所有命令组合成一个命令字符串并执行
     if [[ ${#commands[@]} -gt 0 ]]; then
         local combined_cmd=$(printf "%s " "${commands[@]}")
-        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1 &
+        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
     fi
 
     log_info "✅ 节点 ${node} 上的 ${#files[@]} 个推理任务已提交"
@@ -901,6 +901,46 @@ distribute_and_launch_jobs() {
         wait "${pids[@]}" || true
     fi
     log_info "✅ 所有推理任务已启动，进入远端任务监控阶段"
+
+    # 4. 等待所有远程推理任务完成
+    wait_for_inference_completion
+}
+# 等待所有推理任务完成
+# Args:
+#   None
+# Returns:
+#   None
+wait_for_inference_completion() {
+    log_info "⏳ 等待所有推理任务完成..."
+
+    local total_nodes=${#NODES[@]}
+    local completed_nodes=0
+
+    while [[ $completed_nodes -lt $total_nodes ]]; do
+        completed_nodes=0
+
+        for ((i = 0; i < total_nodes; i++)); do
+            local node="${NODES[i]}"
+
+            # 检查节点上是否还有运行中的推理任务
+            local running_tasks
+            running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
+
+            if [[ "${running_tasks:-0}" -eq 0 ]]; then
+                completed_nodes=$((completed_nodes + 1))
+                log_info "✅ 节点 ${node} 上的推理任务已完成"
+            else
+                log_info "⏳ 节点 ${node} 上仍有 ${running_tasks} 个推理任务在运行"
+            fi
+        done
+
+        if [[ $completed_nodes -lt $total_nodes ]]; then
+            log_info "等待 10 秒后再次检查任务状态..."
+            sleep 10
+        fi
+    done
+
+    log_info "✅ 所有节点上的推理任务已完成"
 }
 
 
@@ -1038,7 +1078,7 @@ main() {
     # 步骤6: 使用可用节点分发并启动推理任务
     distribute_and_launch_jobs
 
-    # 步骤8: 优雅关闭服务（由 EXIT 陷阱调用 stop_services）
+    # 步骤7: 优雅关闭服务（由 EXIT 陷阱调用 stop_services）
     log_info "✅ 分布式推理部署和任务执行完成，正在退出并清理资源..."
 
     log_info "📊 部署统计:"
