@@ -722,7 +722,7 @@ check_service_ready() {
 # Returns:
 #   ready_indices (string) - 以空格分隔的可用节点索引列表 (输出到 stdout)
 wait_for_services() {
-    log_info "⏳ 等待服务启动,总等待时间: ${MAX_WAIT_TIME} 秒"
+    log_info "⏳ 等待服务启动, 总等待时间 ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
     local interval=10
