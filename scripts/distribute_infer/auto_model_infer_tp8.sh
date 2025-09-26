@@ -812,7 +812,7 @@ assign_data_to_instances() {
     # 销毁并初始化实例分配数组
     for ((i = 0; i < total_instances; i++)); do
         # 动态声明/清空数组变量
-        declare -g INSTANCE_ASSIGNMENTS_$i=()
+        eval "declare -g INSTANCE_ASSIGNMENTS_${i}=()"
     done
 
     # 轮询分配文件
