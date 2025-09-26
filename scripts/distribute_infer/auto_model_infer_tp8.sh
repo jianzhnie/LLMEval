@@ -651,7 +651,8 @@ check_service_ready() {
 # 参数：无
 # 返回值：就绪节点的索引数组
 wait_for_services() {
-    log_info "正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
+    log_info "⏳ 等待服务启动..."
+    log_info "总等待时间: ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
     local interval=10
