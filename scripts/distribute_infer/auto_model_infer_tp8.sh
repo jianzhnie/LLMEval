@@ -179,8 +179,7 @@ readonly DATASET_DIR="${DATASET_DIR:-${PROJECT_DIR}/data_process/model_infer}"
 readonly DATASET_GLOB="${DATASET_GLOB:-top_100K_final_verified_samples_shard*}"
 
 # 并发控制配置
-readonly MAX_LOCAL_JOBS=${MAX_LOCAL_JOBS:-128}        # 本地同时提交的最大批次数
-readonly MAX_REMOTE_JOBS=${MAX_REMOTE_JOBS:-128}     # 每个节点上同时运行的最大任务数
+readonly MAX_JOBS=${MAX_JOBS:-128}                    # 总体一次性拉起的最大任务数量（进程数）
 
 # =======================================================
 #                  推理客户端参数
@@ -738,7 +737,6 @@ run_task_batch() {
     # 创建临时状态目录
 
     local tasks_started=0
-    local failed_tasks=()
     for file in "${files[@]}"; do
         local input_file="${DATASET_DIR}/${file}"
         local base_name=$(basename "$file" .jsonl)
@@ -765,8 +763,6 @@ run_task_batch() {
         tasks_started=$((tasks_started + 1))
         # 简单的全局节流，避免一次性拉起过多任务导致瞬时拥塞
         # 如需更精细的节流策略，可替换为远程 semaphore 或基于队列的派发
-
-        # 本地提交节流
         if [[ $tasks_started -ge $MAX_JOBS ]]; then
             wait
             tasks_started=0
