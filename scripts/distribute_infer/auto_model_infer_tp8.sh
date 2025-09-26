@@ -91,7 +91,7 @@ fi
 # - ControlPersist=60s: 保持连接60秒，减少重连开销
 readonly SSH_OPTS="-o StrictHostKeyChecking=no \
                    -o UserKnownHostsFile=/dev/null \
-                   -o LogLevel=INFO \
+                   -o LogLevel=ERROR \
                    -o ConnectTimeout=5 \
                    -o ServerAliveInterval=30 \
                    -o ServerAliveCountMax=3 \
@@ -583,10 +583,6 @@ check_service_ready() {
     # 检查进程是否存在
     if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
         log_warn "节点 ${node} 上的服务进程未运行"
-        # 输出最后的错误日志
-        ssh_run "$node" "tail -n 10 '${log_file}' 2>/dev/null || true" | while read -r line; do
-            log_warn "日志输出: $line"
-        done
         return 1
     fi
 
@@ -618,7 +614,7 @@ check_service_ready() {
     if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}'"; then
         # 检查最近的错误日志
         local error_logs
-        error_logs=$(ssh_run "$node" "grep -i 'error\|exception\|failed' '${log_file}' | tail -n 5")
+        error_logs=$(ssh_run "$node" "grep -i '[ERROR]\|error\|exception\|failed' '${log_file}' | tail -n 5")
         if [[ -n "$error_logs" ]]; then
             log_warn "节点 ${node} 日志中发现错误:"
             echo "$error_logs" | while read -r line; do
@@ -630,13 +626,8 @@ check_service_ready() {
             return 0
         fi
     else
-        log_warn "节点 ${node} 服务启动未完成，最新日志:"
-        ssh_run "$node" "tail -n 5 '${log_file}'" | while read -r line; do
-            log_warn "启动日志: $line"
-        done
+        log_warn "节点 ${node} 服务启动未完成，日志中未找到启动完成标志"
     fi
-
-    log_warn "服务 ${node}:${port} 健康检查未通过，等待重试..."
     return 1
 }
 
