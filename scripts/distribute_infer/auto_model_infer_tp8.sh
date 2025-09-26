@@ -708,13 +708,12 @@ check_service_ready() {
 # Returns:
 #   ready_indices (string) - 以空格分隔的可用节点索引列表 (输出到 stdout)
 wait_for_services() {
-    log_info "⏳ 等待服务启动, 总等待时间 ${MAX_WAIT_TIME} 秒"
+    echo "⏳ 正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
     local interval=5
     local total_services=${#NODES[@]}
     local status_dir="${LOG_DIR}/status"
-    local ready_indices=() # 存储已就绪的节点索引
 
     # 确保状态目录干净
     rm -rf "${status_dir}" || true
@@ -748,20 +747,12 @@ wait_for_services() {
             wait "${running_pids[@]}" || true
         fi
 
-        # 收集就绪节点索引
-        ready_indices=()
-        for ((i = 0; i < total_services; i++)); do
-            local node="${NODES[i]}"
-            local status_file="${status_dir}/status_${node//./_}.ok"
-            if [[ -f "$status_file" ]]; then
-                ready_indices+=($i)
-            fi
-        done
+        # 统计就绪服务数量
+        local ready_count
+        ready_count=$(ls -1 "${status_dir}" 2>/dev/null | wc -l | tr -d ' ')
 
-        local ready_count=${#ready_indices[@]}
         if [[ $ready_count -eq $total_services ]]; then
             log_info "✅ 所有 ${total_services} 个服务已就绪"
-            log_info "${ready_indices[*]}" # 输出可用节点索引列表 (供 main 函数接收)
             return 0
         fi
 
@@ -770,15 +761,7 @@ wait_for_services() {
         total_wait_time=$((total_wait_time + interval))
     done
 
-    # 超时处理
-    if [[ ${#ready_indices[@]} -gt 0 ]]; then
-        log_warn "⚠️ 超时 (${MAX_WAIT_TIME}s) 但有 ${#ready_indices[@]} 个节点已就绪，将继续使用可用节点"
-        echo "${ready_indices[*]}" # 输出可用节点索引列表
-        return 0
-    fi
-
-    log_error "❌ 错误: 没有任何节点成功启动，请检查远程日志" >&2
-    exit 1 # 致命错误退出
+    log_error "❌ 超时: 服务在 ${MAX_WAIT_TIME} 秒内未完全就绪，请检查远程日志" >&2
 }
 
 # 将数据文件按轮询方式分配到各个实例
@@ -789,7 +772,7 @@ wait_for_services() {
 assign_data_to_instances() {
     local total_instances="$1"
 
-    log_info "📦 正在分配全部 ${#FILES[@]} 个数据文件到 ${total_instances} 个实例..."
+    log_info "📊 正在分配全部 ${#FILES[@]} 个数据文件到 ${total_instances} 个实例..."
 
     # 销毁并初始化实例分配数组
     for ((i = 0; i < total_instances; i++)); do
@@ -986,12 +969,18 @@ main() {
     wait || true
 
     # 步骤5: 等待服务就绪并获取可用节点（HTTP 健康检查 + 日志回退）
-    local -a ready_indices
-    mapfile -t ready_indices < <(wait_for_services)
+    wait_for_services
 
-    if [[ ${#ready_indices[@]} -eq 0 ]]; then
-        handle_error 1 "没有可用的服务节点"
-    fi
+    local -a ready_indices
+    # 收集就绪节点的索引
+    for ((i = 0; i < ${#NODES[@]}; i++)); do
+        local node="${NODES[i]}"
+        # 获取节点的 API 服务状态文件
+        local status_file="${LOG_DIR}/status/status_${node//./_}.ok"
+        if [[ -f "$status_file" ]]; then
+            ready_indices+=("$i")
+        fi
+    done
 
     # 步骤6: 构建可用节点数组，并更新全局 NODES/PORTS
     local -a available_nodes=()
