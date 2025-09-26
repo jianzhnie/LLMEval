@@ -91,7 +91,7 @@ fi
 # - ControlPersist=60s: 保持连接60秒，减少重连开销
 readonly SSH_OPTS="-o StrictHostKeyChecking=no \
                    -o UserKnownHostsFile=/dev/null \
-                   -o LogLevel=ERROR \
+                   -o LogLevel=INFO \
                    -o ConnectTimeout=5 \
                    -o ServerAliveInterval=30 \
                    -o ServerAliveCountMax=3 \
@@ -574,9 +574,19 @@ check_service_ready() {
     local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
     local base_url="http://127.0.0.1:${port}"
 
+    # 检查日志文件是否存在
+    if ! ssh_run "$node" "[[ -f '${log_file}' ]]"; then
+        log_warn "节点 ${node} 的日志文件尚未创建: ${log_file}"
+        return 1
+    fi
+
     # 检查进程是否存在
     if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
         log_warn "节点 ${node} 上的服务进程未运行"
+        # 输出最后的错误日志
+        ssh_run "$node" "tail -n 10 '${log_file}' 2>/dev/null || true" | while read -r line; do
+            log_warn "日志输出: $line"
+        done
         return 1
     fi
 
@@ -586,8 +596,10 @@ check_service_ready() {
         ${base_url}${HEALTH_PATH} 2>/dev/null || echo 0")
 
     if [[ $http_status -eq 200 ]]; then
-        echo "✅ 服务 ${node}:${port} 健康检查通过"
+        log_info "✅ 服务 ${node}:${port} 健康检查通过"
         return 0
+    else
+        log_warn "节点 ${node} 健康检查接口返回状态码: ${http_status}"
     fi
 
     # 兼容性检查：尝试 /v1/models
@@ -596,20 +608,35 @@ check_service_ready() {
         ${base_url}/v1/models 2>/dev/null || echo 0")
 
     if [[ $models_status -eq 200 ]]; then
-        echo "✅ 服务 ${node}:${port} /v1/models 检查通过"
+        log_info "✅ 服务 ${node}:${port} /v1/models 检查通过"
         return 0
+    else
+        log_warn "节点 ${node} /v1/models 接口返回状态码: ${models_status}"
     fi
 
-    # 检查日志关键字
+    # 检查日志关键字和错误
     if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}'"; then
-        # 进一步验证是否有错误日志
-        if ! ssh_run "$node" "grep -i 'error\|exception\|failed' '${log_file}' | tail -n 5"; then
-            echo "✅ 服务 ${node}:${port} 日志检查通过"
+        # 检查最近的错误日志
+        local error_logs
+        error_logs=$(ssh_run "$node" "grep -i 'error\|exception\|failed' '${log_file}' | tail -n 5")
+        if [[ -n "$error_logs" ]]; then
+            log_warn "节点 ${node} 日志中发现错误:"
+            echo "$error_logs" | while read -r line; do
+                log_warn "错误日志: $line"
+            done
+            return 1
+        else
+            log_info "✅ 服务 ${node}:${port} 日志检查通过"
             return 0
         fi
+    else
+        log_warn "节点 ${node} 服务启动未完成，最新日志:"
+        ssh_run "$node" "tail -n 5 '${log_file}'" | while read -r line; do
+            log_warn "启动日志: $line"
+        done
     fi
 
-    log_info "服务 ${node}:${port} 健康检查未通过，等待重试..."
+    log_warn "服务 ${node}:${port} 健康检查未通过，等待重试..."
     return 1
 }
 
