@@ -878,20 +878,20 @@ distribute_and_launch_jobs() {
         local model_name="${SERVED_MODEL_NAME}"
 
         # 获取分配给当前实例的文件列表
-        IFS=$'\n' read -r -d '' -a ASSIGNED < <(eval "printf '%s\0' \"\${INSTANCE_ASSIGNMENTS_${i}[@]}\"")
+        local instance_files_var="INSTANCE_ASSIGNMENTS_$i"
+        local -n instance_files_ref="$instance_files_var"
 
         # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
-        # Bash 技巧: 使用 -v 确保变量已定义且不为空
-        if [[ ${#ASSIGNED[@]} -eq 0 ]]; then
+        if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
             log_info "节点 ${node} 未分配到文件，跳过"
             continue
         fi
 
-        # 获取分配给当前实例的文件列表 (使用 eval/间接引用)
-        log_info "节点 ${node} 分配到 ${#ASSIGNED[@]} 个文件"
+        # 获取分配给当前实例的文件列表
+        log_info "节点 ${node} 分配到 ${#instance_files_ref[@]} 个文件"
         # 在本地后台启动任务提交批次
         (
-            run_task_batch "$node" "$model_name" "$base_url" "${ASSIGNED[@]:-}"
+            run_task_batch "$node" "$model_name" "$base_url" "${instance_files_ref[@]}"
         ) &
         pids+=($!)
     done
