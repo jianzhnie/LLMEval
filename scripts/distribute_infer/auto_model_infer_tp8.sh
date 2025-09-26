@@ -402,7 +402,7 @@ validate_config() {
         "NUM_GPUS:1:8:GPU数量"
         "N_SAMPLES:1:100:采样次数"
         "MAX_NUM_SEQS:1:16384:并发序列数"
-        "MAX_NUM_BATCHED_TOKENS:512:1048576:批次Token数"
+        "MAX_NUM_BATCHED_TOKENS:512:1048576:批处理Token数"
     )
 
     for check in "${param_checks[@]}"; do
@@ -461,7 +461,7 @@ check_remote_port_free() {
 # 返回值：无（发现失败时退出）
 discover_remote_dataset_files() {
     if [[ ${#NODES[@]} -eq 0 ]]; then
-        log_error "无可用节点进行数据文件发现"
+        log_error "错误: 无可用节点进行数据文件发现"
         exit 1
     fi
 
@@ -501,7 +501,7 @@ check_and_prepare_remote_dirs() {
         fi
     done
 
-    log_info "所有远程目录已就绪，旧日志已清理"
+    log_info "✅ 所有远程目录已就绪，旧日志已清理"
 }
 
 # 停止所有远程节点上的模型服务
