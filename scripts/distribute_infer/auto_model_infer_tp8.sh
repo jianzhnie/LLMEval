@@ -668,11 +668,6 @@ check_service_ready() {
     local base_url="http://127.0.0.1:${port}"
     local http_status models_status
 
-    # 检查日志文件是否存在
-    if ! ssh_run "$node" "[[ -f '${log_file}' ]]"; then
-        log_warn "节点 ${node} 的日志文件尚未创建: ${log_file}, 请耐心等待"
-        return 1
-    fi
 
     # 1. 检查服务进程是否存在
     if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
@@ -700,19 +695,10 @@ check_service_ready() {
 
     # 4. 日志回退检查：查找启动完成标志
     if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}' 2>/dev/null"; then
-        # 进一步检查是否有最近的错误日志
-        local error_logs
-        error_logs=$(ssh_run "$node" "grep -iE '\[ERROR\]|error|exception|failed' '${log_file}' | tail -n 5")
-        if [[ -n "$error_logs" ]]; then
-            log_warn "节点 ${node} 日志中发现启动错误，服务可能不健康。"
-            return 1
-        else
-            log_info "✅ 服务 ${node}:${port} 日志启动完成标志通过 (HTTP状态码: ${http_status}/${models_status})"
-            return 0
-        fi
-    else
-        log_warn "节点 ${node} 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
+        log_info "✅ 服务 ${node}:${port} 日志启动完成标志通过 (HTTP状态码: ${http_status}/${models_status})"
+        return 0
     fi
+    log_warn "节点 ${node} 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
     return 1
 }
 
