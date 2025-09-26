@@ -271,15 +271,31 @@ rsync_to_node() {
 
 # 日志函数
 log_info() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: $*"
+    local msg="$*"
+    # 根据消息内容选择合适的emoji
+    case "$msg" in
+        *"开始执行"*|*"启动"*) local emoji="🚀 " ;;
+        *"完成"*|*"成功"*|*"通过"*) local emoji="✅ " ;;
+        *"发现"*|*"检查"*) local emoji="🔍 " ;;
+        *"配置"*|*"设置"*) local emoji="⚙️ " ;;
+        *"等待"*) local emoji="⏳ " ;;
+        *"清理"*) local emoji="🧹 " ;;
+        *"分配"*|*"部署"*) local emoji="📦 " ;;
+        *"节点"*|*"服务"*) local emoji="💻 " ;;
+        *"端口"*) local emoji="🔌 " ;;
+        *"文件"*) local emoji="📄 " ;;
+        *"统计"*) local emoji="📊 " ;;
+        *) local emoji="ℹ️ " ;;
+    esac
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: ${emoji}$msg"
 }
 
 log_warn() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN: $*" >&2
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN: ⚠️ $*" >&2
 }
 
 log_error() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: ❌ $*" >&2
 }
 
 # 错误处理函数
