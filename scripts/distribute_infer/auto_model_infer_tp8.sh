@@ -651,10 +651,12 @@ deploy_model_service() {
             > '${log_file}' 2>&1 &"
 
     # 4. 在后台启动服务
+    log_info "🔍 正在执行命令: $vllm_cmd"
     if ! ssh_run "$node" "$vllm_cmd"; then
         log_error "❌ 节点 ${node} 启动命令发送失败"
         return 1
     fi
+    log_info "✅ 节点 ${node} 启动命令发送成功"
 
     return 0
 }
