@@ -181,7 +181,6 @@ readonly DATASET_GLOB="${DATASET_GLOB:-top_100K_final_verified_samples_shard*}"
 # 并发控制配置
 readonly MAX_LOCAL_JOBS=${MAX_LOCAL_JOBS:-128}        # 本地同时提交的最大批次数
 readonly MAX_REMOTE_JOBS=${MAX_REMOTE_JOBS:-128}     # 每个节点上同时运行的最大任务数
-readonly MAX_RETRIES=${MAX_RETRIES:-3}               # 任务失败重试次数
 
 # =======================================================
 #                  推理客户端参数
@@ -531,7 +530,7 @@ deploy_model_service() {
     local port="$2"
     local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
 
-    log_info "正在节点 ${node} 上部署模型服务 (端口: ${port}, TP: ${NUM_GPUS}, 内存: ${MEMORY_UTILIZATION})"
+    log_info "🚀 正在节点 ${node} 上部署模型服务 (端口: ${port}, TP: ${NUM_GPUS}, 内存: ${MEMORY_UTILIZATION})"
 
     # 1. 节点连通性验证
     if ! validate_node "$node"; then
@@ -573,57 +572,45 @@ deploy_model_service() {
 check_service_ready() {
     local node="$1"
     local port="$2"
-    local retries=0
-    local max_retries=${MAX_RETRIES:-3}
     local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
     local base_url="http://127.0.0.1:${port}"
 
-    while [[ $retries -lt $max_retries ]]; do
-        # 检查进程是否存在
-        if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
-            log_warn "节点 ${node} 上的服务进程未运行"
-            return 1
-        fi
+    # 检查进程是否存在
+    if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
+        log_warn "节点 ${node} 上的服务进程未运行"
+        return 1
+    fi
 
-        # 尝试 HTTP 健康检查
-        local http_status
-        http_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
-            ${base_url}${HEALTH_PATH} 2>/dev/null || echo 0")
+    # 尝试 HTTP 健康检查
+    local http_status
+    http_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
+        ${base_url}${HEALTH_PATH} 2>/dev/null || echo 0")
 
-        if [[ $http_status -eq 200 ]]; then
-            echo "✅ 服务 ${node}:${port} 健康检查通过"
+    if [[ $http_status -eq 200 ]]; then
+        echo "✅ 服务 ${node}:${port} 健康检查通过"
+        return 0
+    fi
+
+    # 兼容性检查：尝试 /v1/models
+    local models_status
+    models_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
+        ${base_url}/v1/models 2>/dev/null || echo 0")
+
+    if [[ $models_status -eq 200 ]]; then
+        echo "✅ 服务 ${node}:${port} /v1/models 检查通过"
+        return 0
+    fi
+
+    # 检查日志关键字
+    if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}'"; then
+        # 进一步验证是否有错误日志
+        if ! ssh_run "$node" "grep -i 'error\|exception\|failed' '${log_file}' | tail -n 5"; then
+            echo "✅ 服务 ${node}:${port} 日志检查通过"
             return 0
         fi
+    fi
 
-        # 兼容性检查：尝试 /v1/models
-        local models_status
-        models_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
-            ${base_url}/v1/models 2>/dev/null || echo 0")
-
-        if [[ $models_status -eq 200 ]]; then
-            echo "✅ 服务 ${node}:${port} /v1/models 检查通过"
-            return 0
-        fi
-
-        # 检查日志关键字
-        if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}'"; then
-            # 进一步验证是否有错误日志
-            if ! ssh_run "$node" "grep -i 'error\|exception\|failed' '${log_file}' | tail -n 5"; then
-                echo "✅ 服务 ${node}:${port} 日志检查通过"
-                return 0
-            fi
-        fi
-
-        retries=$((retries + 1))
-        if [[ $retries -lt $max_retries ]]; then
-            log_warn "服务 ${node}:${port} 健康检查未通过 (${retries}/${max_retries})，等待重试..."
-            sleep $((HEALTH_TIMEOUT * 2))
-        fi
-    done
-
-    log_error "服务 ${node}:${port} 健康检查失败，已重试 ${max_retries} 次"
-    # 输出最后的错误日志供诊断
-    ssh_run "$node" "tail -n 20 '${log_file}'" || true
+    log_info "服务 ${node}:${port} 健康检查未通过，等待重试..."
     return 1
 }
 
@@ -748,33 +735,21 @@ run_task_batch() {
     local files=("$@")
 
     log_info "👉 在节点 ${node} 上启动推理任务，模型: ${model_name}"
-
     # 创建临时状态目录
-    local status_dir="${LOG_DIR}/status/${node//./_}"
-    ssh_run "$node" "mkdir -p '${status_dir}'" || true
 
     local tasks_started=0
     local failed_tasks=()
-
     for file in "${files[@]}"; do
         local input_file="${DATASET_DIR}/${file}"
         local base_name=$(basename "$file" .jsonl)
         local output_file="${OUTPUT_DIR}/infer_${model_name//\//_}_${base_name}_bz${N_SAMPLES}.jsonl"
         local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${base_name}.log"
-        local status_file="${status_dir}/${base_name}.status"
 
-        # 检查是否已完成
-        if ssh_run "$node" "[[ -f '${status_file}' ]] && [[ -f '${output_file}' ]]"; then
-            log_info "   跳过已完成的文件: ${file}"
-            continue
-        fi
-
-        log_info "   处理文件: ${file} (输出: ${output_file})"
-
+        log_info "  -> 处理文件: ${file} (输出: ${output_file})"
         # 构建推理命令
         local infer_cmd="cd '${PROJECT_DIR}' && \
             source '${SET_ENV_SCRIPT}' && \
-            python '${INFER_SCRIPT}' \
+            nohup python '${INFER_SCRIPT}' \
                 --input_file '${input_file}' \
                 --output_file '${output_file}' \
                 --input_key '${INPUT_KEY}' \
@@ -783,39 +758,16 @@ run_task_batch() {
                 --n_samples ${N_SAMPLES} \
                 --system_prompt_type '${SYSTEM_PROMPT_TYPE}' \
                 --max_workers ${MAX_WORKERS} \
-                && echo \$? > '${status_file}'"
+                > '${log_file}' 2>&1 &"
 
         # 在后台启动任务并记录PID
-        local retry_count=0
-        while [[ $retry_count -lt $MAX_RETRIES ]]; do
-            # 检查节点当前运行的任务数
-            local running_tasks
-            running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT##*/}' | wc -l" || echo 0)
-
-            if [[ $running_tasks -ge $MAX_REMOTE_JOBS ]]; then
-                log_warn "   节点 ${node} 任务数($running_tasks)达到上限，等待..."
-                sleep 30
-                continue
-            fi
-
-            # 启动任务
-            if ssh_run "$node" "nohup ${infer_cmd} > '${log_file}' 2>&1 &"; then
-                tasks_started=$((tasks_started + 1))
-                break
-            else
-                retry_count=$((retry_count + 1))
-                log_warn "   任务启动失败，重试 $retry_count/$MAX_RETRIES"
-                sleep 5
-            fi
-        done
-
-        if [[ $retry_count -eq $MAX_RETRIES ]]; then
-            failed_tasks+=("$file")
-            log_error "   文件 ${file} 处理失败，已达最大重试次数"
-        fi
+        ssh_run "$node" "$infer_cmd" &
+        tasks_started=$((tasks_started + 1))
+        # 简单的全局节流，避免一次性拉起过多任务导致瞬时拥塞
+        # 如需更精细的节流策略，可替换为远程 semaphore 或基于队列的派发
 
         # 本地提交节流
-        if [[ $tasks_started -ge $MAX_LOCAL_JOBS ]]; then
+        if [[ $tasks_started -ge $MAX_JOBS ]]; then
             wait
             tasks_started=0
         fi
@@ -823,12 +775,6 @@ run_task_batch() {
 
     # 等待所有任务完成
     wait || true
-
-    # 报告失败的任务
-    if [[ ${#failed_tasks[@]} -gt 0 ]]; then
-        log_error "节点 ${node} 上以下文件处理失败:"
-        printf '%s\n' "${failed_tasks[@]}" | sed 's/^/    - /'
-    fi
 }
 
 # 分发并启动所有推理任务
