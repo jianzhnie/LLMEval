@@ -725,7 +725,7 @@ wait_for_services() {
     log_info "⏳ 等待服务启动, 总等待时间 ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
-    local interval=10
+    local interval=5
     local total_services=${#NODES[@]}
     local status_dir="${LOG_DIR}/status"
     local ready_indices=() # 存储已就绪的节点索引
@@ -735,6 +735,8 @@ wait_for_services() {
     mkdir -p "${status_dir}"
 
     while [[ $total_wait_time -lt $MAX_WAIT_TIME ]]; do
+        local running_pids=()
+
         # 并行检查所有服务状态
         for ((i = 0; i < total_services; i++)); do
             local node="${NODES[i]}"
@@ -746,12 +748,19 @@ wait_for_services() {
                 continue
             fi
 
-            # 后台检查服务状态 (在本地后台执行，远程串行检查)
-            if check_service_ready "$node" "$port"; then
-                # 检查成功，写入状态文件
-                echo "$i" > "$status_file"
-            fi
+            # 后台检查服务状态
+            (
+                if check_service_ready "$node" "$port"; then
+                    touch "$status_file"
+                fi
+            ) &
+            running_pids+=($!)
         done
+
+        # 等待所有检查完成
+        if [[ ${#running_pids[@]} -gt 0 ]]; then
+            wait "${running_pids[@]}" || true
+        fi
 
         # 收集就绪节点索引
         ready_indices=()
