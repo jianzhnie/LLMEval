@@ -817,6 +817,8 @@ run_task_batch() {
 
     log_info "👉 在节点 ${node} 上启动 ${#files[@]} 个推理任务..."
 
+    # 构建所有文件的推理命令并一次性发送
+    local commands=()
     for file in "${files[@]}"; do
         local input_file="${DATASET_DIR}/${file}"
         # 移除文件扩展名
@@ -839,10 +841,19 @@ run_task_batch() {
                 --max_workers ${MAX_WORKERS} \
                 > '${log_file}' 2>&1 &"
 
-        # 在后台启动任务
-        ssh_run "$node" "$infer_cmd" &
+        commands+=("$infer_cmd")
     done
+
+    # 将所有命令组合成一个命令字符串并执行
+    if [[ ${#commands[@]} -gt 0 ]]; then
+        local combined_cmd=$(printf "%s " "${commands[@]}")
+        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1 &
+    fi
+
+    log_info "✅ 节点 ${node} 上的 ${#files[@]} 个推理任务已提交"
 }
+
+
 
 # 分发并启动所有推理任务
 # Args:
@@ -886,7 +897,9 @@ distribute_and_launch_jobs() {
     done
 
     # 3. 等待所有节点的任务提交完成（不等待远端具体推理完成）
-    wait "${pids[@]}" || true
+    if [[ ${#pids[@]} -gt 0 ]]; then
+        wait "${pids[@]}" || true
+    fi
     log_info "✅ 所有推理任务已启动，进入远端任务监控阶段"
 }
 
