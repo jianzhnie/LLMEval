@@ -706,9 +706,9 @@ check_service_ready() {
 # Args:
 #   None
 # Returns:
-#   ready_indices (string) - 以空格分隔的可用节点索引列表 (输出到 stdout)
+#   None (不返回任何值，改为在函数外部检查状态文件)
 wait_for_services() {
-    echo "⏳ 正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
+    log_info "⏳ 正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
     local interval=5
@@ -761,8 +761,9 @@ wait_for_services() {
         total_wait_time=$((total_wait_time + interval))
     done
 
-    log_error "❌ 超时: 服务在 ${MAX_WAIT_TIME} 秒内未完全就绪，请检查远程日志" >&2
+    log_warn "⏰ 超时: 服务在 ${MAX_WAIT_TIME} 秒内未完全就绪，将继续使用已就绪的服务"
 }
+
 
 # 将数据文件按轮询方式分配到各个实例
 # Args:
@@ -971,36 +972,37 @@ main() {
     # 步骤5: 等待服务就绪并获取可用节点（HTTP 健康检查 + 日志回退）
     wait_for_services
 
-    local -a ready_indices
-    # 收集就绪节点的索引
-    for ((i = 0; i < ${#NODES[@]}; i++)); do
-        local node="${NODES[i]}"
-        # 获取节点的 API 服务状态文件
-        local status_file="${LOG_DIR}/status/status_${node//./_}.ok"
-        if [[ -f "$status_file" ]]; then
-            ready_indices+=("$i")
-        fi
-    done
+    # 不再使用 wait_for_services 的返回值，而是主动检查所有节点状态
+    log_info "正在检查各节点服务状态..."
 
-    # 步骤6: 构建可用节点数组，并更新全局 NODES/PORTS
+    # 初始化可用节点和失败节点列表
     local -a available_nodes=()
     local -a available_ports=()
-    for idx in "${ready_indices[@]}"; do
-        available_nodes+=("${NODES[idx]}")
-        available_ports+=("${PORTS[idx]}")
-    done
-
-    # 找出未成功部署的节点
     local -a failed_nodes=()
     local -a failed_ports=()
+
+    # 检查每个节点的状态
     for ((i = 0; i < ${#NODES[@]}; i++)); do
-        if [[ ! " ${available_nodes[@]} " =~ " ${NODES[i]} " ]]; then
-            failed_nodes+=("${NODES[i]}")
-            failed_ports+=("${PORTS[i]}")
+        local node="${NODES[i]}"
+        local port="${PORTS[i]}"
+        # 获取节点的 API 服务状态文件
+        local status_file="${LOG_DIR}/status/status_${node//./_}.ok"
+
+        if [[ -f "$status_file" ]]; then
+            log_info "✅ 节点 ${node} (端口: ${port}) 服务就绪"
+            available_nodes+=("${node}")
+            available_ports+=("${port}")
+        else
+            log_warn "❌ 节点 ${node} (端口: ${port}) 服务未就绪"
+            failed_nodes+=("${node}")
+            failed_ports+=("${port}")
         fi
     done
 
-    # 输出部署失败的节点信息
+    # 输出部署结果统计
+    log_info "📊 服务部署结果统计:"
+    log_info "   - 成功节点数量: ${#available_nodes[@]}/${#NODES[@]}"
+
     if [[ ${#failed_nodes[@]} -gt 0 ]]; then
         log_warn "以下节点未能成功部署:"
         for ((i = 0; i < ${#failed_nodes[@]}; i++)); do
@@ -1012,6 +1014,11 @@ main() {
     # 更新全局 NODES 和 PORTS 数组为可用节点
     NODES=("${available_nodes[@]}")
     PORTS=("${available_ports[@]}")
+
+    # 检查是否有可用节点
+    if [[ ${#NODES[@]} -eq 0 ]]; then
+        handle_error 1 "❌ 没有任何节点成功启动服务，无法继续执行推理任务"
+    fi
 
     log_info "将使用 ${#NODES[@]} 个可用节点进行推理"
 
