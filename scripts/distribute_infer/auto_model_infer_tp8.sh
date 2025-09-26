@@ -670,7 +670,7 @@ check_service_ready() {
 
     # 检查日志文件是否存在
     if ! ssh_run "$node" "[[ -f '${log_file}' ]]"; then
-        log_warn "节点 ${node} 的日志文件尚未创建: ${log_file}"
+        log_warn "节点 ${node} 的日志文件尚未创建: ${log_file}, 请耐心等待"
         return 1
     fi
 
@@ -722,7 +722,7 @@ check_service_ready() {
 # Returns:
 #   ready_indices (string) - 以空格分隔的可用节点索引列表 (输出到 stdout)
 wait_for_services() {
-    log_info "⏳ 等待服务启动... 总等待时间: ${MAX_WAIT_TIME} 秒"
+    log_info "⏳ 等待服务启动,总等待时间: ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
     local interval=10
