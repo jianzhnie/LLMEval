@@ -484,6 +484,15 @@ stop_services() {
         (
             # 使用 pkill 优雅地发送 SIGTERM，并忽略错误（如果进程已停止）
             ssh_run "$node" "pkill -f '${search_pattern}' || true"
+            # 等待一段时间确保进程完全停止
+            sleep 3
+            # 再次检查是否还有相关进程在运行
+            local remaining_processes
+            remaining_processes=$(ssh_run "$node" "pgrep -f '${search_pattern}' | wc -l" 2>/dev/null || echo "0")
+            if [[ "${remaining_processes:-0}" -gt 0 ]]; then
+                log_warn "节点 ${node} 上仍有 ${remaining_processes} 个 vLLM 进程在运行，尝试强制终止..."
+                ssh_run "$node" "pkill -9 -f '${search_pattern}' || true"
+            fi
             log_info "节点 ${node} 服务已停止"
         ) &
         pids+=($!)
@@ -698,7 +707,7 @@ check_service_ready() {
         log_info "✅ 服务 ${node}:${port} 日志启动完成标志通过 (HTTP状态码: ${http_status}/${models_status})"
         return 0
     fi
-    log_warn "节点 ${node} 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
+    log_warn "节点 ${node} 的 vllm 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
     return 1
 }
 
@@ -711,7 +720,7 @@ wait_for_services() {
     log_info "⏳ 正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
-    local interval=5
+    local interval=10
     local total_services=${#NODES[@]}
     local status_dir="${LOG_DIR}/status"
 
@@ -742,12 +751,12 @@ wait_for_services() {
             running_pids+=($!)
         done
 
-        # 等待所有检查完成
+        # 等待所有节点的检查完成
         if [[ ${#running_pids[@]} -gt 0 ]]; then
             wait "${running_pids[@]}" || true
         fi
 
-        # 统计就绪服务数量
+        # 统计已就绪服务数量
         local ready_count
         ready_count=$(ls -1 "${status_dir}" 2>/dev/null | wc -l | tr -d ' ')
 
@@ -756,7 +765,7 @@ wait_for_services() {
             return 0
         fi
 
-        log_info "   -> ${ready_count}/${total_services} 服务就绪，继续等待... (已等待 ${total_wait_time}s)"
+        log_info "---> ${ready_count}/${total_services} 服务就绪，继续等待... (已等待 ${total_wait_time}s)"
         sleep "$interval"
         total_wait_time=$((total_wait_time + interval))
     done
