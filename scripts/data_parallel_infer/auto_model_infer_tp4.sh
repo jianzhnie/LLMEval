@@ -837,8 +837,8 @@ run_task_batch() {
     # 将所有命令组合成一个命令字符串并执行
     if [[ ${#commands[@]} -gt 0 ]]; then
         # 用分号连接所有命令
-        local combined_cmd=$(printf "%s " "${commands[@]}")
-        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
+        local combined_cmd=$(printf "%s; " "${commands[@]}")
+        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1 &
     fi
 
     log_info "✅ 节点 ${node}, instance ${instance_idx} 上的 ${#files[@]} 个推理任务已提交"
@@ -860,8 +860,8 @@ distribute_and_launch_jobs() {
     local pids=()
     for ((i = 0; i < total_nodes; i++)); do
         local node="${NODES[i]}"
-        for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
-            local port_idx=$((i * INSTANCES_PER_NODE + j))
+        for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
+            local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
             local port="${PORTS[port_idx]}"
             # 注意: vLLM OpenAI 兼容层 API 通常在 /v1 路径下
             local base_url="http://127.0.0.1:${port}/v1"
@@ -873,15 +873,15 @@ distribute_and_launch_jobs() {
 
             # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
             if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
-                log_info "节点 ${node} 实例 ${j} (端口 ${port}) 未分配到文件，跳过"
+                log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 未分配到文件，跳过"
                 continue
             fi
 
             # 获取分配给当前实例的文件列表
-            log_info "节点 ${node} 实例 ${j} (端口 ${port}) 分配到 ${#instance_files_ref[@]} 个文件"
+            log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 分配到 ${#instance_files_ref[@]} 个文件"
             # 在本地后台启动任务提交批次
             (
-                run_task_batch "$node" "$model_name" "$base_url" "${instance_files_ref[@]}"
+                run_task_batch "$node" "$model_name" "$base_url" "$instance_idx" "${instance_files_ref[@]}"
             ) &
             pids+=($!)
         done
