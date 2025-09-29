@@ -795,25 +795,26 @@ assign_data_to_instances() {
 #   $1: 节点地址
 #   $2: 模型名称
 #   $3: 基础URL
+#   $4: 实例索引
 #   $@: 文件列表
 # 返回值：无
 run_task_batch() {
     local node="$1"
     local model_name="$2"
     local base_url="$3"
+    local instance_idx="$4"
     shift 3
     local files=("$@")
 
-    log_info "👉 在节点 ${node} 上启动 ${#files[@]} 个推理任务..."
+    log_info "👉 在节点 ${node}, instance ${instance_idx} 上启动 ${#files[@]} 个推理任务..."
 
-    local tasks_started=0
     for file in "${files[@]}"; do
         local input_file="${DATASET_DIR}/${file}"
         local base_name=$(basename "$file" .jsonl)
         local output_file="${OUTPUT_DIR}/infer_${model_name//\//_}_${base_name}_bz${N_SAMPLES}.jsonl"
-        local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${base_name}.log"
+        local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${instance_idx}.log"
 
-        log_info "  -> 处理文件: ${file} (输出: ${output_file})"
+        log_info "---> 处理文件: ${file} (输出: ${output_file})"
         # 构建推理命令
         local infer_cmd="cd '${PROJECT_DIR}' && \
             source '${SET_ENV_SCRIPT}' && \
@@ -828,19 +829,16 @@ run_task_batch() {
                 --max_workers ${MAX_WORKERS} \
                 > '${log_file}' 2>&1 &"
 
-        # 在后台启动推理任务
-        ssh_run "$node" "$infer_cmd" &
-        tasks_started=$((tasks_started + 1))
-
-        # 简单的全局节流，避免一次性拉起过多任务导致瞬时拥塞
-        # 如需更精细的节流策略，可替换为远程 semaphore 或基于队列的派发
-        if [[ $tasks_started -ge $MAX_JOBS ]]; then
-            wait
-            tasks_started=0
-        fi
+        commands+=("$infer_cmd")
     done
 
-    wait || true
+    # 将所有命令组合成一个命令字符串并执行
+    if [[ ${#commands[@]} -gt 0 ]]; then
+        local combined_cmd=$(printf "%s " "${commands[@]}")
+        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
+    fi
+
+    log_info "✅ 节点 ${node}, instance ${instance_idx} 上的 ${#files[@]} 个推理任务已提交"
 }
 
 # 分发并启动所有推理任务
