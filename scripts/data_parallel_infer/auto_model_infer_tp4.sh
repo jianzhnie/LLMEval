@@ -867,17 +867,17 @@ distribute_and_launch_jobs() {
             local model_name="${SERVED_MODEL_NAME}"
 
             # 获取分配给当前实例的文件列表
-        local instance_files_var="INSTANCE_ASSIGNMENTS_$i"
-        local -n instance_files_ref="$instance_files_var"
+            local instance_files_var="INSTANCE_ASSIGNMENTS_$port_idx"
+            local -n instance_files_ref="$instance_files_var"
 
-        # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
-        if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
-                log_info "节点 ${node} 未分配到文件，跳过"
+            # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
+            if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
+                log_info "节点 ${node} 实例 ${j} (端口 ${port}) 未分配到文件，跳过"
                 continue
-        fi
+            fi
 
-        # 获取分配给当前实例的文件列表
-            log_info "节点 ${node} 实例 ${j} 分配到 ${#instance_files_ref[@]} 个文件"
+            # 获取分配给当前实例的文件列表
+            log_info "节点 ${node} 实例 ${j} (端口 ${port}) 分配到 ${#instance_files_ref[@]} 个文件"
             # 在本地后台启动任务提交批次
             (
                 run_task_batch "$node" "$model_name" "$base_url" "${instance_files_ref[@]}"
@@ -1030,29 +1030,33 @@ main() {
     local -a failed_ports=()
 
     # 检查每个节点的状态
+    local total_services_expected=$(( ${#NODES[@]} * INSTANCES_PER_NODE ))
     for ((i = 0; i < ${#NODES[@]}; i++)); do
         local node="${NODES[i]}"
-        local port="${PORTS[i]}"
-        # 获取节点的 API 服务状态文件
-        local status_file="${LOG_DIR}/status/status_${node//./_}.ok"
+        for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
+            local port_idx=$((i * INSTANCES_PER_NODE + j))
+            local port="${PORTS[port_idx]}"
+            # 获取节点实例的 API 服务状态文件
+            local status_file="${LOG_DIR}/status/status_${node//./_}_${j}.ok"
 
-        if [[ -f "$status_file" ]]; then
-            log_info "✅ 节点 ${node} (端口: ${port}) 服务就绪"
-            available_nodes+=("${node}")
-            available_ports+=("${port}")
-        else
-            log_warn "❌ 节点 ${node} (端口: ${port}) 服务未就绪"
-            failed_nodes+=("${node}")
-            failed_ports+=("${port}")
-        fi
+            if [[ -f "$status_file" ]]; then
+                log_info "✅ 节点 ${node} 实例 ${j} (端口: ${port}) 服务就绪"
+                available_nodes+=("${node}")
+                available_ports+=("${port}")
+            else
+                log_warn "❌ 节点 ${node} 实例 ${j} (端口: ${port}) 服务未就绪"
+                failed_nodes+=("${node}")
+                failed_ports+=("${port}")
+            fi
+        done
     done
 
     # 输出部署结果统计
     log_info "📊 服务部署结果统计:"
-    log_info "   - 成功节点数量: ${#available_nodes[@]}/${#NODES[@]}"
+    log_info "   - 成功实例数量: ${#available_nodes[@]}/${total_services_expected}"
 
     if [[ ${#failed_nodes[@]} -gt 0 ]]; then
-        log_warn "以下节点未能成功部署:"
+        log_warn "以下实例未能成功部署:"
         for ((i = 0; i < ${#failed_nodes[@]}; i++)); do
             log_warn "   - ${failed_nodes[i]} (端口: ${failed_ports[i]})"
         done
