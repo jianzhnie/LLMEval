@@ -803,11 +803,13 @@ run_task_batch() {
     local model_name="$2"
     local base_url="$3"
     local instance_idx="$4"
-    shift 3
+    shift 4
     local files=("$@")
 
     log_info "👉 在节点 ${node}, instance ${instance_idx} 上启动 ${#files[@]} 个推理任务..."
 
+    # 声明命令数组
+    local commands=()
     for file in "${files[@]}"; do
         local input_file="${DATASET_DIR}/${file}"
         local base_name=$(basename "$file" .jsonl)
@@ -834,6 +836,7 @@ run_task_batch() {
 
     # 将所有命令组合成一个命令字符串并执行
     if [[ ${#commands[@]} -gt 0 ]]; then
+        # 用分号连接所有命令
         local combined_cmd=$(printf "%s " "${commands[@]}")
         ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
     fi
