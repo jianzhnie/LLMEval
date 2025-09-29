@@ -11,11 +11,11 @@
 #   5. 优雅清理（退出信号捕获）与失败回滚
 #
 # 核心特性：
-#   - 自动发现与分配数据文件
+#   - 自动发现与分配数据文件，支持自然数值排序
 #   - 多层次并行（节点间并行 + 节点内多卡并行 + 单卡动态批处理）
-#   - 健康检查机制（HTTP探活 + 日志检查）
-#   - 进程级任务监控
-#   - 失败节点自动跳过
+#   - 混合健康检查机制（HTTP探活 + 日志检查 + 进程检查）
+#   - 基于 PID/文件名 的任务监控
+#   - 失败节点自动跳过，只使用可用节点进行推理
 #   - 资源限制与任务节流
 #
 # 执行流程：
@@ -23,8 +23,8 @@
 #   2. 读取节点列表并生成端口配置
 #   3. 发现数据集文件并进行分配
 #   4. 并行部署 vLLM 服务实例
-#   5. 等待服务就绪（健康检查）
-#   6. 分发并启动推理任务
+#   5. 等待服务就绪（健康检查）并筛选可用节点
+#   6. 分发并启动推理任务（数据文件轮询分配到可用节点）
 #   7. 监控任务执行直至完成
 #   8. 优雅关闭服务并清理资源
 #
@@ -62,6 +62,10 @@
 # 更新日期：2025
 # =======================================================
 
+# 设置脚本健壮性标志：
+# -e: 任何命令失败立即退出
+# -u: 使用未设置的变量视为错误
+# -o pipefail: 管道中任何命令失败都退出
 set -euo pipefail
 
 # =======================================================
@@ -70,13 +74,15 @@ set -euo pipefail
 # 启用调试模式（设置 DEBUG=1 开启）
 if [[ "${DEBUG:-0}" == "1" ]]; then
     set -x  # 打印执行的每条命令
-    export PS4='+(${BASH_SOURCE}:${LINENO}): ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'  # 增强调试输出
+    # 增强调试输出，显示文件名、行号和函数名
+    export PS4='+(${BASH_SOURCE}:${LINENO}): ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
 fi
 
 # =======================================================
-#                  全局配置区域
+#                  全局常量与配置区域
 # =======================================================
 
+# ----------------------
 # SSH 连接配置
 # ----------------------
 # SSH 优化选项配置:
@@ -117,8 +123,9 @@ readonly MAX_MODEL_LEN=${MAX_MODEL_LEN:-65536}
 # - MAX_NUM_BATCHED_TOKENS: 动态批次内总 token 上限（控制显存与吞吐权衡）
 # 注：两者不宜同时设过大，推荐根据模型大小按 1-2 次试跑观测 GPU 利用率后调整
 # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
-readonly MAX_NUM_SEQS=${MAX_NUM_SEQS:-1024}
-readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768}
+
+readonly MAX_NUM_SEQS=${MAX_NUM_SEQS:-1024} # 动态批次内最大序列数
+readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768} # 动态批次内最大 token 数
 
 # 其他推理参数
 readonly N_SAMPLES=${N_SAMPLES:-8}                   # 每条样本的重复采样次数
@@ -203,9 +210,9 @@ readonly MAX_WORKERS=${MAX_WORKERS:-32}               # 客户端每进程内部
 # =======================================================
 
 # 节点和端口数组（在 main 函数中初始化）
-declare -a NODES
-declare -a PORTS
-declare -a FILES
+declare -a NODES       # 存储节点地址
+declare -a PORTS       # 存储对应的服务端口
+declare -a FILES       # 存储发现的数据文件列表（文件名）
 
 # =======================================================
 #                  工具函数区域
@@ -226,7 +233,8 @@ usage() {
 可用环境变量（可覆盖默认值）:
   SSH_USER               远程 SSH 用户名（默认：当前用户）
   MODEL_PATH             模型文件路径
-  NUM_GPUS               GPU/ASCEND 数量（默认：8）
+  NUM_GPUS               GPU/ASCEND 数量（默认：4）
+  INSTANCES_PER_NODE     每节点实例数（默认：2）
   MEMORY_UTILIZATION     显存利用率（默认：0.9）
   MAX_MODEL_LEN          最大上下文长度（默认：65536）
   MAX_NUM_SEQS           vLLM 动态批并发序列数（默认：1024）
@@ -257,6 +265,7 @@ ssh_run() {
     local node="$1"
     shift
     local userhost="${SSH_USER:+${SSH_USER}@}${node}"
+    # 使用 $@ 确保命令中的空格和引号被正确传递
     ssh ${SSH_OPTS} "${userhost}" "$@"
 }
 
@@ -274,7 +283,7 @@ rsync_to_node() {
     local RSYNC_OPTS="-avz --checksum --partial --inplace --no-whole-file --exclude='.*'"
 
     if ! rsync ${RSYNC_OPTS} "${src_path}" "${userhost}:${dst_path}"; then
-        log_error "rsync 同步失败: ${src_path} -> ${userhost}:${dst_path}"
+        log_error "❌ rsync 同步失败: ${src_path} -> ${userhost}:${dst_path}"
         return 1
     fi
 }
@@ -282,20 +291,21 @@ rsync_to_node() {
 # 日志函数
 log_info() {
     local msg="$*"
+    local emoji="ℹ️ "
     # 根据消息内容选择合适的emoji
     case "$msg" in
-        *"开始执行"*|*"启动"*) local emoji="🚀 " ;;
-        *"完成"*|*"成功"*|*"通过"*) local emoji="✅ " ;;
-        *"发现"*|*"检查"*) local emoji="🔍 " ;;
-        *"配置"*|*"设置"*) local emoji="⚙️ " ;;
-        *"等待"*) local emoji="⏳ " ;;
-        *"清理"*) local emoji="🧹 " ;;
-        *"分配"*|*"部署"*) local emoji="📦 " ;;
-        *"节点"*|*"服务"*) local emoji="💻 " ;;
-        *"端口"*) local emoji="🔌 " ;;
-        *"文件"*) local emoji="📄 " ;;
-        *"统计"*) local emoji="📊 " ;;
-        *) local emoji="ℹ️ " ;;
+        *"开始执行"*|*"启动"*) emoji="🚀 " ;;
+        *"完成"*|*"成功"*|*"通过"*) emoji="✅ " ;;
+        *"失败"*|*"错误"*|*"异常"*) emoji="❌ " ;;
+        *"发现"*|*"检查"*) emoji="🔍 " ;;
+        *"配置"*|*"设置"*) emoji="⚙️ " ;;
+        *"等待"*) emoji="⏳ " ;;
+        *"清理"*) emoji="🧹 " ;;
+        *"分配"*|*"部署"*) emoji="📦 " ;;
+        *"节点"*|*"服务"*) emoji="💻 " ;;
+        *"端口"*) emoji="🔌 " ;;
+        *"文件"*) emoji="📄 " ;;
+        *"统计"*) emoji="📊 " ;;
     esac
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: ${emoji}$msg"
 }
@@ -315,9 +325,7 @@ handle_error() {
     log_error "$error_msg"
 
     # 清理资源
-    stop_services
-
-    exit "$exit_code"
+    cleanup_and_exit "$exit_code"
 }
 
 # 文件锁管理
@@ -327,9 +335,11 @@ acquire_lock() {
     if [ -e "$LOCK_FILE" ]; then
         local pid
         pid=$(cat "$LOCK_FILE")
+        # 检查 PID 是否仍在运行
         if kill -0 "$pid" 2>/dev/null; then
             handle_error 1 "另一个部署进程 (PID: $pid) 正在运行"
         fi
+        # 如果 PID 不存在，删除旧锁
         rm -f "$LOCK_FILE"
     fi
     echo $$ > "$LOCK_FILE"
@@ -341,7 +351,7 @@ release_lock() {
 
 # 权限检查函数
 check_permissions() {
-    local dir=$1
+    local dir="$1"
     if [[ ! -w "$dir" ]]; then
         handle_error 1 "目录 $dir 没有写入权限"
     fi
@@ -349,15 +359,19 @@ check_permissions() {
 
 # 节点连通性检查
 validate_node() {
-    local node=$1
-    if ! ssh -q "$node" exit 2>/dev/null; then
-        handle_error 1 "无法连接到节点 $node"
+    local node="$1"
+    # 使用 -q (quiet) 避免输出，通过退出码判断连通性
+    if ssh -q "${SSH_USER:+${SSH_USER}@}${node}" exit 2>/dev/null; then
+        return 0
+    else
+        log_warn "无法连接到节点 $node"
+        return 1
     fi
 }
 
 # 清理函数
 cleanup_and_exit() {
-    local exit_code=$?
+    local exit_code="${1:-$?}"
 
     log_info "开始清理资源..."
 
@@ -368,7 +382,7 @@ cleanup_and_exit() {
     release_lock
 
     # 如果是调试模式，关闭它
-    [[ -n "$DEBUG" ]] && set +x
+    [[ "${DEBUG:-0}" == "1" ]] && set +x
 
     log_info "清理完成，退出代码: $exit_code"
     exit "$exit_code"
@@ -402,6 +416,9 @@ validate_config() {
         "${DATASET_DIR}"
     )
 
+    # 提前创建输出目录，确保权限检查通过
+    mkdir -p "${OUTPUT_DIR}" "${LOG_DIR}" || true
+
     for dir in "${required_dirs[@]}"; do
         check_permissions "$dir"
     done
@@ -409,15 +426,19 @@ validate_config() {
     # 验证数值参数范围
     local param_checks=(
         "NUM_GPUS:1:8:GPU数量"
+        "INSTANCES_PER_NODE:1:4:每节点实例数"
         "N_SAMPLES:1:100:采样次数"
         "MAX_NUM_SEQS:1:16384:并发序列数"
         "MAX_NUM_BATCHED_TOKENS:512:1048576:批处理Token数"
     )
 
     for check in "${param_checks[@]}"; do
+        # Bash 技巧: 使用 IFS 拆分字符串
         IFS=':' read -r param min max desc <<< "$check"
         local value
+        # Bash 技巧: 使用 eval 获取变量值 (仅限配置区，风险可控)
         value=$(eval echo "\$$param")
+        # Bash 技巧: 使用 [[ ... ]] 和算术扩展进行数值比较
         if [[ $value -lt $min || $value -gt $max ]]; then
             handle_error 1 "$desc ($param) 需在 $min-$max 之间，当前值: $value"
         fi
@@ -434,6 +455,63 @@ validate_config() {
 # =======================================================
 #                  核心功能函数区域
 # =======================================================
+# 停止所有远程节点上的模型服务
+# 参数：无
+# 返回值：无
+stop_services() {
+    log_info "🛑 脚本退出，正在停止所有远程模型服务..."
+
+    local search_pattern="vllm.entrypoints.openai.api_server"
+    local pids=()
+
+    # 遍历当前已知的节点列表 (可能已被 main 函数更新为 available_nodes)
+    for node in "${NODES[@]}"; do
+        log_info "---> 正在停止节点 ${node} 上的 vLLM 进程..."
+        (
+            # 使用 pkill 优雅地发送 SIGTERM，并忽略错误（如果进程已停止）
+            ssh_run "$node" "pkill -f '${search_pattern}' || true"
+            # 等待一段时间确保进程完全停止
+            sleep 3
+            # 再次检查是否还有相关进程在运行
+            local remaining_processes
+            remaining_processes=$(ssh_run "$node" "pgrep -f '${search_pattern}' | wc -l" 2>/dev/null || echo "0")
+            if [[ "${remaining_processes:-0}" -gt 0 ]]; then
+                log_warn "节点 ${node} 上仍有 ${remaining_processes} 个 vLLM 进程在运行，尝试强制终止..."
+                ssh_run "$node" "pkill -9 -f '${search_pattern}' || true"
+            fi
+            log_info "节点 ${node} 服务已停止"
+        ) &
+        pids+=($!)
+    done
+
+    # 等待所有停止操作完成
+    wait "${pids[@]}" || true
+    log_info "✅ 所有远程模型服务停止完成"
+}
+
+# 端口探活（远程是否可用）
+check_remote_port_free() {
+    local node="$1"
+    local port="$2"
+    local used=0
+
+    # 尝试通过 ss, netstat 或 lsof 检查端口占用情况
+    # 注意：这些命令在不同系统上可能不同，尝试多个以提高兼容性
+    used=$(ssh_run "$node" "ss -ltn '( sport = :$port )' 2>/dev/null | tail -n +2 | wc -l" 2>/dev/null || echo 0)
+    if [[ "${used:-0}" -eq 0 ]]; then
+        used=$(ssh_run "$node" "netstat -ltn 2>/dev/null | awk '{print \$4}' | grep -E '[:.]${port}\$' | wc -l" 2>/dev/null || echo 0)
+    fi
+    if [[ "${used:-0}" -eq 0 ]]; then
+        used=$(ssh_run "$node" "lsof -iTCP:${port} -sTCP:LISTEN -nP 2>/dev/null | wc -l" 2>/dev/null || echo 0)
+    fi
+    if [[ "${used:-0}" -gt 0 ]]; then
+        log_warn "节点 ${node} 端口 ${port} 已被占用，尝试清理旧 vLLM 进程..."
+        # 尝试通过匹配端口的 vLLM 进程杀掉旧服务
+        ssh_run "$node" "pkill -f 'vllm.entrypoints.openai.api_server.*--port ${port}' || true" >/dev/null 2>&1 || true
+        sleep 1
+    fi
+}
+
 
 # 检查节点与端口列表数量是否一致
 # 参数：无
@@ -447,25 +525,6 @@ check_node_port_alignment() {
     log_info "✅ 节点和端口配置检查通过"
 }
 
-# 端口探活（远程是否可用）
-check_remote_port_free() {
-    local node="$1"
-    local port="$2"
-    local used
-    used=$(ssh_run "$node" "ss -ltn '( sport = :$port )' 2>/dev/null | tail -n +2 | wc -l" 2>/dev/null || echo 0)
-    if [[ "${used:-0}" -eq 0 ]]; then
-        used=$(ssh_run "$node" "netstat -ltn 2>/dev/null | awk '{print \$4}' | grep -E '[:.]${port}\$' | wc -l" 2>/dev/null || echo 0)
-    fi
-    if [[ "${used:-0}" -eq 0 ]]; then
-        used=$(ssh_run "$node" "lsof -iTCP:${port} -sTCP:LISTEN -nP 2>/dev/null | wc -l" 2>/dev/null || echo 0)
-    fi
-    if [[ "${used:-0}" -gt 0 ]]; then
-        log_warn "节点 ${node} 端口 ${port} 已被占用，尝试清理旧 vLLM 进程..."
-        ssh_run "$node" "pkill -f 'vllm.entrypoints.openai.api_server.*--port ${port}' || true" >/dev/null 2>&1 || true
-        sleep 1
-    fi
-}
-
 # 在第一个节点上发现数据集文件
 # 参数：无
 # 返回值：无（发现失败时退出）
@@ -476,72 +535,62 @@ discover_remote_dataset_files() {
     fi
 
     local head_node="${NODES[0]}"
-    log_info "正在节点 ${head_node} 上发现数据文件: ${DATASET_DIR}/${DATASET_GLOB}"
+    local search_path="${DATASET_DIR}/${DATASET_GLOB}"
+    log_info "🔍 正在节点 ${head_node} 上发现数据文件: ${search_path}"
 
-    # 执行文件发现命令，支持自然数值排序
+    # Bash 技巧: 使用 xargs -n1 basename | sort -V 实现按自然数值排序的文件名列表
+    local find_cmd="sh -lc 'find ${DATASET_DIR} -maxdepth 1 -name \"${DATASET_GLOB}\" 2>/dev/null | xargs -n1 basename | LC_ALL=C sort -V'"
+
     local out
-    if ! out=$(ssh_run "$head_node" "sh -lc 'ls -1 ${DATASET_DIR}/${DATASET_GLOB} 2>/dev/null | xargs -n1 basename | LC_ALL=C sort -V'"); then
-        log_error "无法在节点 ${head_node} 上列出数据文件，请检查路径与权限"
+    if ! out=$(ssh_run "$head_node" "$find_cmd"); then
+        log_error "❌ 无法在节点 ${head_node} 上列出数据文件，请检查路径与权限"
         exit 1
     fi
 
-    # 将结果存储到全局数组
+    # 将结果存储到全局数组 FILES
+    # Bash 技巧: mapfile -t < <(...) 避免创建 subshell 导致变量无法修改
     mapfile -t FILES < <(printf "%s\n" "$out" || true)
 
     if [[ ${#FILES[@]} -eq 0 ]]; then
-        log_error "未发现任何匹配的数据文件 (模式: ${DATASET_GLOB})"
+        log_error "❌ 未发现任何匹配的数据文件 (模式: ${DATASET_GLOB})，请检查 ${DATASET_DIR} 和 ${DATASET_GLOB} 配置"
         exit 1
     fi
 
-    log_info "发现数据集文件数量: ${#FILES[@]}"
-    log_info "文件列表: ${FILES[*]}"
+    log_info "✅ 发现数据集文件数量: ${#FILES[@]}"
+    # 仅输出前5个文件示例
+    log_info "文件列表 (前5个): ${FILES[*]:0:5}..."
 }
 
 # 检查并创建远程目录，清理旧日志
 # 参数：无
 # 返回值：无（操作失败时退出）
 check_and_prepare_remote_dirs() {
-    log_info "正在检查并创建远程目录，清理旧日志..."
+    log_info "⚙️ 正在检查并创建远程目录，清理旧日志..."
 
     for node in "${NODES[@]}"; do
         log_info "处理节点: ${node}"
-        if ! ssh_run "$node" "mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && rm -rf '${LOG_DIR}/status' && mkdir -p '${LOG_DIR}/status' && rm -f '${LOG_DIR}/${API_SERVER_LOG_PREFIX}'*.log '${LOG_DIR}/${TASK_LOG_PREFIX}'*.log 2>/dev/null || true"; then
-            log_error "无法在节点 ${node} 上准备目录，请检查SSH连接和权限"
-            exit 1
+        # 创建目录，清理旧的状态/日志文件
+        local prep_cmd="mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && \
+            rm -rf '${LOG_DIR}/status' && mkdir -p '${LOG_DIR}/status' && \
+            rm -f '${LOG_DIR}/${API_SERVER_LOG_PREFIX}'*.log '${LOG_DIR}/${TASK_LOG_PREFIX}'*.log 2>/dev/null || true"
+
+        if ! ssh_run "$node" "$prep_cmd"; then
+            log_error "❌ 无法在节点 ${node} 上准备目录，请检查SSH连接和权限"
+                exit 1 # 在 subshell 中退出
         fi
     done
 
     log_info "✅ 所有远程目录已就绪，旧日志已清理"
 }
 
-# 停止所有远程节点上的模型服务
-# 参数：无
-# 返回值：无
-stop_services() {
-    log_info "🛑 脚本退出，正在停止所有远程模型服务..."
 
-    local search_pattern="vllm.entrypoints.openai.api_server"
-    local stop_pids=()
-
-    for node in "${NODES[@]}"; do
-        log_info "   -> 正在停止节点 ${node} 上的 vLLM 进程..."
-        (
-            ssh_run "$node" "pkill -f '${search_pattern}' || true"
-            log_info "   ✅ 节点 ${node} 服务已停止"
-        ) &
-        stop_pids+=($!)
-    done
-
-    # 等待所有停止操作完成
-    wait "${stop_pids[@]}" || true
-    log_info "✅ 所有远程模型服务停止完成"
-}
 
 # 在指定节点部署 vLLM 模型服务
 # 功能: 在远程节点上启动 vLLM 模型服务实例
 # 参数:
 #   $1: 节点地址 - 远程服务器的域名或IP
 #   $2: 服务端口 - 服务监听的端口号
+#   $3: 实例ID - 实例编号 (0-based)
 # 返回值:
 #   0: 部署命令发送成功
 #   1: 节点验证或命令发送失败
@@ -559,11 +608,13 @@ deploy_model_service() {
 
     log_info "🚀 在节点 ${node} 上部署模型服务实例 ${instance_id}，端口 ${port} (TP=${NUM_GPUS}, GPUs=${devices}, mem_util=${MEMORY_UTILIZATION})"    # 1. 节点连通性验证
     if ! validate_node "$node"; then
-        log_error "节点 ${node} 连通性验证失败"
         return 1
     fi
 
-    # 构建 vLLM 启动命令
+    # 2. 检查并清理旧端口占用
+    check_remote_port_free "$node" "$port"
+
+    # 3. 构建 vLLM 启动命令
     # 关键参数：
     #   --max-num-seqs              并发序列数上限
     #   --max-num-batched-tokens    动态批内 token 上限
@@ -587,10 +638,9 @@ deploy_model_service() {
             --port ${port} \
             > '${log_file}' 2>&1 &"
 
-    # 端口探活与服务启动
-    check_remote_port_free "$node" "$port"
-    # 在后台启动服务
+    # 4. 在后台启动服务
     ssh_run "$node" "$vllm_cmd" &
+    log_info "✅ 节点 ${node} 启动命令发送成功"
 }
 
 # 健康检查（HTTP 探活 + 日志回退）
@@ -599,6 +649,8 @@ check_service_ready() {
     local port="$2"
     local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}_${3:-0}.log"
     local base_url="http://127.0.0.1:${port}"
+    local http_status models_status
+
 
     # 检查日志文件是否存在
     if ! ssh_run "$node" "[[ -f '${log_file}' ]]"; then
@@ -613,47 +665,29 @@ check_service_ready() {
     fi
 
     # 尝试 HTTP 健康检查
-    local http_status
     http_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
         ${base_url}${HEALTH_PATH} 2>/dev/null || echo 0")
 
     if [[ $http_status -eq 200 ]]; then
-        log_info "✅ 服务 ${node}:${port} 健康检查通过"
+        log_info "✅ 服务 ${node}:${port} 健康检查 (${HEALTH_PATH}) 通过"
         return 0
-    else
-        log_warn "节点 ${node} 健康检查接口返回状态码: ${http_status}"
     fi
 
-    # 兼容性检查：尝试 /v1/models
-    local models_status
+    # 3. 兼容性检查：尝试 /v1/models (vLLM OpenAI 兼容层标准)
     models_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
         ${base_url}/v1/models 2>/dev/null || echo 0")
 
     if [[ $models_status -eq 200 ]]; then
-        log_info "✅ 服务 ${node}:${port} /v1/models 检查通过"
+        log_info "✅ 服务 ${node}:${port} /v1/models 接口检查通过"
         return 0
-    else
-        log_warn "节点 ${node} /v1/models 接口返回状态码: ${models_status}"
     fi
 
-    # 检查日志关键字和错误
-    if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}'"; then
-        # 检查最近的错误日志
-        local error_logs
-        error_logs=$(ssh_run "$node" "grep -i '[ERROR]\|error\|exception\|failed' '${log_file}' | tail -n 5")
-        if [[ -n "$error_logs" ]]; then
-            log_warn "节点 ${node} 日志中发现错误:"
-            echo "$error_logs" | while read -r line; do
-                log_warn "错误日志: $line"
-            done
-            return 1
-        else
-            log_info "✅ 服务 ${node}:${port} 日志检查通过"
+    # 4. 日志回退检查：查找启动完成标志
+    if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}' 2>/dev/null"; then
+        log_info "✅ 服务 ${node}:${port} 日志启动完成标志通过 (HTTP状态码: ${http_status}/${models_status})"
             return 0
         fi
-    else
-        log_warn "节点 ${node} 服务启动未完成，日志中未找到启动完成标志"
-    fi
+    log_warn "节点 ${node} 的 vllm 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
     return 1
 }
 
@@ -661,18 +695,13 @@ check_service_ready() {
 # 参数：无
 # 返回值：就绪节点的索引数组
 wait_for_services() {
-    log_info "⏳ 等待服务启动..."
-    log_info "总等待时间: ${MAX_WAIT_TIME} 秒"
+    log_info "⏳ 正在等待所有模型服务启动并就绪... 最长等待 ${MAX_WAIT_TIME} 秒"
 
     local total_wait_time=0
     local interval=10
     local total_nodes=${#NODES[@]}
+    local total_instances=$((total_nodes * INSTANCES_PER_NODE))
     local status_dir="${LOG_DIR}/status"
-    local -a ready_indices=()
-
-    # 新增：用于跟踪完成和失败的实例
-    local -A completed_instances=()  # 跟踪已完成的实例
-    local -A failed_instances=()     # 跟踪已失败的实例
 
     # 清理并创建状态目录
     rm -rf "${status_dir}" || true
@@ -680,8 +709,6 @@ wait_for_services() {
 
     while [[ $total_wait_time -lt $MAX_WAIT_TIME ]]; do
         local running_pids=()
-        local checked_instances=0
-        local total_instances=$((total_nodes * INSTANCES_PER_NODE))
 
         # 并行检查所有节点的所有实例状态
         for ((i = 0; i < total_nodes; i++)); do
@@ -690,17 +717,9 @@ wait_for_services() {
                 local port_idx=$((i * INSTANCES_PER_NODE + j))
                 local port="${PORTS[port_idx]}"
                 local status_file="${status_dir}/status_${node//./_}_${j}.ok"
-                local fail_file="${status_dir}/status_${node//./_}_${j}.fail"
 
                 # 跳过已就绪的服务实例
                 if [[ -f "$status_file" ]]; then
-                    checked_instances=$((checked_instances + 1))
-                    continue
-                fi
-
-                # 跳过已标记为失败的实例
-                if [[ -f "$fail_file" ]]; then
-                    checked_instances=$((checked_instances + 1))
                     continue
                 fi
 
@@ -708,11 +727,7 @@ wait_for_services() {
                 (
                     if check_service_ready "$node" "$port" "$j"; then
                         touch "$status_file"
-                        echo "[OK] 实例就绪: 节点 ${node} 实例 ${j} (端口 ${port})"
-                    elif [[ $total_wait_time -gt $((MAX_WAIT_TIME / 2)) ]]; then
-                        # 如果等待时间已过半，标记为失败
-                        touch "$fail_file"
-                        echo "[ERROR] 实例失败: 节点 ${node} 实例 ${j} (端口 ${port}) - 超时或启动失败"
+                        log_info "[OK] 实例就绪: 节点 ${node} 实例 ${j} (端口 ${port})"
                     fi
                 ) &
                 running_pids+=($!)
@@ -724,100 +739,21 @@ wait_for_services() {
             wait "${running_pids[@]}" || true
         fi
 
-        # 收集就绪节点索引
-        ready_indices=()
-        local ready_instances=0
-        local failed_instance_count=0
+        # 统计已就绪服务数量
+        local ready_count
+        ready_count=$(ls -1 "${status_dir}" 2>/dev/null | wc -l | tr -d ' ')
 
-        # 清空跟踪数组
-        completed_instances=()
-        failed_instances=()
-
-        for ((i = 0; i < total_nodes; i++)); do
-            local node="${NODES[i]}"
-            local node_ready_count=0
-            local node_failed_count=0
-            local node_instance_info=()
-
-            # 检查该节点的所有实例状态
-            for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
-                local port_idx=$((i * INSTANCES_PER_NODE + j))
-                local port="${PORTS[port_idx]}"
-                local status_file="${status_dir}/status_${node//./_}_${j}.ok"
-                local fail_file="${status_dir}/status_${node//./_}_${j}.fail"
-
-                if [[ -f "$status_file" ]]; then
-                    completed_instances["${node}:${j}"]="${port}"
-                    node_ready_count=$((node_ready_count + 1))
-                    ready_instances=$((ready_instances + 1))
-                    node_instance_info+=("[OK]实例${j}(端口:${port})")
-                elif [[ -f "$fail_file" ]]; then
-                    failed_instances["${node}:${j}"]="${port}"
-                    node_failed_count=$((node_failed_count + 1))
-                    failed_instance_count=$((failed_instance_count + 1))
-                    node_instance_info+=("[ERROR]实例${j}(端口:${port})")
-                fi
-            done
-
-            # 如果节点的所有实例都就绪，则标记节点为就绪
-            if [[ $node_ready_count -eq $INSTANCES_PER_NODE ]]; then
-                ready_indices+=($i)
-            fi
-
-            # 如果有实例信息要报告，显示节点状态
-            if [[ ${#node_instance_info[@]} -gt 0 ]]; then
-                echo "   节点 ${node}: ${node_instance_info[*]}"
-            fi
-        done
-
-        # 检查是否所有节点都就绪
-        if [[ ${#ready_indices[@]} -eq $total_nodes ]]; then
-            echo "所有 ${total_nodes} 个节点的 ${total_instances} 个服务实例已就绪"
-            echo "${ready_indices[@]}"
+        if [[ $ready_count -eq $total_services ]]; then
+            log_info "✅ 所有 ${total_services} 个服务已就绪"
             return 0
         fi
 
-        # 显示进度
-        local pending_instances=$((total_instances - ready_instances - failed_instance_count))
-        echo "   -> 就绪: ${ready_instances}, 失败: ${failed_instance_count}, 等待: ${pending_instances}/${total_instances} 服务，已等待: ${total_wait_time}s"
-
-        # 如果等待时间过长，提前退出
-        local time_threshold=$((MAX_WAIT_TIME * 8 / 10))  # 80% of MAX_WAIT_TIME
-        if [[ $total_wait_time -gt $time_threshold ]] && [[ $pending_instances -gt 0 ]]; then
-            echo "接近最大等待时间，部分实例仍未就绪"
-        fi
-
+        log_info "---> ${ready_count}/${total_services} 服务就绪，继续等待... (已等待 ${total_wait_time}s)"
         sleep "$interval"
         total_wait_time=$((total_wait_time + interval))
     done
 
-    # 超时后收集最终状态
-    echo "等待超时，收集最终部署状态..."
-
-    # 显示已完成的实例
-    if [[ ${#completed_instances[@]} -gt 0 ]]; then
-        echo "已完成部署的实例 (${#completed_instances[@]} 个):"
-        for instance in "${!completed_instances[@]}"; do
-            echo "   - ${instance} (端口: ${completed_instances[$instance]})"
-        done
-    fi
-
-    # 显示失败的实例
-    if [[ ${#failed_instances[@]} -gt 0 ]]; then
-        echo "部署失败的实例 (${#failed_instances[@]} 个):"
-        for instance in "${!failed_instances[@]}"; do
-            echo "   - ${instance} (端口: ${failed_instances[$instance]})"
-        done
-    fi
-
-    if [[ ${#ready_indices[@]} -gt 0 ]]; then
-        echo "超时但有 ${#ready_indices[@]} 个节点已就绪，将继续使用可用节点"
-        echo "${ready_indices[@]}"
-        return 0
-    fi
-
-    echo "错误: 没有任何节点成功启动，请检查远程日志" >&2
-    exit 1
+    log_warn "⏰ 超时: 服务在 ${MAX_WAIT_TIME} 秒内未完全就绪，将继续使用已就绪的服务"
 }
 
 # 将数据文件按轮询方式分配到各个实例
@@ -827,10 +763,11 @@ wait_for_services() {
 assign_data_to_instances() {
     local total_instances="$1"
 
-    log_info "正在分配全部 ${#FILES[@]} 个数据文件到 ${total_instances} 个实例..."
+    log_info "📊 正在分配全部 ${#FILES[@]} 个数据文件到 ${total_instances} 个实例..."
 
-    # 初始化实例分配数组
+    # 销毁并初始化实例分配数组
     for ((i = 0; i < total_instances; i++)); do
+        # 动态声明/清空数组变量
         eval "INSTANCE_ASSIGNMENTS_$i=()"
     done
 
@@ -838,16 +775,19 @@ assign_data_to_instances() {
     for idx in "${!FILES[@]}"; do
         local file="${FILES[idx]}"
         local instance_idx=$((idx % total_instances))
+        # 动态赋值数组元素
         eval "INSTANCE_ASSIGNMENTS_${instance_idx}+=(\"\$file\")"
         log_info "分配文件: ${file} -> 实例 ${instance_idx}"
     done
 
+    # 打印分配结果统计
     for ((i = 0; i < total_instances; i++)); do
-        eval "local count=\${#INSTANCE_ASSIGNMENTS_${i}[@]}"
+        local count
+        eval "count=\${#INSTANCE_ASSIGNMENTS_${i}[@]}"
         log_info "实例 ${i} 分配 ${count} 个文件"
     done
 
-    log_info "数据文件分配完成"
+    log_info "✅ 数据文件分配完成"
 }
 
 # 在指定节点上批量提交推理任务
@@ -864,8 +804,7 @@ run_task_batch() {
     shift 3
     local files=("$@")
 
-    log_info "👉 在节点 ${node} 上启动推理任务，模型: ${model_name}"
-    # 创建临时状态目录
+    log_info "👉 在节点 ${node} 上启动 ${#files[@]} 个推理任务..."
 
     local tasks_started=0
     for file in "${files[@]}"; do
@@ -913,97 +852,86 @@ distribute_and_launch_jobs() {
 
     log_info "开始分发并启动推理任务..."
 
-    # 分配数据文件到所有实例
+    # 1. 分配数据文件到可用实例
     assign_data_to_instances "$total_instances"
 
-    # 为每个节点的每个实例启动对应的推理任务（并行）
+    # 2. 为每个节点启动对应的推理任务（并行）
     local pids=()
-    local submitted=0
     for ((i = 0; i < total_nodes; i++)); do
         local node="${NODES[i]}"
         for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
             local port_idx=$((i * INSTANCES_PER_NODE + j))
             local port="${PORTS[port_idx]}"
+            # 注意: vLLM OpenAI 兼容层 API 通常在 /v1 路径下
             local base_url="http://127.0.0.1:${port}/v1"
             local model_name="${SERVED_MODEL_NAME}"
 
             # 获取分配给当前实例的文件列表
-            local instance_idx=$((i * INSTANCES_PER_NODE + j))
-            IFS=$'\n' read -r -d '' -a ASSIGNED < <(eval "printf '%s\0' \"\${INSTANCE_ASSIGNMENTS_${instance_idx}[@]}\"")
+        local instance_files_var="INSTANCE_ASSIGNMENTS_$i"
+        local -n instance_files_ref="$instance_files_var"
 
-            # 跳过没有分配文件的实例
-            if [[ ${#ASSIGNED[@]} -eq 0 ]]; then
+        # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
+        if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
                 log_info "节点 ${node} 未分配到文件，跳过"
                 continue
-            fi
+        fi
 
-            log_info "节点 ${node} 实例 ${j} 分配到 ${#ASSIGNED[@]} 个文件"
-
-            # 并行提交每个节点的任务批次（本地后台，远端内部再并行）
+        # 获取分配给当前实例的文件列表
+            log_info "节点 ${node} 实例 ${j} 分配到 ${#instance_files_ref[@]} 个文件"
+            # 在本地后台启动任务提交批次
             (
-                run_task_batch "$node" "$model_name" "$base_url" "${ASSIGNED[@]:-}"
+                run_task_batch "$node" "$model_name" "$base_url" "${instance_files_ref[@]}"
             ) &
             pids+=($!)
-            submitted=$((submitted + 1))
-
-            # 简单本地节流：限制同时存在的提交批次数量，避免本地进程过多
-            if [[ $submitted -ge $MAX_JOBS ]]; then
-                wait "${pids[@]}" || true
-                pids=()
-                submitted=0
-            fi
-        done  # Close the inner for loop
-    done  # Close the outer for loop
+        done
+    done
 
     # 等待所有节点的任务提交完成（不等待远端具体推理完成）
     if [[ ${#pids[@]} -gt 0 ]]; then
         wait "${pids[@]}" || true
     fi
+    log_info "✅ 所有推理任务已启动，进入远端任务监控阶段"
 
-    echo "✅ 所有推理任务已启动"
+    # 4. 等待所有远程推理任务完成
+    wait_for_inference_completion
 }
+# 等待所有推理任务完成
+# Args:
+#   None
+# Returns:
+#   None
+wait_for_inference_completion() {
+    log_info "⏳ 等待所有推理任务完成..."
 
-# 监控远端推理任务直至完成（基于进程存活）
-# 返回值：无（阻塞直到所有节点上不再存在 INFER_SCRIPT 进程）
-wait_for_remote_jobs() {
-    log_info "等待所有远端推理任务完成..."
-    local interval=10
+    local total_nodes=${#NODES[@]}
+    local completed_nodes=0
 
-    while true; do
-        local running_total=0
-        local pids=()
-        for node in "${NODES[@]}"; do
-            (
-                # 统计匹配推理客户端脚本的存活进程数
-                # 用 basename 兼容符号链接/不同路径
-                cnt=$(ssh_run "$node" "pgrep -fal 'python .*${INFER_SCRIPT##*/}' | wc -l" 2>/dev/null || echo 0)
-                log_info "${node}:${cnt}"
-            ) &
-            pids+=($!)
+    while [[ $completed_nodes -lt $total_nodes ]]; do
+        completed_nodes=0
+
+        for ((i = 0; i < total_nodes; i++)); do
+            local node="${NODES[i]}"
+
+            # 检查节点上是否还有运行中的推理任务
+            local running_tasks
+            running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
+
+            if [[ "${running_tasks:-0}" -eq 0 ]]; then
+                completed_nodes=$((completed_nodes + 1))
+                log_info "✅ 节点 ${node} 上的推理任务已完成"
+            else
+                log_info "⏳ 节点 ${node} 上仍有 ${running_tasks} 个推理任务在运行"
+            fi
         done
-        wait "${pids[@]}" || true
 
-        # 汇总
-        while read -r line; do
-            [[ -z "$line" ]] && continue
-            c=${line##*:}
-            running_total=$((running_total + c))
-        done < <(
-            for node in "${NODES[@]}"; do
-                # 再次获取，避免 subshell输出竞争；轻微重复成本可接受
-                ssh_run "$node" "pgrep -fal 'python .*${INFER_SCRIPT##*/}' | wc -l" 2>/dev/null || echo 0
-            done
-        )
-
-        if [[ ${running_total} -eq 0 ]]; then
-            log_info "所有远端推理任务已完成"
-            break
+        if [[ $completed_nodes -lt $total_nodes ]]; then
+            log_info "等待 10 秒后再次检查任务状态..."
+            sleep 10
         fi
-        log_info "仍有 ${running_total} 个远端推理进程在运行，${interval}s 后重试..."
-        sleep "${interval}"
     done
-}
 
+    log_info "✅ 所有节点上的推理任务已完成"
+}
 
 
 # =======================================================
@@ -1018,15 +946,15 @@ main() {
     log_info "[START] 开始执行分布式 vLLM 模型推理部署"
     echo "================================================"
 
-    # 获取文件锁，确保只有一个实例在运行
-    acquire_lock
-
-    # 设置退出时的清理陷阱
+    # 设置退出时的清理陷阱 (最先设置，确保任何失败都能调用清理)
     trap 'cleanup_and_exit' EXIT TERM INT
+
+    # 获取文件锁
+    acquire_lock
 
     # 参数解析
     if [[ $# -gt 1 ]]; then
-        echo "❌ 错误: 参数过多" >&2
+        log_error "参数错误"
         usage
     fi
 
@@ -1034,18 +962,16 @@ main() {
 
     # 验证节点列表文件
     if [[ ! -f "$NODE_LIST_FILE" ]]; then
-        log_error "节点列表文件 '${NODE_LIST_FILE}' 不存在"
-        usage
+        handle_error 1 "节点列表文件 '${NODE_LIST_FILE}' 不存在"
     fi
 
     log_info "从文件 '${NODE_LIST_FILE}' 加载节点列表"
 
-    # 读取节点列表（过滤空行和注释）
+    # 读取节点列表（过滤空行和注释），存入全局 NODES
     mapfile -t NODES < <(grep -v -e '^\s*$' -e '^\s*#' "$NODE_LIST_FILE")
 
     if [[ ${#NODES[@]} -eq 0 ]]; then
-        log_error "节点列表 '${NODE_LIST_FILE}' 为空"
-        exit 1
+        handle_error 1 "节点列表 '${NODE_LIST_FILE}' 为空"
     fi
 
     log_info "发现 ${#NODES[@]} 个节点: ${NODES[*]}"
@@ -1064,10 +990,7 @@ main() {
     # 验证配置参数
     validate_config
 
-    # 设置退出时的清理陷阱
-    trap stop_services EXIT
-
-    # 执行主要流程
+    # --- 执行主要流程 ---
     log_info "开始执行部署流程..."
 
     # 步骤1: 发现数据集文件
@@ -1086,87 +1009,82 @@ main() {
         for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
             local port_idx=$((i * INSTANCES_PER_NODE + j))
             local port="${PORTS[port_idx]}"
+            # 在本地后台部署，加速并发
             deploy_model_service "$node" "$port" "$j"
         done
     done
 
+    # 等待所有部署命令发送完成 (即使失败，deploy_model_service 也会返回)
+    wait || true
+
     # 步骤5: 等待服务就绪并获取可用节点（HTTP 健康检查 + 日志回退）
-    local -a ready_indices
-    mapfile -t ready_indices < <(wait_for_services)
+    wait_for_services
 
-    if [[ ${#ready_indices[@]} -eq 0 ]]; then
-        echo "❌ 错误: 没有可用的服务节点" >&2
-        exit 1
-    fi
+    # 不再使用 wait_for_services 的返回值，而是主动检查所有节点状态
+    log_info "正在检查各节点服务状态..."
 
-    # 构建可用节点和失败节点信息
+    # 初始化可用节点和失败节点列表
     local -a available_nodes=()
     local -a available_ports=()
     local -a failed_nodes=()
-    declare -A failed_instances  # 关联数组存储每个节点的失败实例信息
+    local -a failed_ports=()
 
-    # 使用关联数组标记就绪的节点
-    declare -A ready_node_map
-    for idx in "${ready_indices[@]}"; do
-        ready_node_map["${NODES[idx]}"]=1
-        available_nodes+=("${NODES[idx]}")
-        # 添加该节点的所有实例端口
-        for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
-            available_ports+=("${PORTS[$((idx * INSTANCES_PER_NODE + j))]}")
-        done
-    done
-
-    # 基于ready_node_map快速识别失败的节点和实例
+    # 检查每个节点的状态
     for ((i = 0; i < ${#NODES[@]}; i++)); do
         local node="${NODES[i]}"
-        if [[ -z "${ready_node_map[$node]}" ]]; then
-            failed_nodes+=("$node")
-            local failed_instance_info=""
-            # 收集该节点所有实例的端口信息
-            for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
-                local port_idx=$((i * INSTANCES_PER_NODE + j))
-                if [[ -n "$failed_instance_info" ]]; then
-                    failed_instance_info+=", "
-                fi
-                failed_instance_info+="实例${j}(端口:${PORTS[port_idx]})"
-            done
-            failed_instances["$node"]="$failed_instance_info"
+        local port="${PORTS[i]}"
+        # 获取节点的 API 服务状态文件
+        local status_file="${LOG_DIR}/status/status_${node//./_}.ok"
+
+        if [[ -f "$status_file" ]]; then
+            log_info "✅ 节点 ${node} (端口: ${port}) 服务就绪"
+            available_nodes+=("${node}")
+            available_ports+=("${port}")
+        else
+            log_warn "❌ 节点 ${node} (端口: ${port}) 服务未就绪"
+            failed_nodes+=("${node}")
+            failed_ports+=("${port}")
         fi
     done
 
-    # 输出部署失败的节点和实例信息
+    # 输出部署结果统计
+    log_info "📊 服务部署结果统计:"
+    log_info "   - 成功节点数量: ${#available_nodes[@]}/${#NODES[@]}"
+
     if [[ ${#failed_nodes[@]} -gt 0 ]]; then
-        echo "⚠️ 以下节点存在部署失败的实例:"
-        for node in "${failed_nodes[@]}"; do
-            echo "   - 节点: ${node}"
-            echo "     失败实例: ${failed_instances[$node]}"
+        log_warn "以下节点未能成功部署:"
+        for ((i = 0; i < ${#failed_nodes[@]}; i++)); do
+            log_warn "   - ${failed_nodes[i]} (端口: ${failed_ports[i]})"
         done
-        echo "❗ 请检查这些节点的日志文件:"
-        echo "   ${LOG_DIR}/${API_SERVER_LOG_PREFIX}<节点名>_<实例ID>.log"
+        log_warn "请检查这些节点的日志文件: ${LOG_DIR}/${API_SERVER_LOG_PREFIX}<节点名>.log"
     fi
 
-    # 更新全局节点和端口数组
+    # 更新全局 NODES 和 PORTS 数组为可用节点
     NODES=("${available_nodes[@]}")
     PORTS=("${available_ports[@]}")
+
+    # 检查是否有可用节点
+    if [[ ${#NODES[@]} -eq 0 ]]; then
+        handle_error 1 "❌ 没有任何节点成功启动服务，无法继续执行推理任务"
+    fi
 
     log_info "将使用 ${#NODES[@]} 个可用节点进行推理"
 
     # 步骤6: 使用可用节点分发并启动推理任务
     distribute_and_launch_jobs
 
-    # 步骤7: 等待远端推理任务完成后再关闭服务
-    wait_for_remote_jobs
-    stop_services
+    # 步骤7: 优雅关闭服务（由 EXIT 陷阱调用 stop_services）
+    log_info "✅ 分布式推理部署和任务执行完成，正在退出并清理资源..."
 
-    log_info "分布式推理部署完成！"
-    log_info "部署统计:"
-    log_info "   - 节点数量: ${#NODES[@]}"
+    log_info "📊 部署统计:"
+    log_info "   - 节点总数: ${#NODES[@]}"
+    log_info "   - 可用节点: ${#available_nodes[@]}"
     log_info "   - 数据文件: ${#FILES[@]}"
-    log_info "   - 服务端口: ${PORTS[*]}"
     log_info "   - 输出目录: ${OUTPUT_DIR}"
     log_info "   - 日志目录: ${LOG_DIR}"
-    log_info "================================================"
+    echo "================================================"
 }
+
 
 # 脚本入口点
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

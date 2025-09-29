@@ -269,7 +269,7 @@ rsync_to_node() {
     local RSYNC_OPTS="-avz --checksum --partial --inplace --no-whole-file --exclude='.*'"
 
     if ! rsync ${RSYNC_OPTS} "${src_path}" "${userhost}:${dst_path}"; then
-        echo "❌ rsync 同步失败: ${src_path} -> ${userhost}:${dst_path}" >&2
+        log_error "❌ rsync 同步失败: ${src_path} -> ${userhost}:${dst_path}" >&2
         return 1
     fi
 }
@@ -287,6 +287,7 @@ log_info() {
     case "$msg" in
         *"开始执行"*|*"启动"*) emoji="🚀 " ;;
         *"完成"*|*"成功"*|*"通过"*) emoji="✅ " ;;
+        *"失败"*|*"错误"*|*"异常"*) emoji="❌ " ;;
         *"发现"*|*"检查"*) emoji="🔍 " ;;
         *"配置"*|*"设置"*) emoji="⚙️ " ;;
         *"等待"*) emoji="⏳ " ;;
@@ -473,14 +474,14 @@ validate_config() {
 # Returns:
 #   None
 stop_services() {
-    log_info "🧹 正在停止所有远程模型服务..."
+    log_info "🛑 脚本退出，正在停止所有远程模型服务..."
 
     local search_pattern="vllm.entrypoints.openai.api_server"
     local pids=()
 
     # 遍历当前已知的节点列表 (可能已被 main 函数更新为 available_nodes)
     for node in "${NODES[@]}"; do
-        log_info "正在停止节点 ${node} 上的 vLLM 进程..."
+        log_info "---> 正在停止节点 ${node} 上的 vLLM 进程..."
         (
             # 使用 pkill 优雅地发送 SIGTERM，并忽略错误（如果进程已停止）
             ssh_run "$node" "pkill -f '${search_pattern}' || true"
@@ -500,7 +501,7 @@ stop_services() {
 
     # 等待所有停止操作完成
     wait "${pids[@]}" || true
-    log_info "所有远程模型服务停止完成"
+    log_info "✅ 所有远程模型服务停止完成"
 }
 
 # 端口探活（远程是否可用）
@@ -573,7 +574,7 @@ discover_remote_dataset_files() {
     mapfile -t FILES < <(printf "%s\n" "$out" || true)
 
     if [[ ${#FILES[@]} -eq 0 ]]; then
-        log_error "❌ 未发现任何匹配的数据文件 (模式: ${DATASET_GLOB})，请检查 DATASET_DIR 和 DATASET_GLOB 配置"
+        log_error "❌ 未发现任何匹配的数据文件 (模式: ${DATASET_GLOB})，请检查 ${DATASET_DIR} 和 ${DATASET_GLOB} 配置"
         exit 1
     fi
 
@@ -677,6 +678,12 @@ check_service_ready() {
     local base_url="http://127.0.0.1:${port}"
     local http_status models_status
 
+
+    # 检查日志文件是否存在
+    if ! ssh_run "$node" "[[ -f '${log_file}' ]]"; then
+        log_warn "节点 ${node} 的日志文件尚未创建: ${log_file}"
+        return 1
+    fi
 
     # 1. 检查服务进程是否存在
     if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
