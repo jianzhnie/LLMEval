@@ -86,6 +86,11 @@ class InferenceClient:
         """
         self.api_key: str = os.environ.get('OPENAI_API_KEY', 'EMPTY')
 
+        # Warn if using default EMPTY key
+        if self.api_key == 'EMPTY':
+            logger.warning(
+                "Using default 'EMPTY' API key. This may not be secure.")
+
         # Initialize OpenAI client with validated configuration
         self.client: openai.OpenAI = openai.OpenAI(
             api_key=self.api_key,
@@ -288,6 +293,8 @@ class InferenceRunner:
             'failed': 0,
             'skipped': 0
         }
+        self._stats_lock: threading.Lock = threading.Lock(
+        )  # Dedicated lock for stats
 
     def count_completed_samples(self) -> Dict[str, int]:
         """Count completed samples for resume functionality.
@@ -495,14 +502,16 @@ class InferenceRunner:
             """Validate input and extract query."""
             if not isinstance(item, dict):
                 logger.error(f'Invalid item type: {type(item)}, expected dict')
-                self._stats['failed'] += 1
+                with self._stats_lock:
+                    self._stats['failed'] += 1
                 return None
 
             query = item.get(
                 self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
             if not query:
                 logger.warning(f'Missing required query field in item: {item}')
-                self._stats['skipped'] += 1
+                with self._stats_lock:
+                    self._stats['skipped'] += 1
                 return None
             return query
 
@@ -510,9 +519,10 @@ class InferenceRunner:
                 response: Union[str, Dict[str,
                                           str]]) -> Optional[Dict[str, Any]]:
             """Process and validate API response."""
-            if not response.strip():
+            if isinstance(response, str) and not response.strip():
                 logger.warning('Empty response received')
-                self._stats['failed'] += 1
+                with self._stats_lock:
+                    self._stats['failed'] += 1
                 return None
 
             result = copy.deepcopy(item)
@@ -525,23 +535,38 @@ class InferenceRunner:
             return None
 
         # Step 2: API Request
-        response = self.client.get_content(
-            query=query,
-            system_prompt=self.system_prompt,
-            model_name=self.args.model_name,
-            max_tokens=self.args.max_tokens,
-            temperature=self.args.temperature,
-            top_p=self.args.top_p,
-            top_k=self.args.top_k,
-            enable_thinking=self.args.enable_thinking,
-        )
+        try:
+            response = self.client.get_content(
+                query=query,
+                system_prompt=self.system_prompt,
+                model_name=self.args.model_name,
+                max_tokens=self.args.max_tokens,
+                temperature=self.args.temperature,
+                top_p=self.args.top_p,
+                top_k=self.args.top_k,
+                enable_thinking=self.args.enable_thinking,
+            )
+        except ClientError as e:
+            logger.error(f'Client error processing item: {e}')
+            with self._stats_lock:
+                self._stats['failed'] += 1
+            return None
 
         # Step 3: Response Processing
         result = process_response(response)
-
+        if not result:
+            return None
         # Step 4: Result Persistence
-        self._write_result(result)
-        self._stats['processed'] += 1
+        try:
+            self._write_result(result)
+            with self._stats_lock:
+                self._stats['processed'] += 1
+        except IOError as e:
+            logger.error(f'Failed to write result: {e}')
+            with self._stats_lock:
+                self._stats['failed'] += 1
+            return None
+
         return result
 
     def _process_concurrently(self, expanded_data: List[Dict[str,
