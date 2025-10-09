@@ -201,29 +201,32 @@ class InferenceClient:
         }
 
         # Make API call with error handling
-        result = ''
         try:
             completion = self.client.chat.completions.create(**call_args)
             result = completion.choices[0].message.content
+            return result
         except AttributeError as e:
             # Handle missing or invalid completion attributes
             err_msg = getattr(completion, 'message', '')
             if err_msg:
-                time.sleep(random.randint(25, 35))
+                sleep_time = random.randint(25, 35)
+                time.sleep(sleep_time)
                 raise ClientError(err_msg) from e
+            raise ClientError('Invalid completion response', e) from e
         except (APIConnectionError, RateLimitError) as e:
             # Handle retryable errors with backoff
-            time.sleep(random.randint(25, 35))
+            sleep_time = random.randint(25, 35)
+            time.sleep(sleep_time)
             raise ClientError(e.message) from e
         except APIError as e:
+            err_msg = e.message
             # Handle context length and other API errors
-            if 'maximum context length' in e.message:
-                logger.warning(f'Max context length exceeded: {e.message}')
+            if 'maximum context length' in err_msg:
+                logger.warning(f'Max context length exceeded: {err_msg}')
                 return {'gen': '', 'end_reason': 'max length exceeded'}
-            logger.error(f'API error: {e.message}')
+            logger.error(f'API error: {err_msg}')
             time.sleep(1)
-            raise ClientError(e.message) from e
-        return result
+            raise ClientError(err_msg) from e
 
 
 class InferenceRunner:
@@ -330,7 +333,8 @@ class InferenceRunner:
                         gen_response = item.get(
                             self.args.response_key) or item.get(
                                 DEFAULT_RESPONSE_KEY)
-                        gen_count: int = len(gen_response)
+                        gen_count: int = len(gen_response) if isinstance(
+                            gen_response, list) else 0
                         if prompt is not None:
                             completed_counts[str(prompt)] += gen_count
                     except json.JSONDecodeError as e:
@@ -535,27 +539,22 @@ class InferenceRunner:
             return None
 
         # Step 2: API Request
-        try:
-            response = self.client.get_content(
-                query=query,
-                system_prompt=self.system_prompt,
-                model_name=self.args.model_name,
-                max_tokens=self.args.max_tokens,
-                temperature=self.args.temperature,
-                top_p=self.args.top_p,
-                top_k=self.args.top_k,
-                enable_thinking=self.args.enable_thinking,
-            )
-        except ClientError as e:
-            logger.error(f'Client error processing item: {e}')
-            with self._stats_lock:
-                self._stats['failed'] += 1
-            return None
+        response = self.client.get_content(
+            query=query,
+            system_prompt=self.system_prompt,
+            model_name=self.args.model_name,
+            max_tokens=self.args.max_tokens,
+            temperature=self.args.temperature,
+            top_p=self.args.top_p,
+            top_k=self.args.top_k,
+            enable_thinking=self.args.enable_thinking,
+        )
 
         # Step 3: Response Processing
         result = process_response(response)
         if not result:
             return None
+
         # Step 4: Result Persistence
         try:
             self._write_result(result)
@@ -669,7 +668,8 @@ class InferenceRunner:
 
             # Generate final report
             duration = time.time() - start_time
-            success_rate = (self._stats['processed'] / total_samples) * 100
+            success_rate = (self._stats['processed'] /
+                            max(total_samples, 1)) * 100
 
             logger.info('\n=== Execution Summary ===')
             logger.info(f'Total samples: {total_samples}')
