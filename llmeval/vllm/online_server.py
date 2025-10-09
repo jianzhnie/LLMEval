@@ -196,19 +196,18 @@ class InferenceClient:
         }
 
         # Make API call with error handling
+        result = ''
         try:
             completion = self.client.chat.completions.create(**call_args)
-            return completion.choices[0].message.content
+            result = completion.choices[0].message.content
         except AttributeError as e:
             # Handle missing or invalid completion attributes
-            completion_msg = getattr(completion, 'message',
-                                     '') if 'completion' in locals() else ''
-            logger.error(f'AttributeError in API response: {e}')
-            time.sleep(random.randint(25, 35))  # Backoff before retry
-            raise ClientError(f'Invalid API response: {completion_msg}') from e
+            err_msg = getattr(completion, 'message', '')
+            if err_msg:
+                time.sleep(random.randint(25, 35))
+                raise ClientError(err_msg) from e
         except (APIConnectionError, RateLimitError) as e:
             # Handle retryable errors with backoff
-            logger.warning(f'Retryable API error: {e.message}')
             time.sleep(random.randint(25, 35))
             raise ClientError(e.message) from e
         except APIError as e:
@@ -219,6 +218,7 @@ class InferenceClient:
             logger.error(f'API error: {e.message}')
             time.sleep(1)
             raise ClientError(e.message) from e
+        return result
 
 
 class InferenceRunner:
@@ -519,50 +519,30 @@ class InferenceRunner:
             result.setdefault(DEFAULT_RESPONSE_KEY, []).append(response)
             return result
 
-        try:
-            # Step 1: Input Validation
-            query = validate_input()
-            if not query:
-                return None
-
-            # Step 2: API Request
-            response = self.client.get_content(
-                query=query,
-                system_prompt=self.system_prompt,
-                model_name=self.args.model_name,
-                max_tokens=self.args.max_tokens,
-                temperature=self.args.temperature,
-                top_p=self.args.top_p,
-                top_k=self.args.top_k,
-                enable_thinking=self.args.enable_thinking,
-            )
-
-            # Step 3: Response Processing
-            result = process_response(response)
-            if not result:
-                return None
-
-            # Step 4: Result Persistence
-            self._write_result(result)
-            self._stats['processed'] += 1
-            return result
-
-        except ClientError as e:
-            logger.error(
-                f'API client error processing item: {str(e)}',
-                extra={'original_error': getattr(e, 'original_error', None)})
-            self._stats['failed'] += 1
+        # Step 1: Input Validation
+        query = validate_input()
+        if not query:
             return None
 
-        except (ValueError, TypeError) as e:
-            logger.error(f'Validation error: {str(e)}')
-            self._stats['failed'] += 1
-            return None
+        # Step 2: API Request
+        response = self.client.get_content(
+            query=query,
+            system_prompt=self.system_prompt,
+            model_name=self.args.model_name,
+            max_tokens=self.args.max_tokens,
+            temperature=self.args.temperature,
+            top_p=self.args.top_p,
+            top_k=self.args.top_k,
+            enable_thinking=self.args.enable_thinking,
+        )
 
-        except Exception as e:
-            logger.error(f'Unexpected error: {str(e)}', exc_info=True)
-            self._stats['failed'] += 1
-            return None
+        # Step 3: Response Processing
+        result = process_response(response)
+
+        # Step 4: Result Persistence
+        self._write_result(result)
+        self._stats['processed'] += 1
+        return result
 
     def _process_concurrently(self, expanded_data: List[Dict[str,
                                                              Any]]) -> None:
