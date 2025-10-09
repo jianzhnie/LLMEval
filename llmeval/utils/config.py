@@ -357,7 +357,8 @@ class ServerArguments:
     model_name: str = field(default='gpt-4o',
                             metadata={'help': 'Model name of VLLM server'})
     request_timeout: int = field(
-        default=60, metadata={'help': 'Timeout for requests to VLLM server.'})
+        default=6000,
+        metadata={'help': 'Timeout for requests to VLLM server.'})
 
     def __post_init__(self) -> None:
         """
