@@ -833,6 +833,12 @@ run_task_batch() {
 
     log_info "👉 在节点 ${node} 上启动 ${#files[@]} 个推理任务..."
 
+    # 检查是否有文件需要处理
+    if [[ ${#files[@]} -eq 0 ]]; then
+        log_warn "节点 ${node} 没有分配到任何文件，跳过任务启动"
+        return 0
+    fi
+
     # 构建所有文件的推理命令并一次性发送
     local commands=()
     for file in "${files[@]}"; do
@@ -842,7 +848,14 @@ run_task_batch() {
         local output_file="${OUTPUT_DIR}/infer_${model_name//\//_}_${base_name}_bz${N_SAMPLES}.jsonl"
         local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${base_name}.log"
 
-        log_info "  -> 处理文件: ${file} (输出: ${output_file})"
+        log_info "  -> 准备处理文件: ${file} (输出: ${output_file})"
+
+        # 检查输入文件是否存在
+        if ! ssh_run "$node" "test -f '${input_file}'" >/dev/null 2>&1; then
+            log_error "❌ 输入文件 ${input_file} 在节点 ${node} 上不存在"
+            continue
+        fi
+
         # 构建推理命令
         local infer_cmd="cd '${PROJECT_DIR}' && \
             source '${SET_ENV_SCRIPT}' && \
@@ -862,8 +875,8 @@ run_task_batch() {
 
     # 将所有命令组合成一个命令字符串并执行
     if [[ ${#commands[@]} -gt 0 ]]; then
-        local combined_cmd=$(printf "%s; " "${commands[@]}")
-        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1 &
+        local combined_cmd=$(printf "%s " "${commands[@]}")
+        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
     fi
 
     log_info "✅ 节点 ${node} 上的 ${#files[@]} 个推理任务已提交"
@@ -916,7 +929,7 @@ distribute_and_launch_jobs() {
     if [[ ${#pids[@]} -gt 0 ]]; then
         wait "${pids[@]}" || true
     fi
-    log_info "✅ 所有推理任务已启动，进入远端任务监控阶段"
+    log_info "✅ 所有推理任务已启动，进入远端任务监控阶段, 请查看推理结果的路径: ${OUTPUT_DIR}"
 
     # 4. 等待所有远程推理任务完成
     wait_for_inference_completion
@@ -951,8 +964,8 @@ wait_for_inference_completion() {
         done
 
         if [[ $completed_nodes -lt $total_nodes ]]; then
-            log_info "等待 10 秒后再次检查任务状态..."
-            sleep 10
+            log_info "等待 60 秒后再次检查任务状态..."
+            sleep 60
         fi
     done
 

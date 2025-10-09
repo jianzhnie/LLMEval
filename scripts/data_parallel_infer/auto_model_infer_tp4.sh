@@ -837,8 +837,8 @@ run_task_batch() {
     # 将所有命令组合成一个命令字符串并执行
     if [[ ${#commands[@]} -gt 0 ]]; then
         # 用分号连接所有命令
-        local combined_cmd=$(printf "%s; " "${commands[@]}")
-        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1 &
+        local combined_cmd=$(printf "%s " "${commands[@]}")
+        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
     fi
 
     log_info "✅ 节点 ${node}, instance ${instance_idx} 上的 ${#files[@]} 个推理任务已提交"
@@ -891,7 +891,7 @@ distribute_and_launch_jobs() {
     if [[ ${#pids[@]} -gt 0 ]]; then
         wait "${pids[@]}" || true
     fi
-    log_info "✅ 所有推理任务已启动，进入远端任务监控阶段"
+    log_info "✅ 所有推理任务已启动，进入远端任务监控阶段, 请查看推理结果的路径: ${OUTPUT_DIR}"
 
     # 4. 等待所有远程推理任务完成
     wait_for_inference_completion
@@ -926,8 +926,8 @@ wait_for_inference_completion() {
         done
 
         if [[ $completed_nodes -lt $total_nodes ]]; then
-            log_info "等待 10 秒后再次检查任务状态..."
-            sleep 10
+            log_info "等待 60 秒后再次检查任务状态..."
+            sleep 60
         fi
     done
 
