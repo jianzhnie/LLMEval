@@ -658,13 +658,13 @@ check_service_ready() {
         return 1
     fi
 
-    # 检查进程是否存在
+    # 1. 检查服务进程是否存在
     if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
-        log_warn "节点 ${node} 上的服务进程未运行"
+        log_warn "节点 ${node} 上的服务进程未运行或已退出"
         return 1
     fi
 
-    # 尝试 HTTP 健康检查
+    # 2. 尝试 HTTP 健康检查 (/health)
     http_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
         ${base_url}${HEALTH_PATH} 2>/dev/null || echo 0")
 
@@ -713,10 +713,10 @@ wait_for_services() {
         # 并行检查所有节点的所有实例状态
         for ((i = 0; i < total_nodes; i++)); do
             local node="${NODES[i]}"
-            for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
-                local port_idx=$((i * INSTANCES_PER_NODE + j))
+            for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
+                local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
                 local port="${PORTS[port_idx]}"
-                local status_file="${status_dir}/status_${node//./_}_${j}.ok"
+                local status_file="${status_dir}/status_${node//./_}_${instance_idx}.ok"
 
                 # 跳过已就绪的服务实例
                 if [[ -f "$status_file" ]]; then
@@ -725,9 +725,9 @@ wait_for_services() {
 
                 # 后台检查服务状态
                 (
-                    if check_service_ready "$node" "$port" "$j"; then
+                    if check_service_ready "$node" "$port" "$instance_idx"; then
                         touch "$status_file"
-                        log_info "[OK] 实例就绪: 节点 ${node} 实例 ${j} (端口 ${port})"
+                        log_info "[OK] 实例就绪: 节点 ${node} 实例 ${instance_idx} (端口 ${port})"
                     fi
                 ) &
                 running_pids+=($!)
@@ -814,7 +814,7 @@ run_task_batch() {
         local input_file="${DATASET_DIR}/${file}"
         local base_name=$(basename "$file" .jsonl)
         local output_file="${OUTPUT_DIR}/infer_${model_name//\//_}_${base_name}_bz${N_SAMPLES}.jsonl"
-        local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${instance_idx}.log"
+        local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${instance_idx}_${base_name}.log"
 
         log_info "---> 处理文件: ${file} (输出: ${output_file})"
         # 构建推理命令
@@ -887,7 +887,7 @@ distribute_and_launch_jobs() {
         done
     done
 
-    # 等待所有节点的任务提交完成（不等待远端具体推理完成）
+    # 3. 等待所有节点的任务提交完成（不等待远端具体推理完成）
     if [[ ${#pids[@]} -gt 0 ]]; then
         wait "${pids[@]}" || true
     fi
@@ -981,9 +981,9 @@ main() {
     PORTS=()
     local start_port=6000
     for ((i=0; i<${#NODES[@]}; i++)); do
-        for ((j=0; j<INSTANCES_PER_NODE; j++)); do
+        for ((instance_idx=0; instance_idx<INSTANCES_PER_NODE; instance_idx++)); do
             # Increase port spacing to avoid conflicts
-            PORTS+=($((start_port + i * 100 + j * 20)))  # 每节点间隔100，实例间隔20
+            PORTS+=($((start_port + i * 100 + instance_idx * 20)))  # 每节点间隔100，实例间隔20
         done
     done
     log_info "自动生成端口列表: ${PORTS[*]}"
@@ -1007,11 +1007,11 @@ main() {
     log_info "正在并行部署所有模型服务..."
     for ((i = 0; i < ${#NODES[@]}; i++)); do
         local node="${NODES[i]}"
-        for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
-            local port_idx=$((i * INSTANCES_PER_NODE + j))
+        for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
+            local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
             local port="${PORTS[port_idx]}"
             # 在本地后台部署，加速并发
-            deploy_model_service "$node" "$port" "$j"
+            deploy_model_service "$node" "$port" "$instance_idx" &
         done
     done
 
@@ -1034,18 +1034,18 @@ main() {
     local total_services_expected=$(( ${#NODES[@]} * INSTANCES_PER_NODE ))
     for ((i = 0; i < ${#NODES[@]}; i++)); do
         local node="${NODES[i]}"
-        for ((j = 0; j < INSTANCES_PER_NODE; j++)); do
-            local port_idx=$((i * INSTANCES_PER_NODE + j))
+        for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
+            local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
             local port="${PORTS[port_idx]}"
             # 获取节点实例的 API 服务状态文件
-            local status_file="${LOG_DIR}/status/status_${node//./_}_${j}.ok"
+            local status_file="${LOG_DIR}/status/status_${node//./_}_${instance_idx}.ok"
 
             if [[ -f "$status_file" ]]; then
-                log_info "✅ 节点 ${node} 实例 ${j} (端口: ${port}) 服务就绪"
+                log_info "✅ 节点 ${node} 实例 ${instance_idx} (端口: ${port}) 服务就绪"
                 available_nodes+=("${node}")
                 available_ports+=("${port}")
             else
-                log_warn "❌ 节点 ${node} 实例 ${j} (端口: ${port}) 服务未就绪"
+                log_warn "❌ 节点 ${node} 实例 ${instance_idx} (端口: ${port}) 服务未就绪"
                 failed_nodes+=("${node}")
                 failed_ports+=("${port}")
             fi
