@@ -886,7 +886,6 @@ run_task_batch_parallel() {
     log_info "✅ 节点 ${node} 上的 ${#files[@]} 个推理任务已提交"
 }
 
-
 run_task_batch() {
     local node="$1"
     local model_name="$2"
@@ -905,15 +904,22 @@ run_task_batch() {
     # 限制单个节点上同时运行的推理任务数量
     local max_concurrent_tasks_per_node=${MAX_CONCURRENT_TASKS_PER_NODE:-8}
     local total_tasks=${#files[@]}
-    local completed_tasks=0
-    local running_tasks=0
-    local task_index=0
 
-    # 使用队列方式管理任务，确保任何时候运行的任务不超过限制
-    while [[ $completed_tasks -lt $total_tasks ]]; do
-        # 启动新任务直到达到并发限制
-        while [[ $running_tasks -lt $max_concurrent_tasks_per_node ]] && [[ $task_index -lt $total_tasks ]]; do
-            local file="${files[$task_index]}"
+    # 分批处理任务以控制并发数
+    local batch_start=0
+    while [[ $batch_start -lt $total_tasks ]]; do
+        # 计算当前批次大小
+        local batch_end=$((batch_start + max_concurrent_tasks_per_node))
+        if [[ $batch_end -gt $total_tasks ]]; then
+            batch_end=$total_tasks
+        fi
+
+        log_info "处理批次: 从 ${batch_start} 到 $((batch_end - 1)) (共 $((batch_end - batch_start)) 个任务)"
+
+        # 构建当前批次的推理命令
+        local commands=()
+        for (( i=batch_start; i<batch_end; i++ )); do
+            local file="${files[$i]}"
             local input_file="${DATASET_DIR}/${file}"
             # 移除文件扩展名
             local base_name="${file%.*}"
@@ -925,8 +931,6 @@ run_task_batch() {
             # 检查输入文件是否存在
             if ! ssh_run "$node" "test -f '${input_file}'" >/dev/null 2>&1; then
                 log_error "❌ 输入文件 ${input_file} 在节点 ${node} 上不存在"
-                completed_tasks=$((completed_tasks + 1))
-                task_index=$((task_index + 1))
                 continue
             fi
 
@@ -944,34 +948,58 @@ run_task_batch() {
                     --max_workers ${MAX_WORKERS} \
                     > '${log_file}' 2>&1 &"
 
-            # 执行推理命令
-            ssh_run "$node" "$infer_cmd"
-
-            running_tasks=$((running_tasks + 1))
-            task_index=$((task_index + 1))
-            log_info "节点 ${node}, ${base_url} 上启动了推理任务 ${file}"
+            commands+=("$infer_cmd")
         done
 
-        # 等待一小段时间再检查任务状态
-        sleep 10
-
-        # 检查节点上的任务状态
-        local current_running_tasks
-        current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
-        local finished_tasks=$((running_tasks - current_running_tasks))
-
-        if [[ $finished_tasks -gt 0 ]]; then
-            completed_tasks=$((completed_tasks + finished_tasks))
-            running_tasks=$current_running_tasks
-            log_info "节点 ${node} 上已完成 ${completed_tasks}/${total_tasks} 个任务，当前运行: ${running_tasks} 个任务"
-        elif [[ $current_running_tasks -eq 0 ]] && [[ $completed_tasks -lt $total_tasks ]]; then
-            # 处理异常情况：没有运行中的任务但还有未完成的任务
-            log_warn "节点 ${node} 上没有运行中的任务，但任务未完成，重新检查任务分配"
-            break
+        # 将当前批次的所有命令组合成一个命令字符串并执行
+        if [[ ${#commands[@]} -gt 0 ]]; then
+            local combined_cmd=$(printf "%s " "${commands[@]}")
+            local remote_cmd="($combined_cmd) >/dev/null 2>&1 &"
+            ssh_run "$node" "$remote_cmd"
+            log_info "✅ 节点 ${node} 上的 ${#commands[@]} 个推理任务已提交"
         fi
+
+        # 等待当前批次任务完成
+        log_info "等待当前批次任务完成..."
+        wait_for_batch_completion "$node" ${#commands[@]}
+
+        # 移动到下一批次
+        batch_start=$batch_end
     done
 
     log_info "✅ 节点 ${node} 上的所有 ${#files[@]} 个推理任务已完成"
+}
+
+# 等待一批任务完成
+# Args:
+#   $1: node (string) - 节点地址
+#   $2: expected_count (int) - 预期完成的任务数
+# Returns:
+#   None
+wait_for_batch_completion() {
+    local node="$1"
+    local expected_count="$2"
+    local max_wait_time=6000  # 最大等待时间（秒）
+    local wait_interval=60    # 检查间隔（秒）
+    local total_wait_time=0
+
+    log_info "⏳ 等待节点 ${node} 上的 ${expected_count} 个任务完成..."
+
+    while [[ $total_wait_time -lt $max_wait_time ]]; do
+        local current_running_tasks
+        current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
+
+        if [[ $current_running_tasks -le 0 ]]; then
+            log_info "✅ 所有任务已完成"
+            return 0
+        fi
+
+        log_info "⏳ 节点 ${node} 上仍有 ${current_running_tasks} 个任务在运行"
+        sleep $wait_interval
+        total_wait_time=$((total_wait_time + wait_interval))
+    done
+
+    log_warn "⏰ 等待超时，节点 ${node} 上的任务可能仍在运行"
 }
 
 # 分发并启动所有推理任务
