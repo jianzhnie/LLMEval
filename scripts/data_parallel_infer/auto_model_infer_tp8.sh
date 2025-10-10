@@ -949,6 +949,7 @@ run_task_batch() {
 
             running_tasks=$((running_tasks + 1))
             task_index=$((task_index + 1))
+            log_info "节点 ${node}, ${base_url} 上启动了推理任务 ${file}"
         done
 
         # 等待一小段时间再检查任务状态
@@ -963,6 +964,10 @@ run_task_batch() {
             completed_tasks=$((completed_tasks + finished_tasks))
             running_tasks=$current_running_tasks
             log_info "节点 ${node} 上已完成 ${completed_tasks}/${total_tasks} 个任务，当前运行: ${running_tasks} 个任务"
+        elif [[ $current_running_tasks -eq 0 ]] && [[ $completed_tasks -lt $total_tasks ]]; then
+            # 处理异常情况：没有运行中的任务但还有未完成的任务
+            log_warn "节点 ${node} 上没有运行中的任务，但任务未完成，重新检查任务分配"
+            break
         fi
     done
 
