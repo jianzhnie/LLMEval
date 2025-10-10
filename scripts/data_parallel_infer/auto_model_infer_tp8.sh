@@ -904,59 +904,70 @@ run_task_batch() {
 
     # 限制单个节点上同时运行的推理任务数量
     local max_concurrent_tasks_per_node=${MAX_CONCURRENT_TASKS_PER_NODE:-8}
-    local task_count=0
+    local total_tasks=${#files[@]}
+    local completed_tasks=0
+    local running_tasks=0
+    local task_index=0
 
-    # 分批处理文件，避免在单个节点上同时启动过多任务
-    for file in "${files[@]}"; do
-        local input_file="${DATASET_DIR}/${file}"
-        # 移除文件扩展名
-        local base_name="${file%.*}"
-        local output_file="${OUTPUT_DIR}/infer_${model_name//\//_}_${base_name}_bz${N_SAMPLES}.jsonl"
-        local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${base_name}.log"
+    # 使用队列方式管理任务，确保任何时候运行的任务不超过限制
+    while [[ $completed_tasks -lt $total_tasks ]]; do
+        # 启动新任务直到达到并发限制
+        while [[ $running_tasks -lt $max_concurrent_tasks_per_node ]] && [[ $task_index -lt $total_tasks ]]; do
+            local file="${files[$task_index]}"
+            local input_file="${DATASET_DIR}/${file}"
+            # 移除文件扩展名
+            local base_name="${file%.*}"
+            local output_file="${OUTPUT_DIR}/infer_${model_name//\//_}_${base_name}_bz${N_SAMPLES}.jsonl"
+            local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${base_name}.log"
 
-        log_info "  -> 准备处理文件: ${file} (输出: ${output_file})"
+            log_info "  -> 准备处理文件: ${file} (输出: ${output_file})"
 
-        # 检查输入文件是否存在
-        if ! ssh_run "$node" "test -f '${input_file}'" >/dev/null 2>&1; then
-            log_error "❌ 输入文件 ${input_file} 在节点 ${node} 上不存在"
-            continue
-        fi
+            # 检查输入文件是否存在
+            if ! ssh_run "$node" "test -f '${input_file}'" >/dev/null 2>&1; then
+                log_error "❌ 输入文件 ${input_file} 在节点 ${node} 上不存在"
+                completed_tasks=$((completed_tasks + 1))
+                task_index=$((task_index + 1))
+                continue
+            fi
 
-        # 构建推理命令
-        local infer_cmd="cd '${PROJECT_DIR}' && \
-            source '${SET_ENV_SCRIPT}' && \
-            nohup python '${INFER_SCRIPT}' \
-                --input_file '${input_file}' \
-                --output_file '${output_file}' \
-                --input_key '${INPUT_KEY}' \
-                --base_url '${base_url}' \
-                --model_name '${model_name}' \
-                --n_samples ${N_SAMPLES} \
-                --system_prompt_type '${SYSTEM_PROMPT_TYPE}' \
-                --max_workers ${MAX_WORKERS} \
-                > '${log_file}' 2>&1 &"
+            # 构建推理命令
+            local infer_cmd="cd '${PROJECT_DIR}' && \
+                source '${SET_ENV_SCRIPT}' && \
+                nohup python '${INFER_SCRIPT}' \
+                    --input_file '${input_file}' \
+                    --output_file '${output_file}' \
+                    --input_key '${INPUT_KEY}' \
+                    --base_url '${base_url}' \
+                    --model_name '${model_name}' \
+                    --n_samples ${N_SAMPLES} \
+                    --system_prompt_type '${SYSTEM_PROMPT_TYPE}' \
+                    --max_workers ${MAX_WORKERS} \
+                    > '${log_file}' 2>&1 &"
 
-        # 执行推理命令
-        ssh_run "$node" "$infer_cmd"
+            # 执行推理命令
+            ssh_run "$node" "$infer_cmd"
 
-        task_count=$((task_count + 1))
+            running_tasks=$((running_tasks + 1))
+            task_index=$((task_index + 1))
+        done
 
-        # 如果达到最大并发任务数，等待当前批次完成再继续
-        if [[ $((task_count % max_concurrent_tasks_per_node)) -eq 0 ]] || [[ $task_count -eq ${#files[@]} ]]; then
-            log_info "已启动 ${task_count} 个任务，等待任务初始化完成..."
-            sleep 10  # 给任务一些时间初始化
+        # 等待一小段时间再检查任务状态
+        sleep 10
 
-            # 可选：检查节点上的任务状态
-            local running_tasks
-            running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
-            log_info "节点 ${node} 上当前运行的任务数: ${running_tasks}"
+        # 检查节点上的任务状态
+        local current_running_tasks
+        current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
+        local finished_tasks=$((running_tasks - current_running_tasks))
+
+        if [[ $finished_tasks -gt 0 ]]; then
+            completed_tasks=$((completed_tasks + finished_tasks))
+            running_tasks=$current_running_tasks
+            log_info "节点 ${node} 上已完成 ${completed_tasks}/${total_tasks} 个任务，当前运行: ${running_tasks} 个任务"
         fi
     done
 
-    log_info "✅ 节点 ${node} 上的 ${#files[@]} 个推理任务已提交"
+    log_info "✅ 节点 ${node} 上的所有 ${#files[@]} 个推理任务已完成"
 }
-
-
 
 # 分发并启动所有推理任务
 # Args:
