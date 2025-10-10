@@ -76,6 +76,8 @@ if [[ "${DEBUG:-0}" == "1" ]]; then
     set -x  # 打印执行的每条命令
     # 增强调试输出，显示文件名、行号和函数名
     export PS4='+(${BASH_SOURCE}:${LINENO}): ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
+    # 设置日志文件路径
+    readonly LOG_FILE="${LOG_DIR}/debug_$(date +%Y%m%d_%H%M%S).log"
 fi
 
 # =======================================================
@@ -105,6 +107,16 @@ readonly SSH_OPTS="-o StrictHostKeyChecking=no \
 
 # SSH 用户配置: 优先使用环境变量，否则使用当前用户
 readonly SSH_USER="${SSH_USER:-$(whoami)}"
+
+
+# 日志级别常量
+readonly LOG_LEVEL_INFO=0
+readonly LOG_LEVEL_WARN=1
+readonly LOG_LEVEL_ERROR=2
+
+# 当前日志级别（默认为INFO）
+readonly LOG_LEVEL=${LOG_LEVEL:-$LOG_LEVEL_INFO}
+
 # =======================================================
 #                  模型与资源配置
 # =======================================================
@@ -236,10 +248,13 @@ usage() {
   API_WORKERS            API 进程数（如版本支持；默认：1）
   EXTRA_ENGINE_ARGS      附加引擎参数字符串（默认：空）
   MAX_CONCURRENT_TASKS_PER_NODE 单节点最大并发任务数（默认：8）
+  DEBUG                  启用调试模式（默认：0）
+  LOG_LEVEL              日志级别 0=INFO, 1=WARN, 2=ERROR（默认：0）
 
 示例:
   $0
   SSH_USER=root NUM_GPUS=4 MAX_NUM_SEQS=2048 $0 ./nodes.txt
+  DEBUG=1 $0
 EOF
     exit 1
 }
@@ -271,10 +286,15 @@ rsync_to_node() {
     local userhost="${SSH_USER:+${SSH_USER}@}${node}"
     local RSYNC_OPTS="-avz --checksum --partial --inplace --no-whole-file --exclude='.*'"
 
+    log_info "🔄 同步文件: ${src_path} -> ${userhost}:${dst_path}"
+
     if ! rsync ${RSYNC_OPTS} "${src_path}" "${userhost}:${dst_path}"; then
         log_error "❌ rsync 同步失败: ${src_path} -> ${userhost}:${dst_path}" >&2
         return 1
     fi
+
+    log_info "✅ 文件同步完成: ${src_path} -> ${userhost}:${dst_path}"
+
 }
 
 
@@ -284,32 +304,58 @@ rsync_to_node() {
 # Returns:
 #   None (输出到 stdout/stderr)
 log_info() {
-    local msg="$*"
-    local emoji="ℹ️ "
-    # 根据消息内容选择合适的emoji
-    case "$msg" in
-        *"开始执行"*|*"启动"*) emoji="🚀 " ;;
-        *"完成"*|*"成功"*|*"通过"*) emoji="✅ " ;;
-        *"失败"*|*"错误"*|*"异常"*) emoji="❌ " ;;
-        *"发现"*|*"检查"*) emoji="🔍 " ;;
-        *"配置"*|*"设置"*) emoji="⚙️ " ;;
-        *"等待"*) emoji="⏳ " ;;
-        *"清理"*) emoji="🧹 " ;;
-        *"分配"*|*"部署"*) emoji="📦 " ;;
-        *"节点"*|*"服务"*) emoji="💻 " ;;
-        *"端口"*) emoji="🔌 " ;;
-        *"文件"*) emoji="📄 " ;;
-        *"统计"*) emoji="📊 " ;;
-    esac
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: ${emoji}$msg"
+    # 只有当日志级别允许时才输出INFO级别日志
+    if [[ $LOG_LEVEL -le $LOG_LEVEL_INFO ]]; then
+        local msg="$*"
+        local emoji="ℹ️ "
+        # 根据消息内容选择合适的emoji
+        case "$msg" in
+            *"开始执行"*|*"启动"*) emoji="🚀 " ;;
+            *"完成"*|*"成功"*|*"通过"*) emoji="✅ " ;;
+            *"失败"*|*"错误"*|*"异常"*) emoji="❌ " ;;
+            *"发现"*|*"检查"*) emoji="🔍 " ;;
+            *"配置"*|*"设置"*) emoji="⚙️ " ;;
+            *"等待"*) emoji="⏳ " ;;
+            *"清理"*) emoji="🧹 " ;;
+            *"分配"*|*"部署"*) emoji="📦 " ;;
+            *"节点"*|*"服务"*) emoji="💻 " ;;
+            *"端口"*) emoji="🔌 " ;;
+            *"文件"*) emoji="📄 " ;;
+            *"统计"*) emoji="📊 " ;;
+        esac
+        # 输出到控制台
+        local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] INFO: ${emoji}$msg"
+        echo "$log_line"
+        # 如果设置了DEBUG模式，则同时输出到日志文件
+        local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] INFO: ${emoji}$msg"
+        echo "$log_line"
+        if [[ "${DEBUG:-0}" == "1" ]] && [[ -n "${LOG_FILE:-}" ]]; then
+            echo "$log_line" >> "${LOG_FILE}"
+        fi
+    fi
 }
+
 
 log_warn() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN: ⚠️ $*" >&2
+    # 只有当日志级别允许时才输出WARN级别日志
+    if [[ $LOG_LEVEL -le $LOG_LEVEL_WARN ]]; then
+        local msg="$*"
+        local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] WARN: ⚠️ $msg"
+        echo "$log_line" >&2
+        # 如果设置了日志文件，则同时输出到日志文件
+        if [[ "${DEBUG:-0}" == "1" ]] && [[ -n "${LOG_FILE:-}" ]]; then
+            echo "$log_line" >> "${LOG_FILE}"
+        fi
+    fi
 }
 
+
 log_error() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: ❌ $*" >&2
+    local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: ❌ $*"
+    echo "$log_line" >&2
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        echo "$log_line" >> "${LOG_FILE}"
+    fi
 }
 
 # 错误处理函数，并在退出前清理资源
@@ -369,9 +415,10 @@ validate_node() {
     local node="$1"
     # 使用 -q (quiet) 避免输出，通过退出码判断连通性
     if ssh -q "${SSH_USER:+${SSH_USER}@}${node}" exit 2>/dev/null; then
+        log_info "✅ 节点 ${node} 连通性检查通过"
         return 0
     else
-        log_warn "无法连接到节点 $node"
+        log_warn "⚠️ 无法连接到节点 $node"
         return 1
     fi
 }
@@ -497,13 +544,16 @@ stop_services() {
                 log_warn "节点 ${node} 上仍有 ${remaining_processes} 个 vLLM 进程在运行，尝试强制终止..."
                 ssh_run "$node" "pkill -9 -f '${search_pattern}' || true"
             fi
-            log_info "节点 ${node} 服务已停止"
+            log_info "✅ 节点 ${node} 服务已停止"
         ) &
         pids+=($!)
     done
 
     # 等待所有停止操作完成
-    wait "${pids[@]}" || true
+    if [[ ${#pids[@]} -gt 0 ]]; then
+        log_info "⏳ 等待所有节点服务停止..."
+        wait "${pids[@]}" || true
+    fi
     log_info "✅ 所有远程模型服务停止完成"
 }
 
@@ -637,6 +687,7 @@ deploy_model_service() {
     fi
 
     # 2. 检查并清理旧端口占用
+    log_info "🔍 检查节点 ${node} 端口 ${port} 占用情况"
     check_remote_port_free "$node" "$port"
 
     # 3. 构建 vLLM 启动命令
@@ -664,8 +715,14 @@ deploy_model_service() {
             > '${log_file}' 2>&1 &"
 
     # 4. 在后台启动服务
-    ssh_run "$node" "$vllm_cmd" &
-    log_info "✅ 节点 ${node} 启动命令发送成功"
+    log_info "🔄 执行部署命令到节点 ${node}"
+    if ssh_run "$node" "$vllm_cmd"; then
+        log_info "✅ 节点 ${node} 启动命令发送成功，日志文件: ${log_file}"
+        return 0
+    else
+        log_error "❌ 节点 ${node} 启动命令发送失败"
+        return 1
+    fi
 }
 
 # 健康检查（HTTP 探活 + 日志回退）
@@ -681,20 +738,22 @@ check_service_ready() {
     local base_url="http://127.0.0.1:${port}"
     local http_status models_status
 
+    log_info "🔍 检查节点 ${node}:${port} 服务状态"
 
     # 检查日志文件是否存在
     if ! ssh_run "$node" "[[ -f '${log_file}' ]]"; then
-        log_warn "节点 ${node} 的日志文件尚未创建: ${log_file}"
+        log_warn "⚠️ 节点 ${node} 的日志文件尚未创建: ${log_file}"
         return 1
     fi
 
     # 1. 检查服务进程是否存在
     if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
-        log_warn "节点 ${node} 上的服务进程未运行或已退出"
+        log_warn "⚠️ 节点 ${node} 上的服务进程未运行或已退出"
         return 1
     fi
 
     # 2. 尝试 HTTP 健康检查 (/health)
+    log_info "🔄 尝试 HTTP 健康检查 (${base_url}${HEALTH_PATH})"
     http_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
         ${base_url}${HEALTH_PATH} 2>/dev/null || echo 0")
 
@@ -704,6 +763,7 @@ check_service_ready() {
     fi
 
     # 3. 兼容性检查：尝试 /v1/models (vLLM OpenAI 兼容层标准)
+    log_info "🔄 尝试 /v1/models 接口检查 (${base_url}/v1/models)"
     models_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
         ${base_url}/v1/models 2>/dev/null || echo 0")
 
@@ -713,11 +773,12 @@ check_service_ready() {
     fi
 
     # 4. 日志回退检查：查找启动完成标志
+    log_info "🔄 检查日志启动完成标志"
     if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}' 2>/dev/null"; then
         log_info "✅ 服务 ${node}:${port} 日志启动完成标志通过 (HTTP状态码: ${http_status}/${models_status})"
         return 0
     fi
-    log_warn "节点 ${node} 的 vllm 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
+    log_warn "⚠️ 节点 ${node} 的 vllm 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
     return 1
 }
 
@@ -990,16 +1051,16 @@ wait_for_batch_completion() {
         current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
 
         if [[ $current_running_tasks -le 0 ]]; then
-            log_info "✅ 所有任务已完成"
+            log_info "✅ 节点 ${node} 上的所有任务已完成"
             return 0
         fi
 
-        log_info "⏳ 节点 ${node} 上仍有 ${current_running_tasks} 个任务在运行"
+        log_info "⏳ 节点 ${node} 上仍有 ${current_running_tasks} 个任务在运行，已等待 ${total_wait_time} 秒"
         sleep $wait_interval
         total_wait_time=$((total_wait_time + wait_interval))
     done
 
-    log_warn "⏰ 等待超时，节点 ${node} 上的任务可能仍在运行"
+    log_warn "⏰ 等待超时，节点 ${node} 上的任务可能仍在运行，已等待 ${total_wait_time} 秒"
 }
 
 # 分发并启动所有推理任务
@@ -1057,14 +1118,26 @@ distribute_and_launch_jobs() {
 #   None
 # Returns:
 #   None
+# ... existing code ...
+
+# 等待所有推理任务完成
+# Args:
+#   None
+# Returns:
+#   None
 wait_for_inference_completion() {
     log_info "⏳ 等待所有推理任务完成..."
 
     local total_nodes=${#NODES[@]}
     local completed_nodes=0
+    local max_wait_time=7200  # 最大等待时间（秒）= 2小时
+    local wait_interval=60    # 检查间隔（秒）
+    local total_wait_time=0
 
-    while [[ $completed_nodes -lt $total_nodes ]]; do
+    while [[ $completed_nodes -lt $total_nodes ]] && [[ $total_wait_time -lt $max_wait_time ]]; do
         completed_nodes=0
+
+        log_info "🔄 检查所有节点任务状态..."
 
         for ((i = 0; i < total_nodes; i++)); do
             local node="${NODES[i]}"
@@ -1082,12 +1155,18 @@ wait_for_inference_completion() {
         done
 
         if [[ $completed_nodes -lt $total_nodes ]]; then
-            log_info "等待 60 秒后再次检查任务状态..."
-            sleep 60
+            log_info "📊 进度: ${completed_nodes}/${total_nodes} 节点完成，已等待 ${total_wait_time} 秒"
+            log_info "⏳ 等待 ${wait_interval} 秒后再次检查任务状态..."
+            sleep $wait_interval
+            total_wait_time=$((total_wait_time + wait_interval))
         fi
     done
 
-    log_info "✅ 所有节点上的推理任务已完成"
+    if [[ $completed_nodes -eq $total_nodes ]]; then
+        log_info "✅ 所有节点上的推理任务已完成"
+    else
+        log_warn "⏰ 等待超时，部分节点上的任务可能仍在运行"
+    fi
 }
 
 
@@ -1101,7 +1180,7 @@ wait_for_inference_completion() {
 # Returns:
 #   None
 main() {
-    log_info "[START] 开始执行分布式 vLLM 模型推理部署"
+    log_info " 开始执行分布式 vLLM 模型推理部署"
     echo "================================================"
 
     # 设置退出时的清理陷阱 (最先设置，确保任何失败都能调用清理)
