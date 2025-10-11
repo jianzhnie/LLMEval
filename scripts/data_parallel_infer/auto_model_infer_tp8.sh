@@ -712,7 +712,7 @@ deploy_model_service() {
     # 4. 在后台启动服务
     log_info "🔄 执行部署命令到节点 ${node}"
     ssh_run "$node" "$vllm_cmd" &
-    log_info "✅ 节点 ${node} 上模型部署启动命令发送成功"
+    log_info "✅ 节点 ${node} vllm 模型服务部署启动命令发送成功"
 }
 
 # 健康检查（HTTP 探活 + 日志回退）
@@ -728,8 +728,7 @@ check_service_ready() {
     local base_url="http://127.0.0.1:${port}"
     local http_status models_status
 
-    log_info "🔍 检查节点 ${node}:${port} 服务状态"
-
+    log_info "🔍 检查节点 ${node}  (端口: ${port}) 上 vllm 模型部署状态"
     # 检查日志文件是否存在
     if ! ssh_run "$node" "[[ -f '${log_file}' ]]"; then
         log_warn "⚠️ 节点 ${node} 的日志文件尚未创建: ${log_file}"
@@ -743,7 +742,6 @@ check_service_ready() {
     fi
 
     # 2. 尝试 HTTP 健康检查 (/health)
-    log_info "🔄 尝试 HTTP 健康检查 (${base_url}${HEALTH_PATH})"
     http_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
         ${base_url}${HEALTH_PATH} 2>/dev/null || echo 0")
 
@@ -753,7 +751,6 @@ check_service_ready() {
     fi
 
     # 3. 兼容性检查：尝试 /v1/models (vLLM OpenAI 兼容层标准)
-    log_info "🔄 尝试 /v1/models 接口检查 (${base_url}/v1/models)"
     models_status=$(ssh_run "$node" "curl -s -o /dev/null -w '%{http_code}' --max-time ${HEALTH_TIMEOUT} \
         ${base_url}/v1/models 2>/dev/null || echo 0")
 
@@ -763,7 +760,6 @@ check_service_ready() {
     fi
 
     # 4. 日志回退检查：查找启动完成标志
-    log_info "🔄 检查日志启动完成标志"
     if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}' 2>/dev/null"; then
         log_info "✅ 服务 ${node}:${port} 日志启动完成标志通过 (HTTP状态码: ${http_status}/${models_status})"
         return 0
@@ -930,8 +926,9 @@ run_task_batch_parallel() {
     # 将所有命令组合成一个命令字符串并执行
     if [[ ${#commands[@]} -gt 0 ]]; then
         local combined_cmd=$(printf "%s " "${commands[@]}")
-        local remote_cmd="($combined_cmd) >/dev/null 2>&1 &"
-        ssh_run "$node" "$remote_cmd"
+        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1 &
+    else
+        log_warn "节点 ${node} 上没有有效的推理任务命令，跳过执行"
     fi
 
     log_info "✅ 节点 ${node} 上的 ${#files[@]} 个推理任务已提交"
@@ -1012,7 +1009,7 @@ run_task_batch() {
 
         # 等待当前批次任务完成
         log_info "等待当前批次任务完成..."
-        wait_for_batch_completion "$node" ${#commands[@]}
+        # wait_for_batch_completion "$node" ${#commands[@]}
 
         # 移动到下一批次
         batch_start=$batch_end
