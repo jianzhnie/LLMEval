@@ -107,16 +107,6 @@ readonly SSH_OPTS="-o StrictHostKeyChecking=no \
 
 # SSH 用户配置: 优先使用环境变量，否则使用当前用户
 readonly SSH_USER="${SSH_USER:-$(whoami)}"
-
-
-# 日志级别常量
-readonly LOG_LEVEL_INFO=0
-readonly LOG_LEVEL_WARN=1
-readonly LOG_LEVEL_ERROR=2
-
-# 当前日志级别（默认为INFO）
-readonly LOG_LEVEL=${LOG_LEVEL:-$LOG_LEVEL_INFO}
-
 # =======================================================
 #                  模型与资源配置
 # =======================================================
@@ -249,7 +239,6 @@ usage() {
   EXTRA_ENGINE_ARGS      附加引擎参数字符串（默认：空）
   MAX_CONCURRENT_TASKS_PER_NODE 单节点最大并发任务数（默认：8）
   DEBUG                  启用调试模式（默认：0）
-  LOG_LEVEL              日志级别 0=INFO, 1=WARN, 2=ERROR（默认：0）
 
 示例:
   $0
@@ -320,21 +309,15 @@ log_info() {
         *"文件"*) emoji="📄 " ;;
         *"统计"*) emoji="📊 " ;;
     esac
-    # 输出到控制台
-    local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] INFO: ${emoji}$msg"
-    echo "$log_line"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: ${emoji}$msg"
 }
 
 log_warn() {
-    local msg="$*"
-    local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] WARN: ⚠️ $msg"
-    echo "$log_line" >&2
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN: ⚠️ $*" >&2
 }
 
 log_error() {
-    local msg="$*"
-    local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: ❌ $msg"
-    echo "$log_line" >&2
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: ❌ $*" >&2
 }
 
 # 错误处理函数，并在退出前清理资源
@@ -401,6 +384,33 @@ validate_node() {
         return 1
     fi
 }
+
+# 检查节点上的 PROJECT_DIR 和 DATASET_DIR 是否存在
+# Args:
+#   $1: node (string) - 节点地址
+# Returns:
+#   0: 成功，1: 失败
+validate_node_directories() {
+    local node="$1"
+
+    log_info "🔍 检查节点 ${node} 上的必要目录是否存在"
+
+    # 检查 PROJECT_DIR 是否存在
+    if ! ssh_run "$node" "[[ -d '${PROJECT_DIR}' ]]"; then
+        log_error "❌ 节点 ${node} 上 PROJECT_DIR 不存在: ${PROJECT_DIR}"
+        return 1
+    fi
+
+    # 检查 DATASET_DIR 是否存在
+    if ! ssh_run "$node" "[[ -d '${DATASET_DIR}' ]]"; then
+        log_error "❌ 节点 ${node} 上 DATASET_DIR 不存在: ${DATASET_DIR}"
+        return 1
+    fi
+
+    log_info "✅ 节点 ${node} 上的 PROJECT_DIR 和 DATASET_DIR 检查通过"
+    return 0
+}
+
 
 # 优雅清理所有资源并退出
 # Args:
@@ -510,7 +520,7 @@ stop_services() {
 
     # 遍历当前已知的节点列表 (可能已被 main 函数更新为 available_nodes)
     for node in "${NODES[@]}"; do
-        log_info "---> 正在停止节点 ${node} 上的 vLLM 进程..."
+        log_info "正在停止节点 ${node} 上的 vLLM 进程..."
         (
             # 使用 pkill 优雅地发送 SIGTERM，并忽略错误（如果进程已停止）
             ssh_run "$node" "pkill -f '${search_pattern}' || true"
@@ -625,6 +635,12 @@ check_and_prepare_remote_dirs() {
 
     for node in "${NODES[@]}"; do
         log_info "处理节点: ${node}"
+
+        # 首先验证节点上的 PROJECT_DIR 和 DATASET_DIR 是否存在
+        if ! validate_node_directories "$node"; then
+            exit 1
+        fi
+
         # 创建目录，清理旧的状态/日志文件
         local prep_cmd="mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && \
             rm -rf '${LOG_DIR}/status' && mkdir -p '${LOG_DIR}/status' && \
@@ -632,7 +648,7 @@ check_and_prepare_remote_dirs() {
 
         if ! ssh_run "$node" "$prep_cmd"; then
             log_error "❌ 无法在节点 ${node} 上准备目录，请检查SSH连接和权限"
-                exit 1 # 在 subshell 中退出
+            exit 1 # 在 subshell 中退出
         fi
     done
 
@@ -695,13 +711,8 @@ deploy_model_service() {
 
     # 4. 在后台启动服务
     log_info "🔄 执行部署命令到节点 ${node}"
-    if ssh_run "$node" "$vllm_cmd"; then
-        log_info "✅ 节点 ${node} 启动命令发送成功，日志文件: ${log_file}"
-        return 0
-    else
-        log_error "❌ 节点 ${node} 启动命令发送失败"
-        return 1
-    fi
+    ssh_run "$node" "$vllm_cmd" &
+    log_info "✅ 节点 ${node} 上模型部署启动命令发送成功"
 }
 
 # 健康检查（HTTP 探活 + 日志回退）
@@ -1078,7 +1089,7 @@ distribute_and_launch_jobs() {
         log_info "节点 ${node} 分配到 ${#instance_files_ref[@]} 个文件"
         # 在本地后台启动任务提交批次
         (
-            run_task_batch "$node" "$model_name" "$base_url" "${instance_files_ref[@]}"
+            run_task_batch_parallel "$node" "$model_name" "$base_url" "${instance_files_ref[@]}"
         ) &
         pids+=($!)
     done
@@ -1090,7 +1101,7 @@ distribute_and_launch_jobs() {
     log_info "✅ 所有推理任务已启动，进入远端任务监控阶段, 请查看推理结果的路径: ${OUTPUT_DIR}"
 
     # 4. 等待所有远程推理任务完成
-    wait_for_inference_completion
+    # wait_for_inference_completion
 }
 # 等待所有推理任务完成
 # Args:
