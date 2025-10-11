@@ -294,7 +294,6 @@ rsync_to_node() {
     fi
 
     log_info "✅ 文件同步完成: ${src_path} -> ${userhost}:${dst_path}"
-
 }
 
 
@@ -304,58 +303,38 @@ rsync_to_node() {
 # Returns:
 #   None (输出到 stdout/stderr)
 log_info() {
-    # 只有当日志级别允许时才输出INFO级别日志
-    if [[ $LOG_LEVEL -le $LOG_LEVEL_INFO ]]; then
-        local msg="$*"
-        local emoji="ℹ️ "
-        # 根据消息内容选择合适的emoji
-        case "$msg" in
-            *"开始执行"*|*"启动"*) emoji="🚀 " ;;
-            *"完成"*|*"成功"*|*"通过"*) emoji="✅ " ;;
-            *"失败"*|*"错误"*|*"异常"*) emoji="❌ " ;;
-            *"发现"*|*"检查"*) emoji="🔍 " ;;
-            *"配置"*|*"设置"*) emoji="⚙️ " ;;
-            *"等待"*) emoji="⏳ " ;;
-            *"清理"*) emoji="🧹 " ;;
-            *"分配"*|*"部署"*) emoji="📦 " ;;
-            *"节点"*|*"服务"*) emoji="💻 " ;;
-            *"端口"*) emoji="🔌 " ;;
-            *"文件"*) emoji="📄 " ;;
-            *"统计"*) emoji="📊 " ;;
-        esac
-        # 输出到控制台
-        local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] INFO: ${emoji}$msg"
-        echo "$log_line"
-        # 如果设置了DEBUG模式，则同时输出到日志文件
-        local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] INFO: ${emoji}$msg"
-        echo "$log_line"
-        if [[ "${DEBUG:-0}" == "1" ]] && [[ -n "${LOG_FILE:-}" ]]; then
-            echo "$log_line" >> "${LOG_FILE}"
-        fi
-    fi
+    local msg="$*"
+    local emoji="ℹ️ "
+    # 根据消息内容选择合适的emoji
+    case "$msg" in
+        *"开始执行"*|*"启动"*) emoji="🚀 " ;;
+        *"完成"*|*"成功"*|*"通过"*) emoji="✅ " ;;
+        *"失败"*|*"错误"*|*"异常"*) emoji="❌ " ;;
+        *"发现"*|*"检查"*) emoji="🔍 " ;;
+        *"配置"*|*"设置"*) emoji="⚙️ " ;;
+        *"等待"*) emoji="⏳ " ;;
+        *"清理"*) emoji="🧹 " ;;
+        *"分配"*|*"部署"*) emoji="📦 " ;;
+        *"节点"*|*"服务"*) emoji="💻 " ;;
+        *"端口"*) emoji="🔌 " ;;
+        *"文件"*) emoji="📄 " ;;
+        *"统计"*) emoji="📊 " ;;
+    esac
+    # 输出到控制台
+    local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] INFO: ${emoji}$msg"
+    echo "$log_line"
 }
-
 
 log_warn() {
-    # 只有当日志级别允许时才输出WARN级别日志
-    if [[ $LOG_LEVEL -le $LOG_LEVEL_WARN ]]; then
-        local msg="$*"
-        local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] WARN: ⚠️ $msg"
-        echo "$log_line" >&2
-        # 如果设置了日志文件，则同时输出到日志文件
-        if [[ "${DEBUG:-0}" == "1" ]] && [[ -n "${LOG_FILE:-}" ]]; then
-            echo "$log_line" >> "${LOG_FILE}"
-        fi
-    fi
+    local msg="$*"
+    local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] WARN: ⚠️ $msg"
+    echo "$log_line" >&2
 }
 
-
 log_error() {
-    local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: ❌ $*"
+    local msg="$*"
+    local log_line="[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: ❌ $msg"
     echo "$log_line" >&2
-    if [[ -n "${LOG_FILE:-}" ]]; then
-        echo "$log_line" >> "${LOG_FILE}"
-    fi
 }
 
 # 错误处理函数，并在退出前清理资源
