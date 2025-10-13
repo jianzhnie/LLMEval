@@ -248,6 +248,20 @@ class InferenceClient:
                     last_exception = ClientError(e.message, e)
                 else:
                     raise ClientError(e.message, e) from e
+            except Exception as e:
+                # Handle any other unexpected exceptions
+                logger.error(f'Unexpected error: {str(e)}', exc_info=True)
+                if attempt < self.max_retries:
+                    sleep_time = (2**attempt) + random.randint(15, 25)
+                    logger.warning(
+                        f'Unexpected error on attempt {attempt + 1}/{self.max_retries + 1}. '
+                        f'Sleeping for {sleep_time:.2f}s. Error: {str(e)}')
+                    time.sleep(sleep_time)
+                    last_exception = ClientError(str(e), e)
+                else:
+                    raise ClientError(
+                        f'Max retries exceeded with unexpected error: {str(e)}',
+                        e) from e
 
         # If we've exhausted retries, raise the last exception
         raise last_exception if last_exception else ClientError(
@@ -626,11 +640,16 @@ class InferenceRunner:
                       unit='sample') as pbar:
                 for future in concurrent.futures.as_completed(futures):
                     try:
-                        future.result()
+                        result = future.result()
+                        if result is None:
+                            with self._stats_lock:
+                                self._stats['failed'] += 1
                     except Exception as e:
                         logger.error(
                             f'An unexpected error occurred in a thread: {e}',
                             exc_info=True)
+                        with self._stats_lock:
+                            self._stats['failed'] += 1
                         failed_tasks.append({
                             'error':
                             str(e),
@@ -642,6 +661,16 @@ class InferenceRunner:
 
         if failed_tasks:
             logger.warning(f'Total failed tasks: {len(failed_tasks)}')
+            # Optionally save failed tasks to a separate file for debugging
+            failed_tasks_file = self.args.output_file.replace(
+                '.jsonl', '_failed.jsonl')
+            try:
+                with open(failed_tasks_file, 'w') as f:
+                    for task in failed_tasks:
+                        f.write(json.dumps(task) + '\n')
+                logger.info(f'Failed tasks saved to: {failed_tasks_file}')
+            except Exception as e:
+                logger.error(f'Failed to save failed tasks to file: {e}')
 
     def run(self) -> None:
         """Execute the complete inference pipeline with monitoring and reporting.
@@ -697,13 +726,13 @@ class InferenceRunner:
                             max(total_samples, 1)) * 100
 
             logger.info('\n=== Execution Summary ===')
-            logger.info(f'Total samples: {total_samples}')
-            logger.info(f'Processed: {self._stats["processed"]}')
+            logger.info(f'Total samples in dataset: {total_samples}')
+            logger.info(f'Successfully processed: {self._stats["processed"]}')
             logger.info(f'Failed: {self._stats["failed"]}')
             logger.info(f'Skipped: {self._stats["skipped"]}')
             logger.info(f'Success rate: {success_rate:.2f}%')
-            logger.info(f'Duration: {duration:.2f} seconds')
-            logger.info(f'Output: {self.args.output_file}')
+            logger.info(f'Total duration: {duration:.2f} seconds')
+            logger.info(f'Output file: {self.args.output_file}')
             logger.info('✅ Inference pipeline completed successfully\n')
 
         except Exception as e:
@@ -759,11 +788,17 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info('Interrupted by user. Exiting gracefully...')
         sys.exit(130)  # Standard exit code for SIGINT
+    except FileNotFoundError as e:
+        logger.critical(f'File not found error: {e}')
+        sys.exit(1)
+    except ValueError as e:
+        logger.critical(f'Invalid value error: {e}')
+        sys.exit(1)
     except Exception as e:
         logger.critical(
             f'❌ An unrecoverable error occurred during execution: {e}',
             exc_info=True)
-        raise
+        sys.exit(1)
 
 
 if __name__ == '__main__':
