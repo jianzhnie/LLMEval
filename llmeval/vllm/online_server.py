@@ -69,7 +69,10 @@ class InferenceClient:
         base_url (str): Base URL for the OpenAI-compatible API
     """
 
-    def __init__(self, base_url: str, timeout: int) -> None:
+    def __init__(self,
+                 base_url: str,
+                 timeout: int,
+                 max_retries: int = 3) -> None:
         """Initialize the inference client with API configuration and validation.
 
         Creates a new OpenAI client instance configured with the provided base URL
@@ -79,6 +82,7 @@ class InferenceClient:
         Args:
             base_url: Base URL for the OpenAI-compatible API endpoint
             timeout: Request timeout in seconds (must be positive)
+            max_retries: Maximum number of retries for requests to VLLM server (must be non-negative)
 
         Raises:
             ValueError: If timeout is invalid (<=0) or base_url is empty
@@ -98,6 +102,7 @@ class InferenceClient:
             timeout=httpx.Timeout(timeout),
         )
         self.timeout: int = timeout
+        self.max_retries: int = max_retries
         self.base_url: str = base_url  # Store for potential reconnection
 
     def _prepare_messages(
@@ -200,33 +205,53 @@ class InferenceClient:
             'timeout': self.timeout,
         }
 
-        # Make API call with error handling
-        try:
-            completion = self.client.chat.completions.create(**call_args)
-            result = completion.choices[0].message.content
-            return result
-        except AttributeError as e:
-            # Handle missing or invalid completion attributes
-            err_msg = getattr(completion, 'message', '')
-            if err_msg:
-                sleep_time = random.randint(25, 35)
-                time.sleep(sleep_time)
-                raise ClientError(err_msg) from e
-            raise ClientError('Invalid completion response', e) from e
-        except (APIConnectionError, RateLimitError) as e:
-            # Handle retryable errors with backoff
-            sleep_time = random.randint(25, 35)
-            time.sleep(sleep_time)
-            raise ClientError(e.message) from e
-        except APIError as e:
-            err_msg = e.message
-            # Handle context length and other API errors
-            if 'maximum context length' in err_msg:
-                logger.warning(f'Max context length exceeded: {err_msg}')
-                return {'gen': '', 'end_reason': 'max length exceeded'}
-            logger.error(f'API error: {err_msg}')
-            time.sleep(1)
-            raise ClientError(err_msg) from e
+        # Make API call with exponential backoff retry logic
+        last_exception = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                completion = self.client.chat.completions.create(**call_args)
+                result = completion.choices[0].message.content
+                return result
+            except AttributeError as e:
+                # Handle missing or invalid completion attributes
+                err_msg = getattr(completion, 'message', '')
+                if err_msg:
+                    sleep_time = (2**attempt) + random.randint(10, 20)
+                    logger.warning(
+                        f'AttributeError on attempt {attempt + 1}/{self.max_retries + 1}. '
+                        f'Sleeping for {sleep_time:.2f}s. Error: {err_msg}')
+                    time.sleep(sleep_time)
+                    last_exception = ClientError(err_msg, e)
+                else:
+                    raise ClientError('Invalid completion response', e) from e
+            except (APIConnectionError, RateLimitError) as e:
+                # Handle retryable errors with backoff
+                if attempt < self.max_retries:
+                    sleep_time = (2**attempt) + random.randint(20, 30)
+                    logger.warning(
+                        f'{type(e).__name__} on attempt {attempt + 1}/{self.max_retries + 1}. '
+                        f'Sleeping for {sleep_time:.2f}s. Error: {str(e)}')
+                    time.sleep(sleep_time)
+                    last_exception = ClientError(str(e), e)
+                else:
+                    raise ClientError(f'Max retries exceeded: {str(e)}',
+                                      e) from e
+            except APIError as e:
+                # Handle context length and other API errors
+                if 'maximum context length' in e.message:
+                    logger.warning(f'Max context length exceeded: {e.message}')
+                    return {'gen': '', 'end_reason': 'max length exceeded'}
+                logger.error(f'API error: {e.message}')
+                if attempt < self.max_retries:
+                    sleep_time = (2**attempt) + random.randint(25, 35)
+                    time.sleep(sleep_time)
+                    last_exception = ClientError(e.message, e)
+                else:
+                    raise ClientError(e.message, e) from e
+
+        # If we've exhausted retries, raise the last exception
+        raise last_exception if last_exception else ClientError(
+            'Unknown error occurred')
 
 
 class InferenceRunner:

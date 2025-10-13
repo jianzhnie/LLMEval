@@ -356,6 +356,11 @@ class ServerArguments:
                           metadata={'help': 'Base URL of VLLM server'})
     model_name: str = field(default='gpt-4o',
                             metadata={'help': 'Model name of VLLM server'})
+    max_retries: int = field(
+        default=3,
+        metadata={
+            'help': 'Maximum number of retries for requests to VLLM server.'
+        })
     request_timeout: int = field(
         default=6000,
         metadata={'help': 'Timeout for requests to VLLM server.'})
