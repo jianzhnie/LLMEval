@@ -89,6 +89,7 @@ class InferenceClient:
             EnvironmentError: If OPENAI_API_KEY environment variable is not set
         """
         self.api_key: str = os.environ.get('OPENAI_API_KEY', 'EMPTY')
+        self.timeout: int = os.getenv('OPENAI_API_REQUEST_TIMEOUT', timeout)
 
         # Warn if using default EMPTY key
         if self.api_key == 'EMPTY':
@@ -99,9 +100,8 @@ class InferenceClient:
         self.client: openai.OpenAI = openai.OpenAI(
             api_key=self.api_key,
             base_url=base_url,
-            timeout=httpx.Timeout(timeout),
+            timeout=httpx.Timeout(self.timeout),
         )
-        self.timeout: int = timeout
         self.max_retries: int = max_retries
         self.base_url: str = base_url  # Store for potential reconnection
 
@@ -316,7 +316,9 @@ class InferenceRunner:
         # Initialize client with error handling
         try:
             self.client: InferenceClient = InferenceClient(
-                base_url=args.base_url, timeout=args.request_timeout)
+                base_url=args.base_url,
+                timeout=args.request_timeout,
+                retries=args.max_retries)
         except (ValueError, EnvironmentError) as e:
             raise RuntimeError(
                 f'Failed to initialize inference client: {e}') from e
