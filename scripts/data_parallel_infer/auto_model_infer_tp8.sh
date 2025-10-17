@@ -140,13 +140,6 @@ readonly ASCEND_VISIBLE="$(seq -s, 0 $((NUM_GPUS-1)))"
 # 关闭请求逐条日志，减少 IO 抖动
 readonly DISABLE_LOG_REQUESTS=${DISABLE_LOG_REQUESTS:-1}
 
-# 禁用 OpenAI 兼容层的请求体保存（如版本支持）
-readonly DISABLE_STATE_DUMP=${DISABLE_STATE_DUMP:-1}
-
-# Uvicorn/Server 设置（注意：vLLM 引擎内并行为主，过多服务进程可能适得其反）
-# 如果 vLLM 支持 --num-servers 或 --workers，可以在此开启；默认 1
-readonly API_WORKERS=${API_WORKERS:-1}
-
 # 额外引擎参数（按需追加，例如 "--dtype bfloat16 --enforce-eager"）
 readonly EXTRA_ENGINE_ARGS="${EXTRA_ENGINE_ARGS:-}"
 
@@ -185,17 +178,13 @@ readonly DATASET_DIR="${DATASET_DIR:-${PROJECT_DIR}/data_process/model_infer}"
 # 数据集文件匹配模式（可覆盖）
 readonly DATASET_GLOB="${DATASET_GLOB:-top_100K_final_verified_samples_shard*}"
 
-# 并发控制配置
-readonly MAX_JOBS=${MAX_JOBS:-128}                    # 总体一次性拉起的最大任务数量（进程数）
-
 # =======================================================
 #                  推理客户端参数
 # =======================================================
 readonly INPUT_KEY="${INPUT_KEY:-question}"           # 输入字段键名
 readonly SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
 readonly MAX_WORKERS=${MAX_WORKERS:-32}               # 客户端每进程内部的线程/协程并发
-# 单节点最大并发任务数
-readonly MAX_CONCURRENT_TASKS_PER_NODE=${MAX_CONCURRENT_TASKS_PER_NODE:-8}
+readonly MAX_CONCURRENT_TASKS_PER_NODE=${MAX_CONCURRENT_TASKS_PER_NODE:-8} # 单节点最大并发任务数
 
 # =======================================================
 #                  全局变量声明
@@ -235,7 +224,6 @@ usage() {
   SYSTEM_PROMPT_TYPE     系统提示类型（默认：amthinking）
   MAX_WORKERS            推理客户端内部并发（默认：32）
   DISABLE_LOG_REQUESTS   是否关闭请求日志（默认：1）
-  API_WORKERS            API 进程数（如版本支持；默认：1）
   EXTRA_ENGINE_ARGS      附加引擎参数字符串（默认：空）
   MAX_CONCURRENT_TASKS_PER_NODE 单节点最大并发任务数（默认：8）
   DEBUG                  启用调试模式（默认：0）
@@ -700,6 +688,7 @@ deploy_model_service() {
         nohup python -m vllm.entrypoints.openai.api_server \
             --model '${MODEL_PATH}' \
             --trust-remote-code \
+            --enforce-eager \
             --served-model-name '${SERVED_MODEL_NAME}' \
             --tensor-parallel-size ${NUM_GPUS} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
