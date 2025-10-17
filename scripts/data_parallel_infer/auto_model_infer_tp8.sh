@@ -915,7 +915,8 @@ run_task_batch_parallel() {
     # 将所有命令组合成一个命令字符串并执行
     if [[ ${#commands[@]} -gt 0 ]]; then
         local combined_cmd=$(printf "%s " "${commands[@]}")
-        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1 &
+        log_info "🚀 节点 ${node} 提交 OpenAI API Server 进行推理任务..."
+        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
     else
         log_warn "节点 ${node} 上没有有效的推理任务命令，跳过执行"
     fi
@@ -998,7 +999,7 @@ run_task_batch() {
 
         # 等待当前批次任务完成
         log_info "等待当前批次任务完成..."
-        # wait_for_batch_completion "$node" ${#commands[@]}
+        wait_for_batch_completion "$node" ${#commands[@]}
 
         # 移动到下一批次
         batch_start=$batch_end
@@ -1016,8 +1017,8 @@ run_task_batch() {
 wait_for_batch_completion() {
     local node="$1"
     local expected_count="$2"
-    local max_wait_time=6000  # 最大等待时间（秒）
-    local wait_interval=60    # 检查间隔（秒）
+    local max_wait_time=1000000  # 最大等待时间（秒）
+    local wait_interval=1800     # 检查间隔（秒）
     local total_wait_time=0
 
     log_info "⏳ 等待节点 ${node} 上的 ${expected_count} 个任务完成..."
