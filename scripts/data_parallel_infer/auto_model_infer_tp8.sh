@@ -750,7 +750,7 @@ check_service_ready() {
 
     # 4. 日志回退检查：查找启动完成标志
     if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}' 2>/dev/null"; then
-        log_info "✅ 服务 ${node}:${port} 日志启动完成标志通过 (HTTP状态码: ${http_status}/${models_status})"
+        log_info "✅ 服务 ${node}:${port} 日志检测 [Application startup complete]标志 vllm 启动完成"
         return 0
     fi
     log_warn "⚠️ 节点 ${node} 的 vllm 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
@@ -917,6 +917,9 @@ run_task_batch_parallel() {
         local combined_cmd=$(printf "%s " "${commands[@]}")
         log_info "🚀 节点 ${node} 提交 OpenAI API Server 进行推理任务..."
         ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
+
+        # 添加一个小延迟以确保任务正确启动
+        sleep 2
     else
         log_warn "节点 ${node} 上没有有效的推理任务命令，跳过执行"
     fi
@@ -1087,8 +1090,6 @@ distribute_and_launch_jobs() {
     fi
     log_info "✅ 所有推理任务已启动，进入远端任务监控阶段, 请查看推理结果的路径: ${OUTPUT_DIR}"
 
-    # 4. 等待所有远程推理任务完成
-    # wait_for_inference_completion
 }
 # 等待所有推理任务完成
 # Args:
@@ -1107,8 +1108,8 @@ wait_for_inference_completion() {
 
     local total_nodes=${#NODES[@]}
     local completed_nodes=0
-    local max_wait_time=7200  # 最大等待时间（秒）= 2小时
-    local wait_interval=60    # 检查间隔（秒）
+    local max_wait_time=100000  # 最大等待时间（秒）= 24小时, 3600* 24 = 86400
+    local wait_interval=1800    # 检查间隔（秒） = 30分钟
     local total_wait_time=0
 
     while [[ $completed_nodes -lt $total_nodes ]] && [[ $total_wait_time -lt $max_wait_time ]]; do
@@ -1280,8 +1281,10 @@ main() {
 
     # 步骤6: 使用可用节点分发并启动推理任务
     distribute_and_launch_jobs
+    # 步骤7: 等待推理任务完成
+    wait_for_inference_completion
 
-    # 步骤7: 优雅关闭服务（由 EXIT 陷阱调用 stop_services）
+    # 步骤8: 优雅关闭服务（由 EXIT 陷阱调用 stop_services）
     log_info "✅ 分布式推理部署和任务执行完成，正在退出并清理资源..."
 
     log_info "📊 部署统计:"
