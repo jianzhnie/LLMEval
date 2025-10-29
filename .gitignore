@@ -182,3 +182,4 @@ run.sh
 *.log
 archive/
 a.py
+a.sh
