@@ -183,7 +183,7 @@ readonly DATASET_GLOB="${DATASET_GLOB:-top_100K_final_verified_samples_shard*}"
 # =======================================================
 readonly INPUT_KEY="${INPUT_KEY:-question}"           # 输入字段键名
 readonly SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
-readonly MAX_WORKERS=${MAX_WORKERS:-32}               # 客户端每进程内部的线程/协程并发
+readonly MAX_WORKERS=${MAX_WORKERS:-128}               # 客户端每进程内部的线程/协程并发
 readonly MAX_CONCURRENT_TASKS_PER_NODE=${MAX_CONCURRENT_TASKS_PER_NODE:-8} # 单节点最大并发任务数
 
 # =======================================================
@@ -324,7 +324,7 @@ handle_error() {
 }
 
 # 文件锁管理 (使用 PID)
-LOCK_FILE="/tmp/vllm_deploy.lock"
+LOCK_FILE="$LOG_DIR/vllm_deploy.lock"
 
 acquire_lock() {
     if [ -e "$LOCK_FILE" ]; then
@@ -681,6 +681,7 @@ deploy_model_service() {
     #   --tensor-parallel-size      使用多卡并行
     #   --gpu-memory-utilization    控制显存水位（避免 OOM）
     #   --max-model-len             控制上下文长度
+    #   --dtype float32 
     # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
     local vllm_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
@@ -693,15 +694,13 @@ deploy_model_service() {
             --tensor-parallel-size ${NUM_GPUS} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
             --max-model-len ${MAX_MODEL_LEN} \
-            --max-num-seqs ${MAX_NUM_SEQS} \
-            --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
             --port ${port} \
             > '${log_file}' 2>&1 &"
 
     # 4. 在后台启动服务
     log_info "🔄 执行部署命令到节点 ${node}"
     ssh_run "$node" "$vllm_cmd" &
-    log_info "✅ 节点 ${node} vllm 模型服务部署启动命令发送成功"
+    log_info "✅ 节点 ${node} vllm 模型部署启动命令发送成功"
 }
 
 # 健康检查（HTTP 探活 + 日志回退）
@@ -750,7 +749,7 @@ check_service_ready() {
 
     # 4. 日志回退检查：查找启动完成标志
     if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}' 2>/dev/null"; then
-        log_info "✅ 服务 ${node}:${port} 日志检测 [Application startup complete]标志 vllm 启动完成"
+        log_info "✅ 服务 ${node}:${port} 日志检测到 [Application startup complete] 标志, vllm 启动完成"
         return 0
     fi
     log_warn "⚠️ 节点 ${node} 的 vllm 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
@@ -917,14 +916,13 @@ run_task_batch_parallel() {
         local combined_cmd=$(printf "%s " "${commands[@]}")
         log_info "🚀 节点 ${node} 提交 OpenAI API Server 进行推理任务..."
         ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
-
         # 添加一个小延迟以确保任务正确启动
         sleep 2
     else
         log_warn "节点 ${node} 上没有有效的推理任务命令，跳过执行"
     fi
 
-    log_info "✅ 节点 ${node} 上的 ${#files[@]} 个推理任务已提交"
+    log_info "✅ 节点 ${node} 上的 ${#files[@]} 个推理任务已完成"
 }
 
 run_task_batch() {
@@ -1164,6 +1162,9 @@ main() {
     # 设置退出时的清理陷阱 (最先设置，确保任何失败都能调用清理)
     trap 'cleanup_and_exit' EXIT TERM INT
 
+    # 验证配置参数
+    validate_config
+
     # 获取文件锁
     acquire_lock
 
@@ -1198,9 +1199,6 @@ main() {
         PORTS+=($((start_port + i * 10)))
     done
     log_info "自动生成端口列表: ${PORTS[*]}"
-
-    # 验证配置参数
-    validate_config
 
     # --- 执行主要流程 ---
     log_info "开始执行部署流程..."
@@ -1282,7 +1280,7 @@ main() {
     # 步骤6: 使用可用节点分发并启动推理任务
     distribute_and_launch_jobs
     # 步骤7: 等待推理任务完成
-    wait_for_inference_completion
+    # wait_for_inference_completion
 
     # 步骤8: 优雅关闭服务（由 EXIT 陷阱调用 stop_services）
     log_info "✅ 分布式推理部署和任务执行完成，正在退出并清理资源..."

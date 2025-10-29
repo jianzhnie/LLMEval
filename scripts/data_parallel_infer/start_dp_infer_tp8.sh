@@ -120,18 +120,6 @@ validate_directories() {
     fi
 }
 
-# 创建必要的输出目录
-create_output_directories() {
-    local dirs=("$OUTPUT_DIR" "$LOG_DIR")
-
-    for dir in "${dirs[@]}"; do
-        if [[ ! -d "$dir" ]]; then
-            log_info "创建目录: $dir"
-            mkdir -p "$dir" || handle_error 1 "无法创建目录: $dir"
-        fi
-    done
-}
-
 # Absolute paths
 AUTO_INFER_SH="/home/jianzhnie/llmtuner/llm/LLMEval/scripts/data_parallel_infer/auto_model_infer_tp8.sh"
 DEFAULT_NODE_LIST="/home/jianzhnie/llmtuner/llm/LLMEval/available_nodes.txt"
@@ -157,7 +145,7 @@ export SET_ENV_SCRIPT="${SET_ENV_SCRIPT:-${PROJECT_DIR}/set_env.sh}"
 # IO
 export OUTPUT_ROOT="${OUTPUT_ROOT:-/home/jianzhnie/llmtuner/llm/LLMEval/output}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${SERVED_MODEL_NAME}}"
-export LOG_DIR="${LOG_DIR:-${OUTPUT_ROOT}/logs-rl}"
+export LOG_DIR="${LOG_DIR:-${OUTPUT_ROOT}/data_paprallel_logs/${SERVED_MODEL_NAME}}"
 
 # Dataset
 export DATASET_DIR="${DATASET_DIR:-${PROJECT_DIR}/data/Omni-MATH}"
@@ -188,16 +176,13 @@ check_dependencies
 log_info "正在验证目录..."
 validate_directories
 
-log_info "正在创建输出目录..."
-create_output_directories
-
 # Show key settings
 log_info "启动分布式推理任务:"
 log_info "  节点文件: $NODE_LIST_FILE"
 log_info "  模型路径: ${MODEL_PATH}"
 log_info "  推理脚本: ${INFER_SCRIPT}"
 log_info "  服务名称: ${SERVED_MODEL_NAME}"
-log_info "  每节点GPU数(TP): ${NUM_GPUS}"
+log_info "  每节点GPU/NPU数(TP): ${NUM_GPUS}"
 log_info "  并发设置: MAX_NUM_SEQS=${MAX_NUM_SEQS}, MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS}"
 log_info "  输出目录: ${OUTPUT_DIR}"
 log_info "  日志目录: ${LOG_DIR}"

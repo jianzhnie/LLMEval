@@ -95,6 +95,7 @@ class InferenceClient:
         if self.api_key == 'EMPTY':
             logger.warning(
                 "Using default 'EMPTY' API key. This may not be secure.")
+            logger.info("timeout", self.timeout)
 
         # Initialize OpenAI client with validated configuration
         self.client: openai.OpenAI = openai.OpenAI(
