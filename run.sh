@@ -1,9 +1,6 @@
-# gitee
-git config --global user.name 'jianzhnie'
-git config --global user.email 'jianzhnie@126.com'
-
-source set_env.sh
+#!/bin/bash
 # set_env
-source /home/jianzhnie/llmtuner/software/miniconda3/bin/activate vllm_073
+source set_env.sh
+
 # pre-commit
 pre-commit run --file llmeval/*/*
