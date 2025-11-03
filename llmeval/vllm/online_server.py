@@ -319,7 +319,7 @@ class InferenceRunner:
             self.client: InferenceClient = InferenceClient(
                 base_url=args.base_url,
                 timeout=args.request_timeout,
-                retries=args.max_retries)
+                max_retries=args.max_retries)
         except (ValueError, EnvironmentError) as e:
             raise RuntimeError(
                 f'Failed to initialize inference client: {e}') from e
