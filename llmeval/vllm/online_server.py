@@ -89,13 +89,16 @@ class InferenceClient:
             EnvironmentError: If OPENAI_API_KEY environment variable is not set
         """
         self.api_key: str = os.environ.get('OPENAI_API_KEY', 'EMPTY')
-        self.timeout: int = os.getenv('OPENAI_API_REQUEST_TIMEOUT', timeout)
+        self.timeout: int = timeout
 
         # Warn if using default EMPTY key
         if self.api_key == 'EMPTY':
             logger.warning(
                 "Using default 'EMPTY' API key. This may not be secure.")
-            logger.info("timeout", self.timeout)
+
+        logger.info(
+            f'Using API Key: {self.api_key}, Timeout: {self.timeout}, Max Retries: {self.max_retries}'
+        )
 
         # Initialize OpenAI client with validated configuration
         self.client: openai.OpenAI = openai.OpenAI(
