@@ -7,16 +7,14 @@
 </div>
 
 
-
 [toc]
-
-
 
 ## 概述
 我们成功在 AIME 2024 和 AIME 2025 基准测试上复现了多个开源模型的结果。
 
-对于像 AIME24 这样只包含 30 个问题的基准测试，采样多个响应至关重要，因为这可能会在重复运行之间引入较高的方差。每个提示采样的响应数量可能解释了我们的评估结果与 DeepSeek 报告的结果之间的细微差异。
+对于像 AIME24 这样只包含 30 个问题的基准测试，采样多个响应至关重要，因为这样可以降低随机性采样带来的误差。 下面的结果均采用了64次采样的平均值,以确保评估的稳定性。我们的评估结果与 DeepSeek 报告的结果之间仍存在细微差异，如果增加采样次数，这些差异可能会减小。
 
+## 评测结果
 ### DeepSeek-R1-Distill-Qwen-32B
 
 |  数据集  | (🤗 LLMEval) | DeepSeek-R1-Distill-Qwen-32B（官方报告） |
@@ -114,13 +112,14 @@ pip install -e .
 
 ## 评测
 
-VLLM 库提供了两种推理模式：在线服务器模式和离线模式。LLMEval 支持这两种模式进行推理评测，以下是这两种方法的使用说明。
+评测过程分为以下三个步骤：
 
-### 使用 vLLM 进行在线推理
+- 启动 vLLM 服务器, 这一步涉及启动一个 vLLM 服务器,该服务器将接收推理请求并返回结果。
+- 运行推理, 这一步涉及向 vLLM 服务器发送推理请求，并将生成的响应保存到指定的输出文件中。
+- 计算得分, 这一步涉及对生成的响应进行评分，并将结果保存到指定的评测目录中。
 
-这种方法需要首先启动一个 vLLM 服务器，然后向其发送请求进行推理。这种方式更加灵活，可以同时处理多个请求。
 
-#### 步骤 1：启动 vLLM 服务器
+### 步骤 1：启动 vLLM 服务器
 
 首先，使用以下命令启动 vLLM 服务器：
 
@@ -147,9 +146,21 @@ python -m vllm.entrypoints.openai.api_server \
 
 详细信息请参考[脚本](./scripts/QwQ/model_server.sh)。
 
-#### 步骤 2：运行推理
 
-启动 vLLM 服务后，运行推理脚本生成响应。
+### 步骤1（可选）：启动 SGLang 服务器
+
+由于评估可能需要几天时间，我们还建议使用具有数据并行性的 SGLang 来加速评估。有关详细信息，请参阅  [SGLang 文档](https://docs.sglang.ai/router/router.html) 。
+
+```bash
+# 使用路由器支持更好的数据并行性
+python -m sglang_router.launch_server --model-path Qwen/QwQ-32B --dp-size 4 --host=0.0.0.0 --port=30000
+```
+根据可用设备调整 dp_size 参数。同时调整以下命令中的端口。
+
+
+### 步骤 2：运行推理
+
+启动 vLLM 服务后，运行推理脚本生成响应, 并将结果保存到指定的输出文件中。
 
 ```bash
 output_dir="./output/Qwen/QwQ-32B"
@@ -187,7 +198,7 @@ python ./llmeval/vllm/online_server.py \
 
 **注意：** 我们使用重复采样来减少评估方差，但可能需要较长时间才能完成（根据设备情况可能超过8小时）。
 
-##### 参数说明
+#### 参数说明
 
 - `--base_url`：vLLM 服务的基础 URL
 - `--model_name`：必须与步骤1中使用的模型名称匹配
@@ -196,59 +207,15 @@ python ./llmeval/vllm/online_server.py \
 - `--input_file`：输入数据文件路径
 - `--output_file`：输出结果文件路径，模型响应将存储在 `gen` 字段中
 - `--max_workers`：最大并发线程数，用于控制推理速度和资源使用
+- `--system_prompt_type`：系统提示类型，可选值为 `empty`、`default` 或 `deepseek_r1`, 具体取决于所使用的模型和任务需求。
 
-##### 采样参数
+#### 采样参数
 
 我们使用 `top_p=0.95`、`temperature=0.6`、`top_k=40`、`max_tokens=32768` 进行采样。
 
-##### 恢复中断的推理
+#### 恢复中断的推理
 
 如果推理过程中断，只需重新运行相同的命令即可恢复。脚本会自动读取之前的输出文件，并处理尚未完成所需样本数的提示。
-
-### 使用 vLLM 进行离线推理
-
-这种方法涉及将模型加载到内存中，然后在本地运行推理。这种方式比在线服务器模式更快速和高效，但需要更多内存，可能不适合大型模型。
-
-```bash
-# --- 配置 ---
-output_dir="./output/Qwen/QwQ-32B"
-model_name_or_path="Qwen/QwQ-32B"
-n_samples=64  # aime24 和 aime25 的默认样本数
-
-# 如果输出目录不存在则创建
-mkdir -p "${output_dir}"
-
-# --- 运行推理任务 ---
-# aime24 (重复采样 64 次)
-python llmeval/vllm/offline_infer.py \
-    --input_file "./data/aime24.jsonl" \
-    --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
-    --batch_size 32 \
-    --model_name_or_path "${model_name_or_path}" \
-    --trust_remote_code \
-    --max_model_len 32768 \
-    --gpu_memory_utilization 0.9 \
-    --tensor_parallel_size 8 \
-    --enforce_eager \
-    --n_samples "${n_samples}"
-
-# aime25 (重复采样 64 次)
-python llmeval/vllm/offline_infer.py \
-    --input_file "./data/aime25.jsonl" \
-    --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
-    --batch_size 32 \
-    --model_name_or_path "${model_name_or_path}" \
-    --trust_remote_code \
-    --max_model_len 32768 \
-    --gpu_memory_utilization 0.9 \
-    --tensor_parallel_size 8 \
-    --enforce_eager \
-    --n_samples "${n_samples}"
-```
-
-详细信息请参考[脚本](./scripts/QwQ/offline_infer.sh)。
-
-结果格式与在线服务器模式一致，模型响应将存储在 `gen` 字段中。
 
 ### 步骤 3：评分
 
@@ -300,28 +267,9 @@ python ./llmeval/tasks/math_eval/eval.py \
 
 很多模型在预训练中的上下文长度最长为 32,768 个 token。为了处理显著超过 32,768 个 token 的上下文长度，应应用 RoPE 缩放技术。我们已经验证了 [YaRN](https://arxiv.org/abs/2309.00071) 的性能，这是一种增强模型长度外推的技术，可确保在长文本上的最佳性能。
 
-vLLM 支持 YaRN，可以配置为
-
-```bash
-python llmeval/vllm/offline_infer.py \
-    --input_file "./data/aime24.jsonl" \
-    --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
-    --batch_size 32 \
-    --model_name_or_path "${model_name_or_path}" \
-    --trust_remote_code \
-    --gpu_memory_utilization 0.9 \
-    --tensor_parallel_size 8 \
-    --enforce_eager \
-    --n_samples "${n_samples}" \
-    --rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \
-    --max-model-len 131072
-```
 
 > 备注
 >vLLM 实现了静态 YaRN，这意味着无论输入长度如何，缩放因子都保持不变，**这可能会对较短文本的性能产生影响。** 我们建议仅在需要处理长上下文时添加 `rope_scaling` 配置。还建议根据需要调整 `factor`。例如，如果您的应用程序的典型上下文长度为 65,536 个 token，则最好将 `factor` 设置为 2.0。
 
 > 备注
 > 如果未指定 `--max-model-len`，`config.json` 中的默认 `max_position_embeddings` 被设置为 40,960，vLLM 将使用该值。此分配包括为输出保留 32,768 个 token，为典型提示保留 8,192 个 token，这足以应对大多数涉及短文本处理的场景，并为模型思考留出充足空间。如果平均上下文长度不超过 32,768 个 token，我们不建议在此场景中启用 YaRN，因为这可能会降低模型性能。
-
-
-##
