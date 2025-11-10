@@ -10,11 +10,22 @@
 [toc]
 
 ## 概述
+
+LLMEval 是一个用于评测大型语言模型（LLM）在各种任务上性能的系统。它支持多种评测任务和数据集，并提供了易于使用的接口来运行评测。主要特性包括：
+
+- 支持 VLLM 和 SGLang 推理引擎
+- 支持在线 API Server 评测和加载本地模型评测
+- 多任务支持，包括数学评测（AIME24, AIME25, GSM8K, MATH-500 等）
+- 友好的日志系统，便于跟踪评测过程和结果
+- 可扩展性强，易于添加新的评测任务和数据集
+
+
+## 结果复现
+
 我们成功在 AIME 2024 和 AIME 2025 基准测试上复现了多个开源模型的结果。
 
 对于像 AIME24 这样只包含 30 个问题的基准测试，采样多个响应至关重要，因为这样可以降低随机性采样带来的误差。 下面的结果均采用了64次采样的平均值,以确保评估的稳定性。我们的评估结果与 DeepSeek 报告的结果之间仍存在细微差异，如果增加采样次数，这些差异可能会减小。
 
-## 评测结果
 ### DeepSeek-R1-Distill-Qwen-32B
 
 |  数据集  | (🤗 LLMEval) | DeepSeek-R1-Distill-Qwen-32B（官方报告） |
@@ -152,11 +163,31 @@ python -m vllm.entrypoints.openai.api_server \
 由于评估可能需要几天时间，我们还建议使用具有数据并行性的 SGLang 来加速评估。有关详细信息，请参阅  [SGLang 文档](https://docs.sglang.ai/router/router.html) 。
 
 ```bash
-# 使用路由器支持更好的数据并行性
-python -m sglang_router.launch_server --model-path Qwen/QwQ-32B --dp-size 4 --host=0.0.0.0 --port=30000
-```
-根据可用设备调整 dp_size 参数。同时调整以下命令中的端口。
+model_path="/Qwen/QwQ-32B"
+model_name="Qwen/QwQ-32B"
 
+num_gpus=8
+max_model_len=32768
+mem_fraction_static=0.7
+
+python -m sglang.launch_server \
+    --model $model_path \
+    --trust-remote-code \
+    --served-model-name $model_name \
+    --tensor-parallel-size $num_gpus \
+    --mem-fraction-static $mem_fraction_static \
+    --context-length $max_model_len  \
+    --schedule-conservativeness 1.5 \
+    --chunked-prefill-size 1024 \
+    --cuda-graph-max-bs 96 \
+    --max-prefill-tokens 2048 \
+    --attention-backend ascend \
+    --sampling-backend ascend \
+    --device npu \
+    --port 8090
+```
+
+根据可用设备调整 `tensor_parallel_size` 参数。
 
 ### 步骤 2：运行推理
 
