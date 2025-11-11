@@ -160,7 +160,7 @@ python -m vllm.entrypoints.openai.api_server \
 
 ### 步骤1（可选）：启动 SGLang 服务器
 
-由于评估可能需要几天时间，我们还建议使用具有数据并行性的 SGLang 来加速评估。有关详细信息，请参阅  [SGLang 文档](https://docs.sglang.ai/router/router.html) 。
+由于评估可能需要几天时间，我们还建议使用具有数据并行性的 SGLang 来加速评估。有关详细信息，请参阅  [SGLang 文档](https://docs.sglang.ai/advanced_features/server_arguments.html) 。
 
 ```bash
 model_path="/Qwen/QwQ-32B"
@@ -301,26 +301,38 @@ python ./llmeval/tasks/math_eval/eval.py \
 
 很多模型在预训练中的上下文长度最长为 32,768 个 token。为了处理显著超过 32,768 个 token 的上下文长度，应应用 RoPE 缩放技术。我们已经验证了 [YaRN](https://arxiv.org/abs/2309.00071) 的性能，这是一种增强模型长度外推的技术，可确保在长文本上的最佳性能。
 
-> 备注
->vLLM 实现了静态 YaRN，这意味着无论输入长度如何，缩放因子都保持不变，**这可能会对较短文本的性能产生影响。** 我们建议仅在需要处理长上下文时添加 `rope_scaling` 配置。还建议根据需要调整 `factor`。例如，如果您的应用程序的典型上下文长度为 65,536 个 token，则最好将 `factor` 设置为 2.0。
+#### VLLM 实现 YaRN 缩放
+
 
 vLLM 支持 YaRN，可以配置为
 
 ```bash
-python llmeval/vllm/offline_infer.py \
-    --input_file "./data/aime24.jsonl" \
-    --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
-    --batch_size 32 \
-    --model_name_or_path "${model_name_or_path}" \
-    --trust_remote_code \
-    --gpu_memory_utilization 0.9 \
-    --tensor_parallel_size 8 \
-    --enforce_eager \
-    --n_samples "${n_samples}" \
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-8B \
     --rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \
     --max-model-len 131072
 ```
 
+> 备注
+>vLLM 实现了静态 YaRN，这意味着无论输入长度如何，缩放因子都保持不变，**这可能会对较短文本的性能产生影响。** 我们建议仅在需要处理长上下文时添加 `rope_scaling` 配置。还建议根据需要调整 `factor`。例如，如果您的应用程序的典型上下文长度为 65,536 个 token，则最好将 `factor` 设置为 2.0。
 
 > 备注
 > 如果未指定 `--max-model-len`，`config.json` 中的默认 `max_position_embeddings` 被设置为 40,960，vLLM 将使用该值。此分配包括为输出保留 32,768 个 token，为典型提示保留 8,192 个 token，这足以应对大多数涉及短文本处理的场景，并为模型思考留出充足空间。如果平均上下文长度不超过 32,768 个 token，我们不建议在此场景中启用 YaRN，因为这可能会降低模型性能。
+
+#### SGLang 实现 YaRN 缩放
+
+SGLang 支持 YaRN，可以配置为
+
+```bash
+python -m sglang.launch_server \
+    --model-path Qwen/Qwen3-8B \
+    --json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}' \
+    --context-length 131072
+```
+
+>备注
+SGLang 实现了静态 YaRN，这意味着无论输入长度如何，缩放因子都保持不变，这可能会对较短文本的性能产生影响。 我们建议仅在需要处理长上下文时添加 rope_scaling 配置。还建议根据需要调整 factor。例如，如果您的应用程序的典型上下文长度为 65,536 个 token，则最好将 factor 设置为 2.0。
+
+
+>备注
+config.json 中的默认 max_position_embeddings 被设置为 40,960，SGLang 将使用该值。此分配包括为输出保留 32,768 个 token，为典型提示保留 8,192 个 token，这足以应对大多数涉及短文本处理的场景，并为模型思考留出充足空间。如果平均上下文长度不超过 32,768 个 token，我们不建议在此场景中启用 YaRN，因为这可能会降低模型性能。
