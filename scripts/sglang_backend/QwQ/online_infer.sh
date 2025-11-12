@@ -22,9 +22,9 @@ python ./llmeval/vllm/online_server.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
+    --system_prompt_type empty \
+    --max_workers 128 \
     --temperature 0.6  \
-    --system_prompt_type amthinking \
-    --max_workers 96 \
     --top_p 0.95 \
     --top_k 40
 
@@ -36,9 +36,9 @@ python ./llmeval/vllm/online_server.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
+    --system_prompt_type empty \
+    --max_workers 128 \
     --temperature 0.6  \
-    --system_prompt_type amthinking \
-    --max_workers 96 \
     --top_p 0.95 \
     --top_k 40
 
