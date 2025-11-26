@@ -1065,7 +1065,7 @@ wait_for_batch_completion_and_cleanup() {
     local node="$1"
     local port="$2"
     local expected_count="$3"
-    local max_wait_time=1000000  # 最大等待时间（秒）
+    local max_wait_time=864000  # 最大等待时间（秒）(10天)
     local wait_interval=600     # 检查间隔（秒）
     local total_wait_time=0
 
