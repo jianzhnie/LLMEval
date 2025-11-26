@@ -99,6 +99,7 @@ fi
 readonly SSH_OPTS="-o StrictHostKeyChecking=no \
                    -o UserKnownHostsFile=/dev/null \
                    -o LogLevel=ERROR \
+                   -o BatchMode=yes \   # 非交互模式，避免意外提示阻塞
                    -o ConnectTimeout=5 \
                    -o ServerAliveInterval=30 \
                    -o ServerAliveCountMax=3 \
