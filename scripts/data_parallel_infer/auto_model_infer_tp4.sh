@@ -830,6 +830,11 @@ deploy_model_service() {
     log_info "🔄 执行部署命令到节点 ${node}, 实例 ${instance_id}, 端口 ${port}"
     if ssh_run "$node" "$vllm_cmd"; then
         log_info "✅ 节点 ${node} vllm 模型部署启动命令发送成功"
+        return 0
+    else
+        log_error "❌ 节点 ${node} vllm 模型部署启动失败，请检查日志 ${log_file}"
+        return 1
+    fi
 }
 
 
@@ -842,20 +847,21 @@ deploy_model_service() {
 check_service_ready() {
     local node="$1"
     local port="$2"
-    local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}_${3:-0}.log"
+    local instance_id="$3"
+    local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}_${instance_id}.log"
     local base_url="http://127.0.0.1:${port}"
     local http_status models_status
 
     log_info "🔍 检查节点 ${node}  (端口: ${port}) 上 vllm 模型部署状态"
     # 检查日志文件是否存在
     if ! ssh_run "$node" "[[ -f '${log_file}' ]]"; then
-        log_warn "⚠️ 节点 ${node} 的日志文件尚未创建: ${log_file}"
+        log_warn "⚠️ 节点 节点 ${node}:${instance_id}/${port} 的日志文件尚未创建: ${log_file}"
         return 1
     fi
 
     # 1. 检查服务进程是否存在
     if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
-        log_warn "⚠️ 节点 ${node} 上的服务进程未运行或已退出"
+        log_warn "⚠️ 节点 ${node}:${instance_id}/${port} 上的服务进程未运行或已退出"
         return 1
     fi
 
@@ -864,7 +870,7 @@ check_service_ready() {
         ${base_url}${HEALTH_PATH} 2>/dev/null || echo 0")
 
     if [[ $http_status -eq 200 ]]; then
-        log_info "✅ 服务 ${node}:${port} 健康检查 (${HEALTH_PATH}) 通过"
+        log_info "✅ 服务 ${node}:${instance_id}/${port} 健康检查 (${HEALTH_PATH}) 通过"
         return 0
     fi
 
@@ -873,16 +879,16 @@ check_service_ready() {
         ${base_url}/v1/models 2>/dev/null || echo 0")
 
     if [[ $models_status -eq 200 ]]; then
-        log_info "✅ 服务 ${node}:${port} /v1/models 接口检查通过"
+        log_info "✅ 服务 ${node}:${instance_id}/${port} /v1/models 接口检查通过"
         return 0
     fi
 
     # 4. 日志回退检查：查找启动完成标志
     if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}' 2>/dev/null"; then
-        log_info "✅ 服务 ${node}:${port} 日志检测到 [Application startup complete] 标志, vllm 启动完成"
+        log_info "✅ 服务 ${node}:${instance_id}/${port}  日志检测到 [Application startup complete] 标志, vllm 启动完成"
             return 0
         fi
-    log_warn "⚠️ 节点 ${node} 的 vllm 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
+    log_warn "⚠️ 节点 ${node}:${instance_id}/${port} 的 vllm 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
     return 1
 }
 
@@ -921,7 +927,7 @@ wait_for_services() {
 
                 # 后台检查服务状态
                 (
-                    if check_service_ready "$node" "$port" "$instance_idx"; then
+                    if check_service_ready "$node" "$port" "$instance_idx" ; then
                         touch "$status_file"
                     fi
                 ) &
@@ -1022,6 +1028,7 @@ run_task_batch_parallel() {
         local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${instance_idx}_${base_name}.log"
 
         log_info "  -> 准备处理文件: ${file} (输出: ${output_file})"
+
         # 检查输入文件是否存在
         if ! ssh_run "$node" "test -f '${input_file}'" >/dev/null 2>&1; then
             log_error "❌ 输入文件 ${input_file} 在节点 ${node} 上不存在"
@@ -1065,28 +1072,34 @@ wait_for_batch_completion_and_cleanup() {
     local node="$1"
     local port="$2"
     local expected_count="$3"
-    local max_wait_time=864000  # 最长等待 10 天，便于长跑任务
-    local wait_interval=600     # 轮询间隔 10 分钟
+    local max_wait_time=864000  # 最大等待时间（秒）(10天)
+    local wait_interval=600     # 检查间隔（秒）
     local total_wait_time=0
 
-    log_info "⏳ 等待节点 ${node} (${port}) 上的 ${expected_count} 个推理任务完成..."
+    log_info "⏳ 等待节点 ${node} 上的 ${expected_count} 个任务完成..."
 
     while [[ $total_wait_time -lt $max_wait_time ]]; do
         local current_running_tasks
         current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
 
-        if [[ ${current_running_tasks:-0} -le 0 ]]; then
-            log_info "✅ 节点 ${node} (${port}) 全部推理任务完成"
+        if [[ $current_running_tasks -le 0 ]]; then
+            log_info "✅ 节点 ${node} 上的 ${expected_count} 个推理任务已完成"
+
+            # 任务完成后，停止该节点的 vLLM 服务
+            log_info "📋 推理任务完成，正在清理资源..."
             stop_service_on_node "$node" "$port"
+
             return 0
         fi
 
-        log_info "⏳ 节点 ${node} 仍有 ${current_running_tasks} 个任务运行，已等待 ${total_wait_time} 秒"
-        sleep "$wait_interval"
+        log_info "⏳ 节点 ${node} 上仍有 ${current_running_tasks} 个任务在运行，已等待 ${total_wait_time} 秒"
+        sleep $wait_interval
         total_wait_time=$((total_wait_time + wait_interval))
     done
 
-    log_warn "⏰ 等待节点 ${node} (${port}) 推理任务完成超时，尝试清理服务"
+    log_warn "⏰ 等待超时，节点 ${node} 上的任务可能仍在运行，已等待 ${total_wait_time} 秒"
+    # 即使超时，仍然尝试停止服务
+    log_warn "正在强制停止节点 ${node} 上的 vLLM 服务..."
     stop_service_on_node "$node" "$port"
 }
 
@@ -1114,9 +1127,11 @@ distribute_and_launch_jobs() {
         local node="${NODES[i]}"
         local port="${PORTS[i]}"
         local instance_idx="${INSTANCE_IDS[i]:-$i}"
+        # 注意: vLLM OpenAI 兼容层 API 通常在 /v1 路径下
         local base_url="http://127.0.0.1:${port}/v1"
         local model_name="${SERVED_MODEL_NAME}"
 
+        # 获取分配给当前实例的文件列表
         local instance_files_var="INSTANCE_ASSIGNMENTS_$i"
         local -n instance_files_ref="$instance_files_var"
 
