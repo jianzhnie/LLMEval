@@ -96,10 +96,12 @@ fi
 # - ServerAliveCountMax=3: 最多允许3次保活失败
 # - ControlMaster=auto: 启用连接复用，提高性能
 # - ControlPersist=60s: 保持连接60秒，减少重连开销
+# 为避免行内注释破坏多行字符串，将注释前移
+# - BatchMode=yes: 禁止交互提示，便于自动化
 readonly SSH_OPTS="-o StrictHostKeyChecking=no \
                    -o UserKnownHostsFile=/dev/null \
                    -o LogLevel=ERROR \
-                   -o BatchMode=yes \   # 非交互模式，避免意外提示阻塞
+                   -o BatchMode=yes \
                    -o ConnectTimeout=5 \
                    -o ServerAliveInterval=30 \
                    -o ServerAliveCountMax=3 \
@@ -254,6 +256,7 @@ readonly MAX_WORKERS=${MAX_WORKERS:-128}               # 客户端每进程内�
 declare -a NODES       # 存储节点地址
 declare -a PORTS       # 存储对应的服务端口
 declare -a FILES       # 存储发现的数据文件列表（文件名）
+declare -a INSTANCE_IDS  # 存储实例编号（用于日志/远程设备绑定）
 
 # =======================================================
 #                  工具函数区域
@@ -546,6 +549,14 @@ validate_config() {
             handle_error 1 "$desc ($param) 需在 $min-$max 之间，当前值: $value"
         fi
     done
+
+    # 强制 TP=4 且单节点部署两个实例以满足需求
+    if [[ "$NUM_GPUS" -ne 4 ]]; then
+        handle_error 1 "该脚本固定使用张量并行大小 TP=4，当前 NUM_GPUS=${NUM_GPUS}"
+    fi
+    if [[ "$INSTANCES_PER_NODE" -ne 2 ]]; then
+        handle_error 1 "该脚本要求单节点部署 2 个实例，当前 INSTANCES_PER_NODE=${INSTANCES_PER_NODE}"
+    fi
 
     # 验证浮点数参数 (使用 bc 进行浮点比较)
     if [[ $(echo "${MEMORY_UTILIZATION} < 0.1 || ${MEMORY_UTILIZATION} > 1.0" | bc -l) -eq 1 ]]; then
@@ -1043,6 +1054,36 @@ run_task_batch_parallel() {
     wait_for_batch_completion_and_cleanup "$node" "$port" ${#commands[@]}
 }
 
+# 监控单节点推理任务并在完成后清理服务
+wait_for_batch_completion_and_cleanup() {
+    local node="$1"
+    local port="$2"
+    local expected_count="$3"
+    local max_wait_time=864000  # 最长等待 10 天，便于长跑任务
+    local wait_interval=600     # 轮询间隔 10 分钟
+    local total_wait_time=0
+
+    log_info "⏳ 等待节点 ${node} (${port}) 上的 ${expected_count} 个推理任务完成..."
+
+    while [[ $total_wait_time -lt $max_wait_time ]]; do
+        local current_running_tasks
+        current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
+
+        if [[ ${current_running_tasks:-0} -le 0 ]]; then
+            log_info "✅ 节点 ${node} (${port}) 全部推理任务完成"
+            stop_service_on_node "$node" "$port"
+            return 0
+        fi
+
+        log_info "⏳ 节点 ${node} 仍有 ${current_running_tasks} 个任务运行，已等待 ${total_wait_time} 秒"
+        sleep "$wait_interval"
+        total_wait_time=$((total_wait_time + wait_interval))
+    done
+
+    log_warn "⏰ 等待节点 ${node} (${port}) 推理任务完成超时，尝试清理服务"
+    stop_service_on_node "$node" "$port"
+}
+
 # 分发并启动所有推理任务
 # Args:
 #   None
@@ -1092,7 +1133,7 @@ distribute_and_launch_jobs() {
     if [[ ${#pids[@]} -gt 0 ]]; then
         wait "${pids[@]}" || true
     fi
-    log_info "✅ 所有推理任务已启动，进入远端任务监控阶段, 请查看推理结果的路径: ${OUTPUT_DIR}"
+    log_info "✅ 所有推理任务已启动，进入远端任务监控阶段, 请查看推理结果: ${OUTPUT_DIR}"
 }
 
 
@@ -1190,11 +1231,14 @@ main() {
     # 初始化可用节点和失败节点列表
     local -a available_nodes=()
     local -a available_ports=()
+    local -a available_instance_ids=()
     local -a failed_nodes=()
     local -a failed_ports=()
+    local -a failed_instance_ids=()
 
     # 检查每个节点的状态
-    local total_services_expected=$(( ${#NODES[@]} * INSTANCES_PER_NODE ))
+    local configured_node_count=${#NODES[@]}
+    local total_services_expected=$(( configured_node_count * INSTANCES_PER_NODE ))
     for ((i = 0; i < ${#NODES[@]}; i++)); do
         local node="${NODES[i]}"
         for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
@@ -1207,22 +1251,30 @@ main() {
                 log_info "✅ 节点 ${node} 实例 ${instance_idx} (端口: ${port}) 服务就绪"
                 available_nodes+=("${node}")
                 available_ports+=("${port}")
+                available_instance_ids+=("${instance_idx}")
             else
                 log_warn "❌ 节点 ${node} 实例 ${instance_idx} (端口: ${port}) 服务未就绪"
                 failed_nodes+=("${node}")
                 failed_ports+=("${port}")
+                failed_instance_ids+=("${instance_idx}")
             fi
         done
     done
 
     # 输出部署结果统计
     log_info "📊 服务部署结果统计:"
-    log_info "   - 成功实例数量: ${#available_nodes[@]}/${total_services_expected}"
+    local ready_instance_count=${#available_nodes[@]}
+    local ready_node_count=0
+    if [[ $ready_instance_count -gt 0 ]]; then
+        ready_node_count=$(printf "%s\n" "${available_nodes[@]}" | sort -u | wc -l | tr -d ' ')
+    fi
+    log_info "   - 成功实例数量: ${ready_instance_count}/${total_services_expected}"
+    log_info "   - 可用节点数量: ${ready_node_count}/${configured_node_count}"
 
     if [[ ${#failed_nodes[@]} -gt 0 ]]; then
         log_warn "以下实例未能成功部署:"
         for ((i = 0; i < ${#failed_nodes[@]}; i++)); do
-            log_warn "   - ${failed_nodes[i]} (端口: ${failed_ports[i]})"
+            log_warn "   - ${failed_nodes[i]} instance ${failed_instance_ids[i]} (端口: ${failed_ports[i]})"
         done
         log_warn "请检查这些节点的日志文件: ${LOG_DIR}/${API_SERVER_LOG_PREFIX}<节点名>.log"
     fi
@@ -1230,13 +1282,14 @@ main() {
     # 更新全局 NODES 和 PORTS 数组为可用节点
     NODES=("${available_nodes[@]}")
     PORTS=("${available_ports[@]}")
+    INSTANCE_IDS=("${available_instance_ids[@]}")
 
     # 检查是否有可用节点
     if [[ ${#NODES[@]} -eq 0 ]]; then
         handle_error 1 "❌ 没有任何节点成功启动服务，无法继续执行推理任务"
     fi
 
-    log_info "将使用 ${#NODES[@]} 个可用节点进行推理"
+    log_info "将使用 ${#NODES[@]} 个可用实例 (覆盖 ${ready_node_count} 个节点) 进行推理"
 
     # 步骤6: 使用可用节点分发并启动推理任务
     distribute_and_launch_jobs
@@ -1247,8 +1300,8 @@ main() {
     log_info "✅ 分布式推理部署和任务执行完成，正在退出并清理资源..."
 
     log_info "📊 部署统计:"
-    log_info "   - 节点总数: ${#NODES[@]}"
-    log_info "   - 可用节点: ${#available_nodes[@]}"
+    log_info "   - 成功实例: ${ready_instance_count}/${total_services_expected}"
+    log_info "   - 覆盖节点: ${ready_node_count}/${configured_node_count}"
     log_info "   - 数据文件: ${#FILES[@]}"
     log_info "   - 输出目录: ${OUTPUT_DIR}"
     log_info "   - 日志目录: ${LOG_DIR}"
