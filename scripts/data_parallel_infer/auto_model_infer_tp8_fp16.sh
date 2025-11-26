@@ -681,7 +681,7 @@ deploy_model_service() {
     #   --tensor-parallel-size      使用多卡并行
     #   --gpu-memory-utilization    控制显存水位（避免 OOM）
     #   --max-model-len             控制上下文长度
-    #   --dtype float32 
+    #   --dtype float32
     # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
     local vllm_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
