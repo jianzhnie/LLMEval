@@ -495,6 +495,49 @@ validate_config() {
 #                  核心功能函数区域
 # =======================================================
 
+# 停止指定节点上的 vLLM 服务
+# Args:
+#   $1: node (string) - 节点地址
+#   $2: port (int, optional) - 服务端口（可选，用于精确停止特定端口的服务）
+# Returns:
+#   0: 成功，1: 失败
+stop_service_on_node() {
+    local node="$1"
+    local port="${2:-}"
+    local search_pattern="vllm.entrypoints.openai.api_server"
+
+    log_info "🛑 正在停止节点 ${node} 上的 vLLM 服务..."
+
+    # 如果指定了端口，则精确停止该端口的服务
+    if [[ -n "$port" ]]; then
+        search_pattern="vllm.entrypoints.openai.api_server.*--port ${port}"
+    fi
+
+    # 优雅关闭：先发送 SIGTERM
+    if ! ssh_run "$node" "pkill -f '${search_pattern}' || true"; then
+        log_error "❌ 节点 ${node} 上的 vLLM 进程停止命令发送失败"
+        return 1
+    fi
+
+    # 等待进程优雅退出
+    sleep 2
+
+    # 检查进程是否已停止
+    local remaining
+    remaining=$(ssh_run "$node" "pgrep -f '${search_pattern}' | wc -l" 2>/dev/null || echo "0")
+
+    if [[ "${remaining:-0}" -gt 0 ]]; then
+        log_warn "⚠️ 节点 ${node} 上仍有 ${remaining} 个 vLLM 进程，尝试强制终止..."
+        ssh_run "$node" "pkill -9 -f '${search_pattern}' || true"
+        sleep 1
+    fi
+
+    log_info "✅ 节点 ${node} 上的 vLLM 服务已停止"
+    return 0
+}
+
+
+
 # 停止所有远程节点上的模型服务
 # Args:
 #   None
@@ -681,7 +724,7 @@ deploy_model_service() {
     #   --tensor-parallel-size      使用多卡并行
     #   --gpu-memory-utilization    控制显存水位（避免 OOM）
     #   --max-model-len             控制上下文长度
-    #   --dtype float32 
+    #   --dtype float32
     # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
     local vllm_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
@@ -857,16 +900,18 @@ assign_data_to_instances() {
 # 在指定节点上批量提交推理任务，包含重试和资源控制机制
 # Args:
 #   $1: node (string) - 节点地址
-#   $2: model_name (string) - 模型名称
-#   $3: base_url (string) - 服务 URL (如 http://127.0.0.1:port/v1)
+#   $2: port (int) - 服务端口
+#   $3: model_name (string) - 模型名称
+#   $4: base_url (string) - 服务 URL (如 http://127.0.0.1:port/v1)
 #   $@: files (string array) - 分配给该节点的全部文件列表
 # Returns:
 #   None (任务在远程后台启动，不等待完成)
 run_task_batch_parallel() {
     local node="$1"
-    local model_name="$2"
-    local base_url="$3"
-    shift 3
+    local port="$2"
+    local model_name="$3"
+    local base_url="$4"
+    shift 4
     local files=("$@")
 
     log_info "👉 在节点 ${node} 上启动 ${#files[@]} 个推理任务..."
@@ -922,7 +967,8 @@ run_task_batch_parallel() {
         log_warn "节点 ${node} 上没有有效的推理任务命令，跳过执行"
     fi
 
-    log_info "✅ 节点 ${node} 上的 ${#files[@]} 个推理任务已完成"
+    # 等待任务完成
+    wait_for_batch_completion_and_cleanup "$node" "$port" ${#commands[@]}
 }
 
 run_task_batch() {
@@ -1009,17 +1055,18 @@ run_task_batch() {
     log_info "✅ 节点 ${node} 上的所有 ${#files[@]} 个推理任务已完成"
 }
 
-# 等待一批任务完成
 # Args:
 #   $1: node (string) - 节点地址
-#   $2: expected_count (int) - 预期完成的任务数
+#   $2: port (int) - 服务端口
+#   $3: expected_count (int) - 预期完成的任务数
 # Returns:
 #   None
-wait_for_batch_completion() {
+wait_for_batch_completion_and_cleanup() {
     local node="$1"
-    local expected_count="$2"
+    local port="$2"
+    local expected_count="$3"
     local max_wait_time=1000000  # 最大等待时间（秒）
-    local wait_interval=1800     # 检查间隔（秒）
+    local wait_interval=600     # 检查间隔（秒）
     local total_wait_time=0
 
     log_info "⏳ 等待节点 ${node} 上的 ${expected_count} 个任务完成..."
@@ -1029,7 +1076,12 @@ wait_for_batch_completion() {
         current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
 
         if [[ $current_running_tasks -le 0 ]]; then
-            log_info "✅ 节点 ${node} 上的所有任务已完成"
+            log_info "✅ 节点 ${node} 上的 ${expected_count} 个推理任务已完成"
+
+            # 任务完成后，停止该节点的 vLLM 服务
+            log_info "📋 推理任务完成，正在清理资源..."
+            stop_service_on_node "$node" "$port"
+
             return 0
         fi
 
@@ -1039,6 +1091,9 @@ wait_for_batch_completion() {
     done
 
     log_warn "⏰ 等待超时，节点 ${node} 上的任务可能仍在运行，已等待 ${total_wait_time} 秒"
+    # 即使超时，仍然尝试停止服务
+    log_warn "正在强制停止节点 ${node} 上的 vLLM 服务..."
+    stop_service_on_node "$node" "$port"
 }
 
 # 分发并启动所有推理任务
@@ -1077,7 +1132,7 @@ distribute_and_launch_jobs() {
         log_info "节点 ${node} 分配到 ${#instance_files_ref[@]} 个文件"
         # 在本地后台启动任务提交批次
         (
-            run_task_batch_parallel "$node" "$model_name" "$base_url" "${instance_files_ref[@]}"
+            run_task_batch_parallel "$node" "$port" "$model_name" "$base_url" "${instance_files_ref[@]}"
         ) &
         pids+=($!)
     done
@@ -1087,62 +1142,6 @@ distribute_and_launch_jobs() {
         wait "${pids[@]}" || true
     fi
     log_info "✅ 所有推理任务已启动，进入远端任务监控阶段, 请查看推理结果的路径: ${OUTPUT_DIR}"
-
-}
-# 等待所有推理任务完成
-# Args:
-#   None
-# Returns:
-#   None
-# ... existing code ...
-
-# 等待所有推理任务完成
-# Args:
-#   None
-# Returns:
-#   None
-wait_for_inference_completion() {
-    log_info "⏳ 等待所有推理任务完成..."
-
-    local total_nodes=${#NODES[@]}
-    local completed_nodes=0
-    local max_wait_time=100000  # 最大等待时间（秒）= 24小时, 3600* 24 = 86400
-    local wait_interval=1800    # 检查间隔（秒） = 30分钟
-    local total_wait_time=0
-
-    while [[ $completed_nodes -lt $total_nodes ]] && [[ $total_wait_time -lt $max_wait_time ]]; do
-        completed_nodes=0
-
-        log_info "🔄 检查所有节点任务状态..."
-
-        for ((i = 0; i < total_nodes; i++)); do
-            local node="${NODES[i]}"
-
-            # 检查节点上是否还有运行中的推理任务
-            local running_tasks
-            running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
-
-            if [[ "${running_tasks:-0}" -eq 0 ]]; then
-                completed_nodes=$((completed_nodes + 1))
-                log_info "✅ 节点 ${node} 上的推理任务已完成"
-            else
-                log_info "⏳ 节点 ${node} 上仍有 ${running_tasks} 个推理任务在运行"
-            fi
-        done
-
-        if [[ $completed_nodes -lt $total_nodes ]]; then
-            log_info "📊 进度: ${completed_nodes}/${total_nodes} 节点完成，已等待 ${total_wait_time} 秒"
-            log_info "⏳ 等待 ${wait_interval} 秒后再次检查任务状态..."
-            sleep $wait_interval
-            total_wait_time=$((total_wait_time + wait_interval))
-        fi
-    done
-
-    if [[ $completed_nodes -eq $total_nodes ]]; then
-        log_info "✅ 所有节点上的推理任务已完成"
-    else
-        log_warn "⏰ 等待超时，部分节点上的任务可能仍在运行"
-    fi
 }
 
 
