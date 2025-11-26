@@ -3,8 +3,8 @@
 set -euo pipefail
 
 # --- Configuration ---
-output_dir="./output/PCL-Reasoner-V1-Sglang"
-model_name="PCL-Reasoner-V1"
+output_dir="./output/PCL-Reasoner-v1-sft-fp16-step64-sglang"
+model_name="PCL-Reasoner-v1-sft-fp16-step64"
 
 base_url="http://127.0.0.1:8090/v1"
 n_samples=64  # Default sample size for aime24 and aime25
@@ -22,9 +22,9 @@ python ./llmeval/vllm/online_server.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
-    --temperature 0.6  \
     --system_prompt_type amthinking \
-    --max_workers 96 \
+    --max_workers 128 \
+    --temperature 0.6  \
     --top_p 0.95 \
     --top_k 40
 
@@ -36,9 +36,9 @@ python ./llmeval/vllm/online_server.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
-    --temperature 0.6  \
     --system_prompt_type amthinking \
-    --max_workers 96 \
+    --max_workers 128 \
+    --temperature 0.6  \
     --top_p 0.95 \
     --top_k 40
 
