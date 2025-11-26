@@ -1125,28 +1125,30 @@ distribute_and_launch_jobs() {
     local pids=()
     for ((i = 0; i < total_instances; i++)); do
         local node="${NODES[i]}"
-        local port="${PORTS[i]}"
-        local instance_idx="${INSTANCE_IDS[i]:-$i}"
-        # 注意: vLLM OpenAI 兼容层 API 通常在 /v1 路径下
-        local base_url="http://127.0.0.1:${port}/v1"
-        local model_name="${SERVED_MODEL_NAME}"
+        for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
+            local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
+            local port="${PORTS[port_idx]}"
+            # 注意: vLLM OpenAI 兼容层 API 通常在 /v1 路径下
+            local base_url="http://127.0.0.1:${port}/v1"
+            local model_name="${SERVED_MODEL_NAME}"
 
-        # 获取分配给当前实例的文件列表
-        local instance_files_var="INSTANCE_ASSIGNMENTS_$i"
-        local -n instance_files_ref="$instance_files_var"
+            # 获取分配给当前实例的文件列表
+            local instance_files_var="INSTANCE_ASSIGNMENTS_$port_idx"
+            local -n instance_files_ref="$instance_files_var"
 
-        # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
-        if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
-            log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 未分配到文件，跳过"
-            continue
-        fi
-
-        log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 分配到 ${#instance_files_ref[@]} 个文件"
-        (
-            run_task_batch_parallel "$node" "$port" "$model_name" "$base_url" "$instance_idx" "${instance_files_ref[@]}"
-        ) &
-        pids+=($!)
-
+            # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
+            if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
+                log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 未分配到文件，跳过"
+                continue
+            fi
+            # 获取分配给当前实例的文件列表
+            log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 分配到 ${#instance_files_ref[@]} 个文件"
+            # 在本地后台启动任务提交批次
+            (
+                run_task_batch_parallel "$node" "$port" "$model_name" "$base_url" "$instance_idx" "${instance_files_ref[@]}"
+            ) &
+            pids+=($!)
+        done
     done
 
     # 3. 等待所有节点的任务提交完成（不等待远端具体推理完成）
