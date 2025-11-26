@@ -9,16 +9,15 @@ DEFAULT_NODE_LIST="/home/jianzhnie/llmtuner/llm/LLMEval/available_nodes.txt"
 export SSH_USER="${SSH_USER:-jianzhnie}"
 
 # Model/engine
-# export MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/mindspeed/models/mindspore/hf_sft_packing_0703_step6476}"
-export MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/llm/LLMEval/output/mg2hf_steps_254}"
+export MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/mindspeed/models/mindspore/hf_sft_packing_0703_step6476}"
 export NUM_GPUS="${NUM_GPUS:-8}"
 export MEMORY_UTILIZATION="${MEMORY_UTILIZATION:-0.9}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 # export MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
 export MAX_NUM_SEQS="${MAX_NUM_SEQS:-1024}"
 export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-512000}"
-export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-PCLReasonerV1_longCOT-step254}"
-export N_SAMPLES="${N_SAMPLES:-8}"
+export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-PCLReasoner-v1-aime25}"
+export N_SAMPLES="${N_SAMPLES:-32}"
 
 # Project
 export PROJECT_DIR="${PROJECT_DIR:-/home/jianzhnie/llmtuner/llm/LLMEval}"
@@ -31,13 +30,13 @@ export OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${SERVED_MODEL_NAME}}"
 export LOG_DIR="${LOG_DIR:-${OUTPUT_ROOT}/data_paprallel_logs/${SERVED_MODEL_NAME}}"
 
 # Dataset
-export DATASET_DIR="${DATASET_DIR:-${PROJECT_DIR}/data/clone_datasets}"
+export DATASET_DIR="${DATASET_DIR:-${PROJECT_DIR}/data/test_data}"
 export DATASET_GLOB="${DATASET_GLOB:-aime*}"
 export INPUT_KEY="${INPUT_KEY:-prompt}"                            # 输入字段键名
 
 # Client concurrency
 export SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
-export MAX_WORKERS="${MAX_WORKERS:-64}"
+export MAX_WORKERS="${MAX_WORKERS:-128}"
 export MAX_JOBS="${MAX_JOBS:-128}"
 
 # Server
