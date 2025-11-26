@@ -185,13 +185,18 @@ verify_node_device_capacity() {
     # 根据参数决定NPU卡数量
     local required_devices=$((INSTANCES_PER_NODE * NUM_GPUS))
 
+    local device_count
+    if ! device_count=$(get_remote_device_count "$node"); then
+        handle_error 1 "节点 ${node} 的设备数无法检测，请检查 npu-smi/nvidia-smi 是否可用"
+    fi
+
     local device_count=$(get_remote_device_count "$node")
 
     local device_count=$((device_count * 2))
 
     # 确保所有NPU都空闲
     if [[ -z "$device_count" || "$device_count" -lt "$required_devices" ]]; then
-        handle_error 1 "节点 ${node} 检测到的可用设备数量 (${device_count:-0}) 少于运行 ${INSTANCES_PER_NODE} 个实例所需的 ${required_devices} 张设备"
+        handle_error 1 "节点 ${node} 可用设备数量 (${device_count:-0}) 少于运行 ${INSTANCES_PER_NODE} 个实例所需的 ${required_devices} 张设备 (TP=${NUM_GPUS})"
     fi
     log_info "✅ 节点 ${node} 可用设备数 ${device_count} 满足 ${INSTANCES_PER_NODE} 实例 * TP=${NUM_GPUS} 的需求"
 }
@@ -823,9 +828,10 @@ deploy_model_service() {
 
     # 4. 在后台启动服务
     log_info "🔄 执行部署命令到节点 ${node}, 实例 ${instance_id}, 端口 ${port}"
-    ssh_run "$node" "$vllm_cmd" &
-    log_info "✅ 节点 ${node} vllm 模型部署启动命令发送成功"
+    if ssh_run "$node" "$vllm_cmd"; then
+        log_info "✅ 节点 ${node} vllm 模型部署启动命令发送成功"
 }
+
 
 # 健康检查（HTTP 探活 + 日志回退）
 # Args:
@@ -1043,7 +1049,7 @@ run_task_batch_parallel() {
     if [[ ${#commands[@]} -gt 0 ]]; then
         # 用分号连接所有命令
         local combined_cmd=$(printf "%s " "${commands[@]}")
-        log_info "🚀 节点 ${node} 提交 OpenAI API Server 进行推理任务..."
+        log_info "🚀 节点 ${node}: ${instance_idx}) .. 提交  ${#commands[@]} 个 OpenAI API Server 推理任务..."
         ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
         # 添加一个小延迟以确保任务正确启动
         sleep 2
@@ -1093,40 +1099,39 @@ distribute_and_launch_jobs() {
     local total_nodes=${#NODES[@]}
     local total_instances=$((total_nodes * INSTANCES_PER_NODE))
 
-    log_info "开始分发并启动推理任务..."
+    if [[ $total_instances -eq 0 ]]; then
+        handle_error 1 "没有可用实例可供执行推理任务"
+    fi
+
+    log_info "开始分发并启动推理任务 (实例总数: ${total_instances})..."
 
     # 1. 分配数据文件到可用实例
     assign_data_to_instances "$total_instances"
 
     # 2. 为每个节点启动对应的推理任务（并行）
     local pids=()
-    for ((i = 0; i < total_nodes; i++)); do
+    for ((i = 0; i < total_instances; i++)); do
         local node="${NODES[i]}"
-        for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
-            local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
-            local port="${PORTS[port_idx]}"
-            # 注意: vLLM OpenAI 兼容层 API 通常在 /v1 路径下
-            local base_url="http://127.0.0.1:${port}/v1"
-            local model_name="${SERVED_MODEL_NAME}"
+        local port="${PORTS[i]}"
+        local instance_idx="${INSTANCE_IDS[i]:-$i}"
+        local base_url="http://127.0.0.1:${port}/v1"
+        local model_name="${SERVED_MODEL_NAME}"
 
-            # 获取分配给当前实例的文件列表
-            local instance_files_var="INSTANCE_ASSIGNMENTS_$port_idx"
-            local -n instance_files_ref="$instance_files_var"
+        local instance_files_var="INSTANCE_ASSIGNMENTS_$i"
+        local -n instance_files_ref="$instance_files_var"
 
-            # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
-            if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
-                log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 未分配到文件，跳过"
-                continue
-            fi
+        # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
+        if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
+            log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 未分配到文件，跳过"
+            continue
+        fi
 
-            # 获取分配给当前实例的文件列表
-            log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 分配到 ${#instance_files_ref[@]} 个文件"
-            # 在本地后台启动任务提交批次
-            (
-                run_task_batch_parallel "$node" "$port" "$model_name" "$base_url" "$instance_idx" "${instance_files_ref[@]}"
-            ) &
-            pids+=($!)
-        done
+        log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 分配到 ${#instance_files_ref[@]} 个文件"
+        (
+            run_task_batch_parallel "$node" "$port" "$model_name" "$base_url" "$instance_idx" "${instance_files_ref[@]}"
+        ) &
+        pids+=($!)
+
     done
 
     # 3. 等待所有节点的任务提交完成（不等待远端具体推理完成）
