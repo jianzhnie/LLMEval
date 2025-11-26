@@ -144,6 +144,56 @@ get_device_visibility() {
     seq -s, $start_idx $end_idx
 }
 
+get_remote_device_count() {
+    local node=$1
+    # 使用ssh-keyscan检查目标主机指纹，防止"Host key verification failed."报错
+    ssh-keyscan -H "$node" >/dev/null 2>&1
+
+    # 尝试连接并执行命令，同时忽略ssh警告
+    local output
+    output=$(ssh -q -o BatchMode=yes -o ConnectTimeout=10 "$node" "npu-smi info 2>/dev/null" 2>/dev/null)
+
+    # 如果ssh命令失败（例如连接超时），则直接判定为不可用
+    if [ $? -ne 0 ]; then
+        echo "🔴 节点 $node: 连接失败或命令执行失败"
+        return 0
+    fi
+
+    # 检查输出中是否包含"No running processes found in NPU"
+    # 我们可以通过统计"No running processes found"的行数来判断所有卡是否都空闲
+    local device_count
+    device_count=$(echo "$output" | grep -c "No running processes found in NPU")
+
+    # 检查是否有错误信息
+    local error_lines
+    error_lines=$(echo "$output" | grep -c "Error")
+
+    if [ "$error_lines" -gt 0 ]; then
+        echo "❌ 节点 $node: NPU命令执行出错"
+        return 0
+    fi
+    return $device_count
+}
+
+
+# 验证节点的设备数量是否满足实例配置需求
+verify_node_device_capacity() {
+    local node=$1
+
+    # 根据参数决定NPU卡数量
+    local required_devices=$((INSTANCES_PER_NODE * NUM_GPUS))
+
+    local device_count=$(get_remote_device_count "$node")
+
+    local device_count=$((device_count * 2))
+
+    # 确保所有NPU都空闲
+    if [[ -z "$device_count" || "$device_count" -lt "$required_devices" ]]; then
+        handle_error 1 "节点 ${node} 检测到的可用设备数量 (${device_count:-0}) 少于运行 ${INSTANCES_PER_NODE} 个实例所需的 ${required_devices} 张设备"
+    fi
+    log_info "✅ 节点 ${node} 可用设备数 ${device_count} 满足 ${INSTANCES_PER_NODE} 实例 * TP=${NUM_GPUS} 的需求"
+}
+
 # =======================================================
 #                  vLLM API Server 运行参数
 # =======================================================
@@ -686,6 +736,9 @@ check_and_prepare_remote_dirs() {
             exit 1
         fi
 
+        # 确保单节点资源满足 2 实例 * TP=4 的部署要求
+        verify_node_device_capacity "$node"
+
         # 创建目录，清理旧的状态/日志文件
         local prep_cmd="mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && \
             rm -rf '${LOG_DIR}/status' && mkdir -p '${LOG_DIR}/status' && \
@@ -826,6 +879,7 @@ wait_for_services() {
     local interval=10
     local total_nodes=${#NODES[@]}
     local total_instances=$((total_nodes * INSTANCES_PER_NODE))
+    local total_services=$total_instances
     local status_dir="${LOG_DIR}/status"
 
     # 确保状态目录干净
