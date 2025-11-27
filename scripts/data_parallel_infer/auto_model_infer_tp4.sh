@@ -148,7 +148,7 @@ get_device_visibility() {
 
 get_remote_device_count() {
     local node=$1
-    # 使用ssh-keyscan检查目标主机指纹，防止"Host key verification failed."报错
+    # 使用ssh-keyscan防止"Host key verification failed"错误
     ssh-keyscan -H "$node" >/dev/null 2>&1
 
     # 尝试连接并执行命令，同时忽略ssh警告
@@ -158,6 +158,7 @@ get_remote_device_count() {
     # 如果ssh命令失败（例如连接超时），则直接判定为不可用
     if [ $? -ne 0 ]; then
         echo "🔴 节点 $node: 连接失败或命令执行失败"
+        echo "0"
         return 0
     fi
 
@@ -172,11 +173,13 @@ get_remote_device_count() {
 
     if [ "$error_lines" -gt 0 ]; then
         echo "❌ 节点 $node: NPU命令执行出错"
+        echo "0"
         return 0
     fi
-    return $device_count
+    
+    # 通过echo返回实际的设备数量
+    echo "$device_count"
 }
-
 
 # 验证节点的设备数量是否满足实例配置需求
 verify_node_device_capacity() {
@@ -185,6 +188,7 @@ verify_node_device_capacity() {
     # 根据参数决定NPU卡数量
     local required_devices=$((INSTANCES_PER_NODE * NUM_GPUS))
 
+    # 从远程节点获取实际的设备数量
     local device_count=$(get_remote_device_count "$node")
 
     local device_count=$((device_count * 2))
