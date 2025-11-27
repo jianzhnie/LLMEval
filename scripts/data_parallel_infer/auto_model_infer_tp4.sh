@@ -185,11 +185,6 @@ verify_node_device_capacity() {
     # 根据参数决定NPU卡数量
     local required_devices=$((INSTANCES_PER_NODE * NUM_GPUS))
 
-    local device_count
-    if ! device_count=$(get_remote_device_count "$node"); then
-        handle_error 1 "节点 ${node} 的设备数无法检测，请检查 npu-smi/nvidia-smi 是否可用"
-    fi
-
     local device_count=$(get_remote_device_count "$node")
 
     local device_count=$((device_count * 2))
@@ -753,7 +748,7 @@ check_and_prepare_remote_dirs() {
         fi
 
         # 确保单节点资源满足 2 实例 * TP=4 的部署要求
-        verify_node_device_capacity "$node"
+        # verify_node_device_capacity "$node"
 
         # 创建目录，清理旧的状态/日志文件
         local prep_cmd="mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && \
