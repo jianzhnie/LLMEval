@@ -1304,7 +1304,8 @@ main() {
         handle_error 1 "❌ 没有任何节点成功启动服务，无法继续执行推理任务"
     fi
 
-    log_info "将使用 ${#NODES[@]} 个可用实例 (覆盖 ${ready_node_count} 个节点) 进行推理"
+    local actual_total_instances=$((${#NODES[@]} * INSTANCES_PER_NODE))
+    log_info "将使用 ${actual_total_instances} 个可用实例 (覆盖 ${ready_node_count} 个节点) 进行推理"
 
     # 步骤6: 使用可用节点分发并启动推理任务
     distribute_and_launch_jobs
