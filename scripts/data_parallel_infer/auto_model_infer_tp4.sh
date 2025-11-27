@@ -752,7 +752,7 @@ check_and_prepare_remote_dirs() {
         fi
 
         # 确保单节点资源满足 2 实例 * TP=4 的部署要求
-        # verify_node_device_capacity "$node"
+        verify_node_device_capacity "$node"
 
         # 创建目录，清理旧的状态/日志文件
         local prep_cmd="mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && \
@@ -827,15 +827,9 @@ deploy_model_service() {
 
     # 4. 在后台启动服务
     log_info "🔄 执行部署命令到节点 ${node}, 实例 ${instance_id}, 端口 ${port}"
-    if ssh_run "$node" "$vllm_cmd"; then
-        log_info "✅ 节点 ${node} vllm 模型部署启动命令发送成功"
-        return 0
-    else
-        log_error "❌ 节点 ${node} vllm 模型部署启动失败，请检查日志 ${log_file}"
-        return 1
-    fi
+    ssh_run "$node" "$vllm_cmd" &
+    log_info "✅ 节点 ${node} vllm 模型部署启动命令发送成功"
 }
-
 
 # 健康检查（HTTP 探活 + 日志回退）
 # Args:
@@ -854,13 +848,13 @@ check_service_ready() {
     log_info "🔍 检查节点 ${node}  (端口: ${port}) 上 vllm 模型部署状态"
     # 检查日志文件是否存在
     if ! ssh_run "$node" "[[ -f '${log_file}' ]]"; then
-        log_warn "⚠️ 节点 节点 ${node}:${instance_id}/${port} 的日志文件尚未创建: ${log_file}"
+        log_warn "⚠️ 节点 ${node}/port${port}/instance-${instance_id} 的日志文件尚未创建: ${log_file}"
         return 1
     fi
 
     # 1. 检查服务进程是否存在
     if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
-        log_warn "⚠️ 节点 ${node}:${instance_id}/${port} 上的服务进程未运行或已退出"
+        log_warn "⚠️ 节点 ${node}/port${port}/instance-${instance_id} 上的服务进程未运行或已退出"
         return 1
     fi
 
@@ -869,7 +863,7 @@ check_service_ready() {
         ${base_url}${HEALTH_PATH} 2>/dev/null || echo 0")
 
     if [[ $http_status -eq 200 ]]; then
-        log_info "✅ 服务 ${node}:${instance_id}/${port} 健康检查 (${HEALTH_PATH}) 通过"
+        log_info "✅ 服务 ${node}/port${port}/instance-${instance_id} 健康检查 (${HEALTH_PATH}) 通过"
         return 0
     fi
 
@@ -878,16 +872,16 @@ check_service_ready() {
         ${base_url}/v1/models 2>/dev/null || echo 0")
 
     if [[ $models_status -eq 200 ]]; then
-        log_info "✅ 服务 ${node}:${instance_id}/${port} /v1/models 接口检查通过"
+        log_info "✅ 服务 ${node}/port${port}/instance-${instance_id} /v1/models 接口检查通过"
         return 0
     fi
 
     # 4. 日志回退检查：查找启动完成标志
     if ssh_run "$node" "grep -q 'Application startup complete' '${log_file}' 2>/dev/null"; then
-        log_info "✅ 服务 ${node}:${instance_id}/${port}  日志检测到 [Application startup complete] 标志, vllm 启动完成"
+        log_info "✅ 服务 ${node}/port${port}/instance-${instance_id}  日志检测到 [Application startup complete] 标志, vllm 启动完成"
             return 0
         fi
-    log_warn "⚠️ 节点 ${node}:${instance_id}/${port} 的 vllm 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
+    log_warn "⚠️ 节点 ${node}/port${port}/instance-${instance_id} 的 vllm 服务启动未完成 (HTTP状态码: ${http_status}/${models_status})，日志中未找到启动完成标志"
     return 1
 }
 
@@ -1122,7 +1116,7 @@ distribute_and_launch_jobs() {
 
     # 2. 为每个节点启动对应的推理任务（并行）
     local pids=()
-    for ((i = 0; i < total_instances; i++)); do
+    for ((i = 0; i < total_nodes; i++)); do
         local node="${NODES[i]}"
         for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
             local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
