@@ -154,8 +154,10 @@ def process_answers(args: Tuple[int, DataDict, str, str]) -> ProcessResult:
 
         # Extract answers with validation
         try:
-            gold_ans = extracted_answers[0]
-            pred_ans = extracted_answers[1]
+            gold_ans = extracted_answers[0] if len(
+                extracted_answers) > 0 else None
+            pred_ans = extracted_answers[1] if len(
+                extracted_answers) > 1 else None
         except IndexError:
             logger.error(
                 f'❌ [Error] Invalid extraction format for job {index}')
@@ -292,6 +294,7 @@ def compute_scores(eval_dataset: EvalDataset, label_key: str,
                 'extracted_gold': 'Error',
                 'extracted_answer': 'Error'
             })
+            stats.error += 1
 
     logger.info(f'Summary: {total} eval_dataset processed.')
 
