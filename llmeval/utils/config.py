@@ -407,9 +407,8 @@ class OnlineInferArguments(DataArguments, PromptArguments, GenerationArguments,
 
         if self.temperature <= 0.0:
             self.do_sample = False
-            logger.warning(
-                'Temperature is 0, setting do_sample=False'
-                'for greedy decoding.')
+            logger.warning('Temperature is 0, setting do_sample=False'
+                           'for greedy decoding.')
 
 
 @dataclass
@@ -437,9 +436,8 @@ class OfflineInferArguments(DataArguments, PromptArguments,
 
         if self.temperature <= 0.0:
             self.do_sample = False
-            logger.warning(
-                'Temperature is 0, setting do_sample=False '
-                'for greedy decoding.')
+            logger.warning('Temperature is 0, setting do_sample=False '
+                           'for greedy decoding.')
 
 
 @dataclass
@@ -492,9 +490,8 @@ class VerifierInferArguments(DataArguments, PromptArguments,
         if self.temperature <= 0.0:
             self.do_sample = False
             self.top_p = 1.0
-            logger.warning(
-                'Temperature is 0, setting do_sample=False'
-                'for greedy decoding.')
+            logger.warning('Temperature is 0, setting do_sample=False'
+                           'for greedy decoding.')
 
         # Validate and resolve verifier prompt
         if (self.verifier_prompt_type is not None

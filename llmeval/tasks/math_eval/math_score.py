@@ -145,8 +145,8 @@ def process_answers(args: Tuple[int, DataDict, str, str]) -> ProcessResult:
 
     try:
         # Run the verification using math-verify metric
-        grade, extracted_answers = verify_func([generated_text],
-                                               [gold_answer_text])
+        grade, extracted_answers = verify_func([gold_answer_text],
+                                               [generated_text])
 
         if not extracted_answers:
             logger.warning(f'⚠️ No answers could be extracted for job {index}')
