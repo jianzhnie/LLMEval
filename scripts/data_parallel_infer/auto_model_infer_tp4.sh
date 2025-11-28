@@ -42,7 +42,7 @@
 #   4. 规划好日志与输出管理
 #
 # 配置建议：
-#   1. NUM_GPUS: 根据实际显卡数量设置
+#   1. TENSOR_PARALLEL_SIZE: 根据实际显卡数量设置
 #   2. MAX_NUM_SEQS: 结合显存大小调整
 #   3. MAX_JOBS: 依据系统资源调整并发数
 #   4. HEALTH_TIMEOUT: 根据网络情况调整检查超时
@@ -118,10 +118,12 @@ readonly SSH_USER="${SSH_USER:-$(whoami)}"
 readonly MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/mindspeed/models/mindspore/hf_sft_packing_0703_step6476}"
 
 # GPU/ASCEND 资源配置
-readonly NUM_GPUS=${NUM_GPUS:-4}                            # 张量并行大小（每实例4卡）
+readonly TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-4}    # 张量并行大小，支持 1/2/4/8
 readonly INSTANCES_PER_NODE=${INSTANCES_PER_NODE:-2}        # 每节点部署实例数（2实例）
 readonly MEMORY_UTILIZATION=${MEMORY_UTILIZATION:-0.9}      # 显存利用率 (0.0 - 1.0)
 readonly MAX_MODEL_LEN=${MAX_MODEL_LEN:-65536}              # 最大上下文长度
+# 针对 Ascend 场景中 npu-smi 返回值与可用设备数量不一致的问题，允许引入修正因子
+readonly DEVICE_COUNT_MULTIPLIER=${DEVICE_COUNT_MULTIPLIER:-2}
 
 # vLLM 高并发关键参数（按需调整；需结合显存与上下文长度）
 # - MAX_NUM_SEQS: 同时并发处理的序列数（越大越能吞吐，受显存影响较大）
@@ -137,9 +139,9 @@ readonly SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-PCL-Reasoner}"
 # 计算每个实例的设备可见性
 get_device_visibility() {
     local instance_id=$1  # 0-based
-    local start_idx=$((instance_id * NUM_GPUS))
+    local start_idx=$((instance_id * TENSOR_PARALLEL_SIZE))
     # Check if we have enough devices available
-    local end_idx=$((start_idx + NUM_GPUS - 1))
+    local end_idx=$((start_idx + TENSOR_PARALLEL_SIZE - 1))
 
     # Just in case we're using ASCEND devices, we should check the actual available devices
     # This is a more robust approach than just assuming sequential device IDs
@@ -186,7 +188,7 @@ verify_node_device_capacity() {
     local node=$1
 
     # 根据参数决定NPU卡数量
-    local required_devices=$((INSTANCES_PER_NODE * NUM_GPUS))
+    local required_devices=$((INSTANCES_PER_NODE * TENSOR_PARALLEL_SIZE))
 
     # 从远程节点获取实际的设备数量
     local device_count_raw
@@ -196,14 +198,15 @@ verify_node_device_capacity() {
     if ! [[ "$device_count_raw" =~ ^[0-9]+$ ]]; then
         device_count_raw=0
     fi
-    local device_count=$device_count_raw
-    local device_count=$((device_count * 2))
+
+    # 根据硬件/驱动输出情况应用修正系数（Ascend 910B 常见为 2）
+    local device_count=$((device_count_raw * DEVICE_COUNT_MULTIPLIER))
 
     # 确保所有NPU都空闲
     if [[ -z "$device_count" || "$device_count" -lt "$required_devices" ]]; then
-        handle_error 1 "节点 ${node} 可用设备数量 (${device_count:-0}) 少于运行 ${INSTANCES_PER_NODE} 个实例所需的 ${required_devices} 张设备 (TP=${NUM_GPUS})"
+        handle_error 1 "节点 ${node} 可用设备数量 (${device_count:-0}) 少于运行 ${INSTANCES_PER_NODE} 个实例所需的 ${required_devices} 张设备 (TP=${TENSOR_PARALLEL_SIZE})"
     fi
-    log_info "✅ 节点 ${node} 可用设备数 ${device_count} 满足 ${INSTANCES_PER_NODE} 实例 * TP=${NUM_GPUS} 的需求"
+    log_info "✅ 节点 ${node} 可用设备数 ${device_count} 满足 ${INSTANCES_PER_NODE} 实例 * TP=${TENSOR_PARALLEL_SIZE} 的需求"
 }
 
 # =======================================================
@@ -289,7 +292,7 @@ usage() {
 可用环境变量（可覆盖默认值）:
   SSH_USER               远程 SSH 用户名（默认：当前用户）
   MODEL_PATH             模型文件路径
-  NUM_GPUS               GPU/ASCEND 数量（默认：4）
+  TENSOR_PARALLEL_SIZE   张量并行卡数，支持 {1,2,4,8}（默认：4）
   INSTANCES_PER_NODE     每节点实例数（默认：2）
   MEMORY_UTILIZATION     显存利用率（默认：0.9）
   MAX_MODEL_LEN          最大上下文长度（默认：65536）
@@ -304,11 +307,12 @@ usage() {
   DISABLE_LOG_REQUESTS   是否关闭请求日志（默认：1）
   EXTRA_ENGINE_ARGS      附加引擎参数字符串（默认：空）
   MAX_CONCURRENT_TASKS_PER_NODE 单节点最大并发任务数（默认：8）
+  DEVICE_COUNT_MULTIPLIER npu-smi 统计修正因子（默认：2）
   DEBUG                  启用调试模式（默认：0）
 
 示例:
   $0
-  SSH_USER=root NUM_GPUS=4 MAX_NUM_SEQS=2048 $0 ./nodes.txt
+  SSH_USER=root TENSOR_PARALLEL_SIZE=4 MAX_NUM_SEQS=2048 $0 ./nodes.txt
   DEBUG=1 $0
 EOF
     exit 1
@@ -543,7 +547,7 @@ validate_config() {
     # 验证数值参数范围
     # 参数名: 最小值: 最大值: 描述
     local param_checks=(
-        "NUM_GPUS:1:8:GPU数量"
+        "TENSOR_PARALLEL_SIZE:1:8:GPU数量"
         "INSTANCES_PER_NODE:1:4:每节点实例数"
         "N_SAMPLES:1:100:采样次数"
         "MAX_NUM_SEQS:1:16384:并发序列数"
@@ -562,10 +566,19 @@ validate_config() {
         fi
     done
 
-    # 强制 TP=4 且单节点部署两个实例以满足需求
-    if [[ "$NUM_GPUS" -ne 4 ]]; then
-        handle_error 1 "该脚本固定使用张量并行大小 TP=4，当前 NUM_GPUS=${NUM_GPUS}"
+    # 张量并行度仅支持 1/2/4/8
+    local -a supported_tp_sizes=(1 2 4 8)
+    local tp_valid=0
+    for tp_size in "${supported_tp_sizes[@]}"; do
+        if [[ "$TENSOR_PARALLEL_SIZE" -eq "$tp_size" ]]; then
+            tp_valid=1
+            break
+        fi
+    done
+    if [[ $tp_valid -ne 1 ]]; then
+        handle_error 1 "该脚本仅支持 TENSOR_PARALLEL_SIZE ∈ {${supported_tp_sizes[*]}}，当前为 ${TENSOR_PARALLEL_SIZE}"
     fi
+
     if [[ "$INSTANCES_PER_NODE" -ne 2 ]]; then
         handle_error 1 "该脚本要求单节点部署 2 个实例，当前 INSTANCES_PER_NODE=${INSTANCES_PER_NODE}"
     fi
@@ -759,7 +772,7 @@ check_and_prepare_remote_dirs() {
             exit 1
         fi
 
-        # 确保单节点资源满足 2 实例 * TP=4 的部署要求
+        # 确保单节点资源满足 INSTANCES_PER_NODE * TENSOR_PARALLEL_SIZE 的部署要求
         verify_node_device_capacity "$node"
 
         # 创建目录，清理旧的状态/日志文件
@@ -797,7 +810,7 @@ deploy_model_service() {
     local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}_${instance_id}.log"
     local devices=$(get_device_visibility "$instance_id")
 
-    log_info "🚀 在节点 ${node} 上部署模型服务实例 ${instance_id}，端口 ${port} (TP=${NUM_GPUS}, GPUs=${devices}, mem_util=${MEMORY_UTILIZATION})"    # 1. 节点连通性验证
+    log_info "🚀 在节点 ${node} 上部署模型服务实例 ${instance_id}，端口 ${port} (TP=${TENSOR_PARALLEL_SIZE}, GPUs=${devices}, mem_util=${MEMORY_UTILIZATION})"    # 1. 节点连通性验证
 
     # 1. 节点连通性验证
     if ! validate_node "$node"; then
@@ -825,7 +838,7 @@ deploy_model_service() {
             --trust-remote-code \
             --enforce-eager \
             --served-model-name '${SERVED_MODEL_NAME}' \
-            --tensor-parallel-size ${NUM_GPUS} \
+            --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
             --max-model-len ${MAX_MODEL_LEN} \
             --max-num-seqs ${MAX_NUM_SEQS} \
