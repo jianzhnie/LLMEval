@@ -20,7 +20,9 @@ consistency and prevent runtime errors.
 
 import dataclasses
 import json
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from transformers import HfArgumentParser
@@ -62,8 +64,9 @@ class DataArguments:
     input_file: str = field(
         default='input.jsonl',
         metadata={'help': 'Input JSONL file containing prompts.'})
-    cache_dir: str = field(default='/home/jianzhnie/llmtuner/hfhub/cache',
-                           metadata={'help': 'Cache directory for models.'})
+    cache_dir: str = field(
+        default_factory=lambda: os.path.expanduser('~/.cache/huggingface'),
+        metadata={'help': 'Cache directory for models.'})
     output_file: str = field(
         default='output.jsonl',
         metadata={'help': 'Output JSONL file to save results.'})
@@ -77,12 +80,25 @@ class DataArguments:
         Validate data arguments after initialization.
 
         Raises:
-            ValueError: If batch_size is not a positive integer.
+            ValueError: If batch_size is not a positive integer or if input file doesn't exist.
         """
         if self.batch_size <= 0:
             raise ValueError(
                 f'Batch size must be a positive integer, but got {self.batch_size}.'
             )
+
+        # Validate input file exists
+        if not Path(self.input_file).exists():
+            logger.warning(f'Input file {self.input_file} does not exist. '
+                           'Make sure to provide a valid input file path.')
+
+        # Ensure cache directory exists
+        Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
+
+        # Ensure output directory exists
+        output_path = Path(self.output_file)
+        if output_path.parent:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass
@@ -215,6 +231,13 @@ class GenerationArguments:
             raise ValueError(
                 f'Number of samples must be positive, but got {self.n_samples}.'
             )
+        if self.repetition_penalty < 0:
+            raise ValueError(
+                f'Repetition penalty must be non-negative, got: {self.repetition_penalty}'
+            )
+        # Log generation mode for clarity
+        if self.temperature <= 0.0:
+            logger.info('Generation mode: Greedy decoding (temperature=0)')
 
 
 @dataclass
@@ -228,7 +251,7 @@ class VLLMEngineArguments:
     Attributes:
         model_name_or_path (str): Path or name of the model to load.
         trust_remote_code (bool): Whether to trust remote code.
-        dtype (str): Data type for model execution (e.g., "fp16", "auto").
+        dtype (str): Data type for model execution (e.g., "fp16", "auto", "bfloat16").
         max_model_len (int): Maximum context length for the model.
         rope_scaling (str): RoPE scaling configuration as a JSON string. If empty,
             no scaling is applied. Parsed into `rope_scaling_dict`.
@@ -242,6 +265,8 @@ class VLLMEngineArguments:
         max_num_seqs (Optional[int]): Maximum number of parallel sequences.
         enforce_eager (bool): Enforce eager execution for debugging purposes.
         seed (int): Random seed for initialization.
+        device (str): Device to use for inference (e.g., "cuda", "auto").
+        quantization (Optional[str]): Quantization method (e.g., "awq", "gptq", None).
 
     Raises:
         ValueError: If any parameter is outside its valid range or if
@@ -255,7 +280,8 @@ class VLLMEngineArguments:
     dtype: str = field(
         default='auto',
         metadata={
-            'help': 'Data type for model execution (e.g., "fp16", "auto").'
+            'help':
+            'Data type for model execution (e.g., "fp16", "auto", "bfloat16").'
         },
     )
     max_model_len: int = field(
@@ -293,6 +319,14 @@ class VLLMEngineArguments:
         metadata={'help': 'Enforce eager execution for debugging purposes.'})
     seed: int = field(default=0,
                       metadata={'help': 'Random seed for initialization.'})
+    device: str = field(
+        default='cuda',
+        metadata={
+            'help': 'Device to use for inference (e.g., "cuda", "auto").'
+        })
+    quantization: Optional[str] = field(
+        default=None,
+        metadata={'help': 'Quantization method (e.g., "awq", "gptq", None).'})
 
     def __post_init__(self) -> None:
         """
@@ -306,7 +340,7 @@ class VLLMEngineArguments:
             raise ValueError(
                 f'GPU memory utilization must be between 0 and 1, '
                 f'but got {self.gpu_memory_utilization}.')
-        if self.max_model_len < 0:
+        if self.max_model_len <= 0:
             raise ValueError(
                 f'Max model length must be positive, but got {self.max_model_len}.'
             )
@@ -316,6 +350,19 @@ class VLLMEngineArguments:
         if self.pipeline_parallel_size < 1:
             raise ValueError(f'Pipeline parallel size must be at least 1, '
                              f'but got {self.pipeline_parallel_size}.')
+
+        # Validate dtype
+        valid_dtypes = ['auto', 'float16', 'float32', 'bfloat16', 'fp16']
+        if self.dtype not in valid_dtypes:
+            logger.warning(
+                f'Unknown dtype {self.dtype}. Valid options: {valid_dtypes}')
+
+        # Validate quantization
+        if self.quantization and self.quantization not in [
+                'awq', 'gptq', 'squeezellm', None
+        ]:
+            logger.warning(f'Unknown quantization method {self.quantization}. '
+                           'Supported: awq, gptq, squeezellm')
 
         # Parse rope_scaling into rope_scaling_dict, keeping the original field as string.
         text = (self.rope_scaling or '').strip()
@@ -346,6 +393,9 @@ class ServerArguments:
         base_url (str): Base URL of the OpenAI-compatible server.
         model_name (str): Model name to use on the server.
         request_timeout (int): Timeout (seconds) for requests to server.
+        max_retries (int): Maximum number of retries for failed requests.
+        api_key (Optional[str]): API key for authentication.
+        organization (Optional[str]): Organization ID for API usage.
 
     Raises:
         ValueError: If any parameter is outside its valid range.
@@ -364,6 +414,14 @@ class ServerArguments:
     request_timeout: int = field(
         default=99999,
         metadata={'help': 'Timeout for requests to VLLM server.'})
+    api_key: Optional[str] = field(
+        default=None,
+        metadata={
+            'help':
+            'API key for authentication (can also use OPENAI_API_KEY env var).'
+        })
+    organization: Optional[str] = field(
+        default=None, metadata={'help': 'Organization ID for API usage.'})
 
     def __post_init__(self) -> None:
         """
@@ -379,6 +437,19 @@ class ServerArguments:
         if self.request_timeout <= 0:
             raise ValueError(f'Request timeout must be a positive integer, '
                              f'but got {self.request_timeout}.')
+        if self.max_retries < 0:
+            raise ValueError(f'Max retries must be non-negative, '
+                             f'but got {self.max_retries}.')
+        # Validate URL format
+        if not self.base_url.startswith(('http://', 'https://')):
+            raise ValueError(f'Base URL must start with http:// or https://, '
+                             f'but got {self.base_url}')
+
+        # Check for API key from environment if not provided
+        if self.api_key is None and 'OPENAI_API_KEY' in os.environ:
+            self.api_key = os.environ['OPENAI_API_KEY']
+            logger.info(
+                'Using API key from OPENAI_API_KEY environment variable')
 
 
 @dataclass
@@ -525,6 +596,12 @@ class EvalTaskArguments:
         task_name (str): Name of the evaluation task to run.
             Must be one of: ['math_opensource/aime24', 'math_opensource/aime25',
                            'livecodebench', 'ifeval']
+        input_key (str): Key for input text in dataset.
+        label_key (str): Key for target/label text in dataset.
+        response_key (str): Key for model generated text.
+        timeout (int): Timeout for LLM inference in seconds.
+        save_intermediate (bool): Whether to save intermediate results.
+        resume_from_checkpoint (Optional[str]): Path to checkpoint to resume from.
     """
     input_path: str = field(
         metadata={
@@ -565,11 +642,16 @@ class EvalTaskArguments:
         """
         if not self.input_path:
             raise ValueError('input_path is required')
+        if not Path(self.input_path).exists():
+            raise ValueError(f'input_path {self.input_path} does not exist')
         if not self.cache_path:
             raise ValueError('cache_path is required')
         if self.max_workers <= 0:
             raise ValueError(
                 f'max_workers must be positive, got {self.max_workers}')
+        if self.timeout <= 0:
+            raise ValueError(f'timeout must be positive, got {self.timeout}')
+
         valid_tasks = [
             'math_opensource/aime24', 'math_opensource/aime25',
             'livecodebench', 'ifeval'
@@ -578,6 +660,9 @@ class EvalTaskArguments:
             raise ValueError(
                 f'task_name must be one of {valid_tasks}, got {self.task_name}'
             )
+
+        # Create cache directory if it doesn't exist
+        Path(self.cache_path).mkdir(parents=True, exist_ok=True)
 
 
 # Example usage
@@ -596,19 +681,15 @@ def main() -> None:
         ValueError: If required arguments are missing or invalid
     """
     # Create parser instances for different argument types
-    parser = HfArgumentParser((EvalTaskArguments, ))
+    parser = HfArgumentParser(OfflineInferArguments)
 
     # Parse command-line arguments into respective dataclasses
-    eval_args = parser.parse_args_into_dataclasses()
+    eval_args, = parser.parse_args_into_dataclasses()
 
     # Log the parsed arguments
     logger.info('Initializing with parsed command line arguments...')
     logger.info('\n=== Evaluation Task Arguments ===')
     logger.info(json.dumps(dataclasses.asdict(eval_args), indent=2))
-
-    # Example of how to use the parsed arguments
-    logger.info(f'\nConfigured for task: {eval_args.task_name}')
-    logger.info(f'Processing input file: {eval_args.input_path}')
 
 
 if __name__ == '__main__':
