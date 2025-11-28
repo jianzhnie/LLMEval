@@ -176,7 +176,7 @@ get_remote_device_count() {
         echo "0"
         return 0
     fi
-    
+
     # 通过echo返回实际的设备数量
     echo "$device_count"
 }
@@ -1281,7 +1281,11 @@ main() {
     local ready_instance_count=${#available_nodes[@]}
     local ready_node_count=0
     if [[ $ready_instance_count -gt 0 ]]; then
-        ready_node_count=$(printf "%s\n" "${available_nodes[@]}" | sort -u | wc -l | tr -d ' ')
+        mapfile -t ready_nodes < <(printf "%s\n" "${available_nodes[@]}" | sort -u)
+        ready_node_count=${#ready_nodes[@]}
+    else
+        # 如果没有可用节点，确保数组为空
+        ready_nodes=()
     fi
     log_info "   - 成功实例数量: ${ready_instance_count}/${total_services_expected}"
     log_info "   - 可用节点数量: ${ready_node_count}/${configured_node_count}"
@@ -1295,7 +1299,7 @@ main() {
     fi
 
     # 更新全局 NODES 和 PORTS 数组为可用节点
-    NODES=("${available_nodes[@]}")
+    NODES=("${ready_nodes[@]}")
     PORTS=("${available_ports[@]}")
     INSTANCE_IDS=("${available_instance_ids[@]}")
 
