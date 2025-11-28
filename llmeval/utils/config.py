@@ -397,8 +397,7 @@ class OnlineInferArguments(DataArguments, PromptArguments, GenerationArguments,
         """
         Validate all inherited arguments and handle greedy decoding.
 
-        When temperature is 0, automatically sets do_sample=False and top_p=1.0
-        for greedy decoding behavior.
+        When temperature is 0, automatically sets do_sample=False for greedy decoding behavior.
         """
         # Only validate what online mode needs; no vLLM engine args
         DataArguments.__post_init__(self)
@@ -408,9 +407,8 @@ class OnlineInferArguments(DataArguments, PromptArguments, GenerationArguments,
 
         if self.temperature <= 0.0:
             self.do_sample = False
-            self.top_p = 1.0
             logger.warning(
-                'Temperature is 0, setting do_sample=False and top_p=1.0 '
+                'Temperature is 0, setting do_sample=False'
                 'for greedy decoding.')
 
 
@@ -430,8 +428,7 @@ class OfflineInferArguments(DataArguments, PromptArguments,
         """
         Validate all inherited arguments and handle greedy decoding.
 
-        When temperature is 0, automatically sets do_sample=False and top_p=1.0
-        for greedy decoding behavior.
+        When temperature is 0, automatically sets do_sample=False for greedy decoding behavior.
         """
         DataArguments.__post_init__(self)
         PromptArguments.__post_init__(self)
@@ -440,9 +437,8 @@ class OfflineInferArguments(DataArguments, PromptArguments,
 
         if self.temperature <= 0.0:
             self.do_sample = False
-            self.top_p = 1.0
             logger.warning(
-                'Temperature is 0, setting do_sample=False and top_p=1.0 '
+                'Temperature is 0, setting do_sample=False '
                 'for greedy decoding.')
 
 
@@ -497,7 +493,7 @@ class VerifierInferArguments(DataArguments, PromptArguments,
             self.do_sample = False
             self.top_p = 1.0
             logger.warning(
-                'Temperature is 0, setting do_sample=False and top_p=1.0 '
+                'Temperature is 0, setting do_sample=False'
                 'for greedy decoding.')
 
         # Validate and resolve verifier prompt
