@@ -189,8 +189,14 @@ verify_node_device_capacity() {
     local required_devices=$((INSTANCES_PER_NODE * NUM_GPUS))
 
     # 从远程节点获取实际的设备数量
-    local device_count=$(get_remote_device_count "$node")
+    local device_count_raw
+    device_count_raw=$(get_remote_device_count "$node")
 
+    # get_remote_device_count 可能返回空或非数字，统一兜底为 0
+    if ! [[ "$device_count_raw" =~ ^[0-9]+$ ]]; then
+        device_count_raw=0
+    fi
+    local device_count=$device_count_raw
     local device_count=$((device_count * 2))
 
     # 确保所有NPU都空闲
@@ -257,10 +263,12 @@ readonly MAX_WORKERS=${MAX_WORKERS:-128}               # 客户端每进程内�
 # =======================================================
 
 # 节点和端口数组（在 main 函数中初始化）
-declare -a NODES       # 存储节点地址
-declare -a PORTS       # 存储对应的服务端口
-declare -a FILES       # 存储发现的数据文件列表（文件名）
-declare -a INSTANCE_IDS  # 存储实例编号（用于日志/远程设备绑定）
+declare -a NODES                    # 存储节点地址
+declare -a PORTS                    # 存储对应的服务端口
+declare -a FILES                    # 存储发现的数据文件列表（文件名）
+declare -a READY_INSTANCE_NODES     # 存储已就绪实例所属节点（按实例展开）
+declare -a READY_INSTANCE_PORTS     # 存储已就绪实例端口
+declare -a READY_INSTANCE_IDS       # 存储已就绪实例在节点内的 index
 
 # =======================================================
 #                  工具函数区域
@@ -1102,8 +1110,7 @@ wait_for_batch_completion_and_cleanup() {
 # Returns:
 #   None
 distribute_and_launch_jobs() {
-    local total_nodes=${#NODES[@]}
-    local total_instances=$((total_nodes * INSTANCES_PER_NODE))
+    local total_instances=${#READY_INSTANCE_PORTS[@]}
 
     if [[ $total_instances -eq 0 ]]; then
         handle_error 1 "没有可用实例可供执行推理任务"
@@ -1116,32 +1123,30 @@ distribute_and_launch_jobs() {
 
     # 2. 为每个节点启动对应的推理任务（并行）
     local pids=()
-    for ((i = 0; i < total_nodes; i++)); do
-        local node="${NODES[i]}"
-        for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
-            local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
-            local port="${PORTS[port_idx]}"
-            # 注意: vLLM OpenAI 兼容层 API 通常在 /v1 路径下
-            local base_url="http://127.0.0.1:${port}/v1"
-            local model_name="${SERVED_MODEL_NAME}"
+    for ((i = 0; i < total_instances; i++)); do
+        local node="${READY_INSTANCE_NODES[i]}"
+        local port="${READY_INSTANCE_PORTS[i]}"
+        local instance_idx="${READY_INSTANCE_IDS[i]}"
+        # 注意: vLLM OpenAI 兼容层 API 通常在 /v1 路径下
+        local base_url="http://127.0.0.1:${port}/v1"
+        local model_name="${SERVED_MODEL_NAME}"
 
-            # 获取分配给当前实例的文件列表
-            local instance_files_var="INSTANCE_ASSIGNMENTS_$port_idx"
-            local -n instance_files_ref="$instance_files_var"
+        # 获取分配给当前实例的文件列表
+        local instance_files_var="INSTANCE_ASSIGNMENTS_$i"
+        local -n instance_files_ref="$instance_files_var"
 
             # 检查文件是否分配 (如果 assign_data_to_instances 中有节点没有分配到文件，这里跳过)
-            if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
-                log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 未分配到文件，跳过"
-                continue
-            fi
-            # 获取分配给当前实例的文件列表
-            log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 分配到 ${#instance_files_ref[@]} 个文件"
-            # 在本地后台启动任务提交批次
-            (
-                run_task_batch_parallel "$node" "$port" "$model_name" "$base_url" "$instance_idx" "${instance_files_ref[@]}"
-            ) &
-            pids+=($!)
-        done
+        if [[ ${#instance_files_ref[@]} -eq 0 ]]; then
+            log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 未分配到文件，跳过"
+            continue
+        fi
+        # 获取分配给当前实例的文件列表
+        log_info "节点 ${node} 实例 ${instance_idx} (端口 ${port}) 分配到 ${#instance_files_ref[@]} 个文件"
+        # 在后台启动任务提交批次
+        (
+            run_task_batch_parallel "$node" "$port" "$model_name" "$base_url" "$instance_idx" "${instance_files_ref[@]}"
+        ) &
+        pids+=($!)
     done
 
     # 3. 等待所有节点的任务提交完成（不等待远端具体推理完成）
@@ -1244,9 +1249,9 @@ main() {
     log_info "正在检查各节点服务状态..."
 
     # 初始化可用节点和失败节点列表
-    local -a available_nodes=()
-    local -a available_ports=()
-    local -a available_instance_ids=()
+    READY_INSTANCE_NODES=()
+    READY_INSTANCE_PORTS=()
+    READY_INSTANCE_IDS=()
     local -a failed_nodes=()
     local -a failed_ports=()
     local -a failed_instance_ids=()
@@ -1264,9 +1269,9 @@ main() {
 
             if [[ -f "$status_file" ]]; then
                 log_info "✅ 节点 ${node} 实例 ${instance_idx} (端口: ${port}) 服务就绪"
-                available_nodes+=("${node}")
-                available_ports+=("${port}")
-                available_instance_ids+=("${instance_idx}")
+                READY_INSTANCE_NODES+=("${node}")
+                READY_INSTANCE_PORTS+=("${port}")
+                READY_INSTANCE_IDS+=("${instance_idx}")
             else
                 log_warn "❌ 节点 ${node} 实例 ${instance_idx} (端口: ${port}) 服务未就绪"
                 failed_nodes+=("${node}")
@@ -1278,10 +1283,10 @@ main() {
 
     # 输出部署结果统计
     log_info "📊 服务部署结果统计:"
-    local ready_instance_count=${#available_nodes[@]}
+    local ready_instance_count=${#READY_INSTANCE_PORTS[@]}
     local ready_node_count=0
     if [[ $ready_instance_count -gt 0 ]]; then
-        mapfile -t ready_nodes < <(printf "%s\n" "${available_nodes[@]}" | sort -u)
+        mapfile -t ready_nodes < <(printf "%s\n" "${READY_INSTANCE_NODES[@]}" | sort -u)
         ready_node_count=${#ready_nodes[@]}
     else
         # 如果没有可用节点，确保数组为空
@@ -1298,17 +1303,12 @@ main() {
         log_warn "请检查这些节点的日志文件: ${LOG_DIR}/${API_SERVER_LOG_PREFIX}<节点名>.log"
     fi
 
-    # 更新全局 NODES 和 PORTS 数组为可用节点
-    NODES=("${ready_nodes[@]}")
-    PORTS=("${available_ports[@]}")
-    INSTANCE_IDS=("${available_instance_ids[@]}")
-
     # 检查是否有可用节点
-    if [[ ${#NODES[@]} -eq 0 ]]; then
+    if [[ ${#READY_INSTANCE_PORTS[@]} -eq 0 ]]; then
         handle_error 1 "❌ 没有任何节点成功启动服务，无法继续执行推理任务"
     fi
 
-    local actual_total_instances=$((${#NODES[@]} * INSTANCES_PER_NODE))
+    local actual_total_instances=${#READY_INSTANCE_PORTS[@]}
     log_info "将使用 ${actual_total_instances} 个可用实例 (覆盖 ${ready_node_count} 个节点) 进行推理"
 
     # 步骤6: 使用可用节点分发并启动推理任务
