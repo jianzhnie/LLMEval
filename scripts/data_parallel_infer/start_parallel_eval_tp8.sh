@@ -2,22 +2,21 @@
 set -euo pipefail
 
 # Absolute paths
-AUTO_INFER_SH="/home/jianzhnie/llmtuner/llm/LLMEval/scripts/data_parallel_infer/auto_model_infer_tp4.sh"
+AUTO_INFER_SH="/home/jianzhnie/llmtuner/llm/LLMEval/scripts/data_parallel_infer/auto_model_infer_tp8.sh"
 DEFAULT_NODE_LIST="/home/jianzhnie/llmtuner/llm/LLMEval/available_nodes.txt"
 
 # Override below as needed (or export before running)
 export SSH_USER="${SSH_USER:-jianzhnie}"
 
 # Model/engine
-export MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/models/Qwen/Qwen2.5-7B}"
-export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-2}"
-export INSTANCES_PER_NODE="${INSTANCES_PER_NODE:-4}"
+export MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/mindspeed/models/mindspore/hf_sft_packing_0703_step6476}"
+export NUM_GPUS="${NUM_GPUS:-8}"
 export MEMORY_UTILIZATION="${MEMORY_UTILIZATION:-0.9}"
-export MAX_MODEL_LEN="${MAX_MODEL_LEN:-2048}"
-export MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
-export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-51200}"
-export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Qwen2.5-7B-TP2}"
-export N_SAMPLES="${N_SAMPLES:-8}"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+export MAX_NUM_SEQS="${MAX_NUM_SEQS:-1024}"
+export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-512000}"
+export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-PCLReasoner-v1-aime25}"
+export N_SAMPLES="${N_SAMPLES:-32}"
 
 # Project
 export PROJECT_DIR="${PROJECT_DIR:-/home/jianzhnie/llmtuner/llm/LLMEval}"
@@ -30,7 +29,7 @@ export OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${SERVED_MODEL_NAME}}"
 export LOG_DIR="${LOG_DIR:-${OUTPUT_ROOT}/data_paprallel_logs/${SERVED_MODEL_NAME}}"
 
 # Dataset
-export DATASET_DIR="${DATASET_DIR:-${PROJECT_DIR}/data/clone_datasets}"
+export DATASET_DIR="${DATASET_DIR:-${PROJECT_DIR}/data/test_data}"
 export DATASET_GLOB="${DATASET_GLOB:-aime*}"
 export INPUT_KEY="${INPUT_KEY:-prompt}"                            # 输入字段键名
 
@@ -65,8 +64,7 @@ echo "Starting distributed inference:"
 echo "  Nodes file: $NODE_LIST_FILE"
 echo "  Model: ${MODEL_PATH}"
 echo "  Served name: ${SERVED_MODEL_NAME}"
-echo "  Tensor parallel size(TP): ${TENSOR_PARALLEL_SIZE}"
-echo "  Memoary Utilization:  ${MEMORY_UTILIZATION}"
+echo "  GPUs per node (TP): ${NUM_GPUS}"
 echo "  Concurrency: MAX_NUM_SEQS=${MAX_NUM_SEQS}, MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS}"
 echo "  Output dir: ${OUTPUT_DIR}"
 echo "  Logs dir: ${LOG_DIR}"

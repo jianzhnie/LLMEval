@@ -13,7 +13,6 @@ export MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/mindspeed/models
 export NUM_GPUS="${NUM_GPUS:-8}"
 export MEMORY_UTILIZATION="${MEMORY_UTILIZATION:-0.9}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
-# export MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
 export MAX_NUM_SEQS="${MAX_NUM_SEQS:-1024}"
 export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-512000}"
 export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-PCL-Reasoner-57k}"
