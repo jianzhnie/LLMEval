@@ -118,8 +118,8 @@ readonly SSH_USER="${SSH_USER:-$(whoami)}"
 readonly MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/mindspeed/models/mindspore/hf_sft_packing_0703_step6476}"
 
 # GPU/ASCEND 资源配置
-readonly TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-8}    # 张量并行大小，支持 1/2/4/8
-readonly INSTANCES_PER_NODE=${INSTANCES_PER_NODE:-1}        # 每节点部署实例数（2实例）
+readonly TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-8}    # 张量并行大小，支持 TP=8
+readonly INSTANCES_PER_NODE=${INSTANCES_PER_NODE:-1}        # 每节点部署实例数（灵活配置）
 readonly MEMORY_UTILIZATION=${MEMORY_UTILIZATION:-0.9}      # 显存利用率 (0.0 - 1.0)
 readonly MAX_MODEL_LEN=${MAX_MODEL_LEN:-65536}              # 最大上下文长度
 # 针对 Ascend 场景中 npu-smi 返回值与可用设备数量不一致的问题，允许引入修正因子
@@ -278,6 +278,8 @@ declare -a READY_INSTANCE_IDS       # 存储已就绪实例在节点内的 index
 # =======================================================
 
 # 打印使用帮助信息
+# 参数：无
+# 返回值：无（直接退出）
 usage() {
     cat << EOF
 用法: $0 [NODE_LIST_FILE]
@@ -774,6 +776,7 @@ check_and_prepare_remote_dirs() {
 # 参数:
 #   $1: 节点地址 - 远程服务器的域名或IP
 #   $2: 服务端口 - 服务监听的端口号
+#   $3: 实例ID - 实例编号 (0-based)
 # 返回值:
 #   0: 部署命令发送成功
 #   1: 节点验证或命令发送失败
@@ -808,7 +811,6 @@ deploy_model_service() {
     #   --tensor-parallel-size      使用多卡并行
     #   --gpu-memory-utilization    控制显存水位（避免 OOM）
     #   --max-model-len             控制上下文长度
-    #   --dtype float32
     # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
     local vllm_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
@@ -825,7 +827,7 @@ deploy_model_service() {
             > '${log_file}' 2>&1 &"
 
     # 4. 在后台启动服务
-    log_info "🔄 执行部署命令到节点 ${node}"
+    log_info "🔄 执行部署命令到节点 ${node}, 实例 ${instance_id}, 端口 ${port}"
     ssh_run "$node" "$vllm_cmd" &
     log_info "✅ 节点 ${node} vllm 模型部署启动命令发送成功"
 }
@@ -944,7 +946,6 @@ wait_for_services() {
 
     log_warn "⏰ 超时: 服务在 ${MAX_WAIT_TIME} 秒内未完全就绪，将继续使用已就绪的服务"
 }
-
 
 # 将数据文件按轮询方式分配到各个实例
 # Args:
@@ -1215,10 +1216,9 @@ distribute_and_launch_jobs() {
             log_info "节点 ${node} 未分配到文件，跳过"
             continue
         fi
-
         # 获取分配给当前实例的文件列表
         log_info "节点 ${node} 分配到 ${#instance_files_ref[@]} 个文件"
-        # 在本地后台启动任务提交批次
+        # 在后台启动任务提交批次
         (
             run_task_batch_parallel "$node" "$port" "$model_name" "$base_url" "${instance_files_ref[@]}"
         ) &
@@ -1231,6 +1231,7 @@ distribute_and_launch_jobs() {
     fi
     log_info "✅ 所有推理任务已启动，进入远端任务监控阶段, 请查看推理结果的路径: ${OUTPUT_DIR}"
 }
+
 
 
 # =======================================================
@@ -1306,7 +1307,7 @@ main() {
         local port="${PORTS[i]}"
         local instance_id=0
         # 在本地后台部署，加速并发
-        deploy_model_service "$node" "$port"  "$instance_id" &
+        deploy_model_service "$node" "$port" "$instance_id" &
     done
 
     # 等待所有部署命令发送完成 (即使失败，deploy_model_service 也会返回)
@@ -1371,7 +1372,7 @@ main() {
 
     log_info "📊 部署统计:"
     log_info "   - 节点总数: ${#NODES[@]}"
-    log_info "   - 可用节点: ${#available_nodes[@]}"
+    log_info "   - 可用节点: ${#READY_INSTANCE_NODES[@]}"
     log_info "   - 数据文件: ${#FILES[@]}"
     log_info "   - 输出目录: ${OUTPUT_DIR}"
     log_info "   - 日志目录: ${LOG_DIR}"

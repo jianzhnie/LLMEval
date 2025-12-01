@@ -1070,7 +1070,6 @@ run_task_batch_parallel() {
 
     # 将所有命令组合成一个命令字符串并执行
     if [[ ${#commands[@]} -gt 0 ]]; then
-        # 用分号连接所有命令
         local combined_cmd=$(printf "%s " "${commands[@]}")
         log_info "🚀 节点 ${node}: ${instance_idx}) .. 提交  ${#commands[@]} 个 OpenAI API Server 推理任务..."
         ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
@@ -1348,4 +1347,3 @@ main() {
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
-      
