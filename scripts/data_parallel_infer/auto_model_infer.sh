@@ -119,7 +119,7 @@ readonly MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/mindspeed/mode
 
 # GPU/ASCEND 资源配置
 readonly TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-4}    # 张量并行大小，支持 1/2/4/8
-readonly INSTANCES_PER_NODE=${INSTANCES_PER_NODE:-2}        # 每节点部署实例数（2实例）
+readonly INSTANCES_PER_NODE=${INSTANCES_PER_NODE:-2}        # 每节点部署实例数（灵活配置）
 readonly MEMORY_UTILIZATION=${MEMORY_UTILIZATION:-0.9}      # 显存利用率 (0.0 - 1.0)
 readonly MAX_MODEL_LEN=${MAX_MODEL_LEN:-65536}              # 最大上下文长度
 # 针对 Ascend 场景中 npu-smi 返回值与可用设备数量不一致的问题，允许引入修正因子
@@ -548,7 +548,7 @@ validate_config() {
     # 参数名: 最小值: 最大值: 描述
     local param_checks=(
         "TENSOR_PARALLEL_SIZE:1:8:GPU数量"
-        "INSTANCES_PER_NODE:1:4:每节点实例数"
+        "INSTANCES_PER_NODE:1:8:每节点实例数"
         "N_SAMPLES:1:100:采样次数"
         "MAX_NUM_SEQS:1:16384:并发序列数"
         "MAX_NUM_BATCHED_TOKENS:512:1048576:批处理Token数"
@@ -579,8 +579,10 @@ validate_config() {
         handle_error 1 "该脚本仅支持 TENSOR_PARALLEL_SIZE ∈ {${supported_tp_sizes[*]}}，当前为 ${TENSOR_PARALLEL_SIZE}"
     fi
 
-    if [[ "$INSTANCES_PER_NODE" -ne 2 ]]; then
-        handle_error 1 "该脚本要求单节点部署 2 个实例，当前 INSTANCES_PER_NODE=${INSTANCES_PER_NODE}"
+    # 验证 TENSOR_PARALLEL_SIZE * INSTANCES_PER_NODE = 8
+    local total_devices=$((TENSOR_PARALLEL_SIZE * INSTANCES_PER_NODE))
+    if [[ $total_devices -ne 8 ]]; then
+        handle_error 1 "TENSOR_PARALLEL_SIZE (${TENSOR_PARALLEL_SIZE}) * INSTANCES_PER_NODE (${INSTANCES_PER_NODE}) 必须等于 8，当前乘积为: ${total_devices}"
     fi
 
     # 验证浮点数参数 (使用 bc 进行浮点比较)
