@@ -789,8 +789,8 @@ deploy_model_service() {
     local node="$1"
     local port="$2"
     local instance_id="$3"
-    local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
     local devices=$(get_device_visibility "$instance_id")
+    local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
 
     log_info "🚀 正在节点 ${node} 上部署模型服务 (端口: ${port}, TP: ${TENSOR_PARALLEL_SIZE}, 内存: ${MEMORY_UTILIZATION})"
 
@@ -823,6 +823,9 @@ deploy_model_service() {
             --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
             --max-model-len ${MAX_MODEL_LEN} \
+            --max-num-seqs ${MAX_NUM_SEQS} \
+            --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
+            --disable-log-requests ${DISABLE_LOG_REQUESTS} \
             --port ${port} \
             > '${log_file}' 2>&1 &"
 
