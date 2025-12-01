@@ -42,7 +42,7 @@
 #   4. 规划好日志与输出管理
 #
 # 配置建议：
-#   1. NUM_GPUS: 根据实际显卡数量设置
+#   1. TENSOR_PARALLEL_SIZE: 根据实际显卡数量设置
 #   2. MAX_NUM_SEQS: 结合显存大小调整
 #   3. MAX_JOBS: 依据系统资源调整并发数
 #   4. HEALTH_TIMEOUT: 根据网络情况调整检查超时
@@ -96,10 +96,12 @@ fi
 # - ServerAliveCountMax=3: 最多允许3次保活失败
 # - ControlMaster=auto: 启用连接复用，提高性能
 # - ControlPersist=60s: 保持连接60秒，减少重连开销
+# 为避免行内注释破坏多行字符串，将注释前移
+# - BatchMode=yes: 禁止交互提示，便于自动化
 readonly SSH_OPTS="-o StrictHostKeyChecking=no \
                    -o UserKnownHostsFile=/dev/null \
                    -o LogLevel=ERROR \
-                   -o BatchMode=yes \   # 非交互模式，避免意外提示阻塞
+                   -o BatchMode=yes \
                    -o ConnectTimeout=5 \
                    -o ServerAliveInterval=30 \
                    -o ServerAliveCountMax=3 \
@@ -116,23 +118,96 @@ readonly SSH_USER="${SSH_USER:-$(whoami)}"
 readonly MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/mindspeed/models/mindspore/hf_sft_packing_0703_step6476}"
 
 # GPU/ASCEND 资源配置
-readonly NUM_GPUS=${NUM_GPUS:-8}                     # 张量并行大小（单实例用光整机多卡）
-readonly MEMORY_UTILIZATION=${MEMORY_UTILIZATION:-0.9} # 显存利用率 (0.0 - 1.0)
-readonly MAX_MODEL_LEN=${MAX_MODEL_LEN:-65536}        # 最大上下文长度
+readonly TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-8}    # 张量并行大小，支持 1/2/4/8
+readonly INSTANCES_PER_NODE=${INSTANCES_PER_NODE:-1}        # 每节点部署实例数（2实例）
+readonly MEMORY_UTILIZATION=${MEMORY_UTILIZATION:-0.9}      # 显存利用率 (0.0 - 1.0)
+readonly MAX_MODEL_LEN=${MAX_MODEL_LEN:-65536}              # 最大上下文长度
+# 针对 Ascend 场景中 npu-smi 返回值与可用设备数量不一致的问题，允许引入修正因子
+readonly DEVICE_COUNT_MULTIPLIER=${DEVICE_COUNT_MULTIPLIER:-2}
 
 # vLLM 高并发关键参数（按需调整；需结合显存与上下文长度）
 # - MAX_NUM_SEQS: 同时并发处理的序列数（越大越能吞吐，受显存影响较大）
 # - MAX_NUM_BATCHED_TOKENS: 动态批次内总 token 上限（控制显存与吞吐权衡）
 # 注：两者不宜同时设过大，推荐根据模型大小按 1-2 次试跑观测 GPU 利用率后调整
-readonly MAX_NUM_SEQS=${MAX_NUM_SEQS:-1024}            # 同时并发处理的序列数
-readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768} # 动态批次内总 token 上限
+readonly MAX_NUM_SEQS=${MAX_NUM_SEQS:-1024}                         # 同时并发处理的序列数
+readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768}    # 动态批次内最大 token 数
 
 # 其他推理参数
 readonly N_SAMPLES=${N_SAMPLES:-8}                   # 每条样本的重复采样次数
 readonly SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-PCL-Reasoner}"
 
-# Ascend 设备可见性（如使用 GPU 可忽略；若为 CUDA 可替换为 CUDA_VISIBLE_DEVICES）
-readonly ASCEND_VISIBLE="$(seq -s, 0 $((NUM_GPUS-1)))"
+# 计算每个实例的设备可见性
+get_device_visibility() {
+    local instance_id=$1  # 0-based
+    local start_idx=$((instance_id * TENSOR_PARALLEL_SIZE))
+    # Check if we have enough devices available
+    local end_idx=$((start_idx + TENSOR_PARALLEL_SIZE - 1))
+
+    # Just in case we're using ASCEND devices, we should check the actual available devices
+    # This is a more robust approach than just assuming sequential device IDs
+    seq -s, $start_idx $end_idx
+}
+
+get_remote_device_count() {
+    local node=$1
+    # 使用ssh-keyscan防止"Host key verification failed"错误
+    ssh-keyscan -H "$node" >/dev/null 2>&1
+
+    # 尝试连接并执行命令，同时忽略ssh警告
+    local output
+    output=$(ssh -q -o BatchMode=yes -o ConnectTimeout=10 "$node" "npu-smi info 2>/dev/null" 2>/dev/null)
+
+    # 如果ssh命令失败（例如连接超时），则直接判定为不可用
+    if [ $? -ne 0 ]; then
+        echo "🔴 节点 $node: 连接失败或命令执行失败"
+        echo "0"
+        return 0
+    fi
+
+    # 检查输出中是否包含"No running processes found in NPU"
+    # 我们可以通过统计"No running processes found"的行数来判断所有卡是否都空闲
+    local device_count
+    device_count=$(echo "$output" | grep -c "No running processes found in NPU")
+
+    # 检查是否有错误信息
+    local error_lines
+    error_lines=$(echo "$output" | grep -c "Error")
+
+    if [ "$error_lines" -gt 0 ]; then
+        echo "❌ 节点 $node: NPU命令执行出错"
+        echo "0"
+        return 0
+    fi
+
+    # 通过echo返回实际的设备数量
+    echo "$device_count"
+}
+
+# 验证节点的设备数量是否满足实例配置需求
+verify_node_device_capacity() {
+    local node=$1
+
+    # 根据参数决定NPU卡数量
+    local required_devices=$((INSTANCES_PER_NODE * TENSOR_PARALLEL_SIZE))
+
+    # 从远程节点获取实际的设备数量
+    local device_count_raw
+    device_count_raw=$(get_remote_device_count "$node")
+
+    # get_remote_device_count 可能返回空或非数字，统一兜底为 0
+    if ! [[ "$device_count_raw" =~ ^[0-9]+$ ]]; then
+        device_count_raw=0
+    fi
+
+    # 根据硬件/驱动输出情况应用修正系数（Ascend 910B 常见为 2）
+    local device_count=$((device_count_raw * DEVICE_COUNT_MULTIPLIER))
+
+    # 确保所有NPU都空闲
+    if [[ -z "$device_count" || "$device_count" -lt "$required_devices" ]]; then
+        handle_error 1 "节点 ${node} 可用设备数量 (${device_count:-0}) 少于运行 ${INSTANCES_PER_NODE} 个实例所需的 ${required_devices} 张设备 (TP=${TENSOR_PARALLEL_SIZE})"
+    fi
+    log_info "✅ 节点 ${node} 可用设备数 ${device_count} 满足 ${INSTANCES_PER_NODE} 实例 * TP=${TENSOR_PARALLEL_SIZE} 的需求"
+}
 
 # =======================================================
 #                  vLLM API Server 运行参数
@@ -185,16 +260,18 @@ readonly DATASET_GLOB="${DATASET_GLOB:-top_100K_final_verified_samples_shard*}"
 readonly INPUT_KEY="${INPUT_KEY:-question}"           # 输入字段键名
 readonly SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
 readonly MAX_WORKERS=${MAX_WORKERS:-128}               # 客户端每进程内部的线程/协程并发
-readonly MAX_CONCURRENT_TASKS_PER_NODE=${MAX_CONCURRENT_TASKS_PER_NODE:-8} # 单节点最大并发任务数
 
 # =======================================================
 #                  全局变量声明
 # =======================================================
 
 # 节点和端口数组（在 main 函数中初始化）
-declare -a NODES       # 存储节点地址
-declare -a PORTS       # 存储对应的服务端口
-declare -a FILES       # 存储发现的数据文件列表（文件名）
+declare -a NODES                    # 存储节点地址
+declare -a PORTS                    # 存储对应的服务端口
+declare -a FILES                    # 存储发现的数据文件列表（文件名）
+declare -a READY_INSTANCE_NODES     # 存储已就绪实例所属节点（按实例展开）
+declare -a READY_INSTANCE_PORTS     # 存储已就绪实例端口
+declare -a READY_INSTANCE_IDS       # 存储已就绪实例在节点内的 index
 
 # =======================================================
 #                  工具函数区域
@@ -213,7 +290,8 @@ usage() {
 可用环境变量（可覆盖默认值）:
   SSH_USER               远程 SSH 用户名（默认：当前用户）
   MODEL_PATH             模型文件路径
-  NUM_GPUS               GPU/ASCEND 数量（默认：8）
+  TENSOR_PARALLEL_SIZE   张量并行卡数，支持 {1,2,4,8}（默认：4）
+  INSTANCES_PER_NODE     每节点实例数（默认：2）
   MEMORY_UTILIZATION     显存利用率（默认：0.9）
   MAX_MODEL_LEN          最大上下文长度（默认：65536）
   MAX_NUM_SEQS           vLLM 动态批并发序列数（默认：1024）
@@ -227,11 +305,12 @@ usage() {
   DISABLE_LOG_REQUESTS   是否关闭请求日志（默认：1）
   EXTRA_ENGINE_ARGS      附加引擎参数字符串（默认：空）
   MAX_CONCURRENT_TASKS_PER_NODE 单节点最大并发任务数（默认：8）
+  DEVICE_COUNT_MULTIPLIER npu-smi 统计修正因子（默认：2）
   DEBUG                  启用调试模式（默认：0）
 
 示例:
   $0
-  SSH_USER=root NUM_GPUS=4 MAX_NUM_SEQS=2048 $0 ./nodes.txt
+  SSH_USER=root TENSOR_PARALLEL_SIZE=4 MAX_NUM_SEQS=2048 $0 ./nodes.txt
   DEBUG=1 $0
 EOF
     exit 1
@@ -466,7 +545,8 @@ validate_config() {
     # 验证数值参数范围
     # 参数名: 最小值: 最大值: 描述
     local param_checks=(
-        "NUM_GPUS:1:8:GPU数量"
+        "TENSOR_PARALLEL_SIZE:1:8:GPU数量"
+        "INSTANCES_PER_NODE:1:4:每节点实例数"
         "N_SAMPLES:1:100:采样次数"
         "MAX_NUM_SEQS:1:16384:并发序列数"
         "MAX_NUM_BATCHED_TOKENS:512:1048576:批处理Token数"
@@ -618,7 +698,6 @@ check_node_port_alignment() {
     log_info "节点和端口配置检查通过"
 }
 
-
 # 在第一个节点上发现数据集文件
 # Args:
 #   None
@@ -673,6 +752,9 @@ check_and_prepare_remote_dirs() {
             exit 1
         fi
 
+        # 确保单节点资源满足 INSTANCES_PER_NODE * TENSOR_PARALLEL_SIZE 的部署要求
+        verify_node_device_capacity "$node"
+
         # 创建目录，清理旧的状态/日志文件
         local prep_cmd="mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && \
             rm -rf '${LOG_DIR}/status' && mkdir -p '${LOG_DIR}/status' && \
@@ -703,10 +785,11 @@ check_and_prepare_remote_dirs() {
 deploy_model_service() {
     local node="$1"
     local port="$2"
-    # Bash 技巧: 使用 ${variable//pattern/replacement} 替换所有 . 为 _ 以避免文件名问题
+    local instance_id="$3"
     local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
+    local devices=$(get_device_visibility "$instance_id")
 
-    log_info "🚀 正在节点 ${node} 上部署模型服务 (端口: ${port}, TP: ${NUM_GPUS}, 内存: ${MEMORY_UTILIZATION})"
+    log_info "🚀 正在节点 ${node} 上部署模型服务 (端口: ${port}, TP: ${TENSOR_PARALLEL_SIZE}, 内存: ${MEMORY_UTILIZATION})"
 
     # 1. 节点连通性验证
     if ! validate_node "$node"; then
@@ -729,13 +812,13 @@ deploy_model_service() {
     # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
     local vllm_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
-        export ASCEND_RT_VISIBLE_DEVICES='${ASCEND_VISIBLE}' && \
+        export ASCEND_RT_VISIBLE_DEVICES='${devices}' && \
         nohup python -m vllm.entrypoints.openai.api_server \
             --model '${MODEL_PATH}' \
             --trust-remote-code \
             --enforce-eager \
             --served-model-name '${SERVED_MODEL_NAME}' \
-            --tensor-parallel-size ${NUM_GPUS} \
+            --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
             --max-model-len ${MAX_MODEL_LEN} \
             --port ${port} \
@@ -1103,7 +1186,11 @@ wait_for_batch_completion_and_cleanup() {
 # Returns:
 #   None
 distribute_and_launch_jobs() {
-    local total_instances=${#NODES[@]}
+    local total_instances=${#READY_INSTANCE_PORTS[@]}
+
+    if [[ $total_instances -eq 0 ]]; then
+        handle_error 1 "没有可用实例可供执行推理任务"
+    fi
 
     log_info "开始分发并启动推理任务..."
 
@@ -1113,8 +1200,8 @@ distribute_and_launch_jobs() {
     # 2. 为每个节点启动对应的推理任务（并行）
     local pids=()
     for ((i = 0; i < total_instances; i++)); do
-        local node="${NODES[i]}"
-        local port="${PORTS[i]}"
+        local node="${READY_INSTANCE_NODES[i]}"
+        local port="${READY_INSTANCE_PORTS[i]}"
         # 注意: vLLM OpenAI 兼容层 API 通常在 /v1 路径下
         local base_url="http://127.0.0.1:${port}/v1"
         local model_name="${SERVED_MODEL_NAME}"
@@ -1217,8 +1304,9 @@ main() {
     for ((i = 0; i < ${#NODES[@]}; i++)); do
         local node="${NODES[i]}"
         local port="${PORTS[i]}"
+        local instance_id=0
         # 在本地后台部署，加速并发
-        deploy_model_service "$node" "$port" &
+        deploy_model_service "$node" "$port"  "$instance_id" &
     done
 
     # 等待所有部署命令发送完成 (即使失败，deploy_model_service 也会返回)
@@ -1231,8 +1319,8 @@ main() {
     log_info "正在检查各节点服务状态..."
 
     # 初始化可用节点和失败节点列表
-    local -a available_nodes=()
-    local -a available_ports=()
+    READY_INSTANCE_NODES=()
+    READY_INSTANCE_PORTS=()
     local -a failed_nodes=()
     local -a failed_ports=()
 
@@ -1245,8 +1333,8 @@ main() {
 
         if [[ -f "$status_file" ]]; then
             log_info "✅ 节点 ${node} (端口: ${port}) 服务就绪"
-            available_nodes+=("${node}")
-            available_ports+=("${port}")
+            READY_INSTANCE_NODES+=("${node}")
+            READY_INSTANCE_PORTS+=("${port}")
         else
             log_warn "❌ 节点 ${node} (端口: ${port}) 服务未就绪"
             failed_nodes+=("${node}")
@@ -1256,7 +1344,7 @@ main() {
 
     # 输出部署结果统计
     log_info "📊 服务部署结果统计:"
-    log_info "   - 成功节点数量: ${#available_nodes[@]}/${#NODES[@]}"
+    log_info "   - 成功节点数量: ${#READY_INSTANCE_NODES[@]}/${#NODES[@]}"
 
     if [[ ${#failed_nodes[@]} -gt 0 ]]; then
         log_warn "以下节点未能成功部署:"
@@ -1266,16 +1354,12 @@ main() {
         log_warn "请检查这些节点的日志文件: ${LOG_DIR}/${API_SERVER_LOG_PREFIX}<节点名>.log"
     fi
 
-    # 更新全局 NODES 和 PORTS 数组为可用节点
-    NODES=("${available_nodes[@]}")
-    PORTS=("${available_ports[@]}")
-
     # 检查是否有可用节点
-    if [[ ${#NODES[@]} -eq 0 ]]; then
+    if [[ ${#READY_INSTANCE_NODES[@]} -eq 0 ]]; then
         handle_error 1 "❌ 没有任何节点成功启动服务，无法继续执行推理任务"
     fi
 
-    log_info "将使用 ${#NODES[@]} 个可用节点进行推理"
+    log_info "将使用 ${#READY_INSTANCE_NODES[@]} 个可用节点进行推理"
 
     # 步骤6: 使用可用节点分发并启动推理任务
     distribute_and_launch_jobs
