@@ -560,7 +560,6 @@ class VerifierInferArguments(DataArguments, PromptArguments,
 
         if self.temperature <= 0.0:
             self.do_sample = False
-            self.top_p = 1.0
             logger.warning('Temperature is 0, setting do_sample=False'
                            'for greedy decoding.')
 
@@ -591,17 +590,17 @@ class EvalTaskArguments:
 
     Attributes:
         input_path (str): Path to the input JSONL file containing evaluation data.
-        cache_path (str): Directory path for saving cached results.
-        max_workers (int): Maximum number of worker threads for parallel processing.
         task_name (str): Name of the evaluation task to run.
             Must be one of: ['math_opensource/aime24', 'math_opensource/aime25',
                            'livecodebench', 'ifeval']
         input_key (str): Key for input text in dataset.
         label_key (str): Key for target/label text in dataset.
         response_key (str): Key for model generated text.
+        cache_path (str): Directory path for saving cached results.
+        max_workers (int): Maximum number of worker threads for parallel processing.
+
+
         timeout (int): Timeout for LLM inference in seconds.
-        save_intermediate (bool): Whether to save intermediate results.
-        resume_from_checkpoint (Optional[str]): Path to checkpoint to resume from.
     """
     input_path: str = field(
         metadata={
@@ -651,7 +650,6 @@ class EvalTaskArguments:
                 f'max_workers must be positive, got {self.max_workers}')
         if self.timeout <= 0:
             raise ValueError(f'timeout must be positive, got {self.timeout}')
-
         valid_tasks = [
             'math_opensource/aime24', 'math_opensource/aime25',
             'livecodebench', 'ifeval'
@@ -660,9 +658,6 @@ class EvalTaskArguments:
             raise ValueError(
                 f'task_name must be one of {valid_tasks}, got {self.task_name}'
             )
-
-        # Create cache directory if it doesn't exist
-        Path(self.cache_path).mkdir(parents=True, exist_ok=True)
 
 
 # Example usage
