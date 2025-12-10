@@ -24,7 +24,7 @@ openr1_system_prompt: Final[str] = (
 qwen_math_cot_prompt: Final[str] = (
     'Please reason step by step, and put your final answer within \\boxed{}.')
 
-default_system_prompt: Final[str] = 'You are a helpful AI assistant.'
+default_system_prompt: Final[str] = 'You are a helpful assistant.'
 
 # A factory for different types of system prompts.
 SYSTEM_PROMPT_FACTORY: Dict[str, Optional[str]] = {
