@@ -131,6 +131,10 @@ readonly DEVICE_COUNT_MULTIPLIER=${DEVICE_COUNT_MULTIPLIER:-2}
 # 注：两者不宜同时设过大，推荐根据模型大小按 1-2 次试跑观测 GPU 利用率后调整
 readonly MAX_NUM_SEQS=${MAX_NUM_SEQS:-1024}                         # 同时并发处理的序列数
 readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768}    # 动态批次内最大 token 数
+readonly CPU_OFFLOAD_GB=${CPU_OFFLOAD_GB:-0}                        # CPU 卸载 GB 内存（默认 0 不启用）
+
+# Yarn 配置
+readonly ROPE_FACTOR=${ROPE_FACTOR:-2.0}
 
 # 其他推理参数
 readonly N_SAMPLES=${N_SAMPLES:-8}                   # 每条样本的重复采样次数
@@ -791,6 +795,7 @@ deploy_model_service() {
     local instance_id="$3"
     local devices=$(get_device_visibility "$instance_id")
     local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
+    local expanded_max_len rope_scaling vllm_cmd
 
     log_info "🚀 正在节点 ${node} 上部署模型服务 (端口: ${port}, TP: ${TENSOR_PARALLEL_SIZE}, 内存: ${MEMORY_UTILIZATION})"
 
@@ -811,7 +816,22 @@ deploy_model_service() {
     #   --tensor-parallel-size      使用多卡并行
     #   --gpu-memory-utilization    控制显存水位（避免 OOM）
     #   --max-model-len             控制上下文长度
+    #   --cpu-offload-gb            启用 CPU 卸载（GB 内存）
+    #   --enforce-eager             强制使用 eager 模式
+    #   --dtype                     模型精度
     # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
+
+    rope_scaling="{\"rope_type\":\"yarn\",\"factor\":${ROPE_FACTOR},\"original_max_position_embeddings\":${MAX_MODEL_LEN}}"
+
+    # 计算扩展后的最大模型长度
+    expanded_max_len=$(awk "BEGIN {print int((${MAX_MODEL_LEN}) * (${ROPE_FACTOR}))}")
+
+    if [[ $expanded_max_len -lt $MAX_MODEL_LEN ]]; then
+        log_error "❌ 计算错误: 扩展长度(${expanded_max_len})小于原始长度(${MAX_MODEL_LEN})"
+        return 1
+    fi
+
+    # 构建 vLLM 启动命令（单行命令，避免转义问题）
     local vllm_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
         export ASCEND_RT_VISIBLE_DEVICES='${devices}' && \
@@ -822,15 +842,19 @@ deploy_model_service() {
             --served-model-name '${SERVED_MODEL_NAME}' \
             --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
-            --max-model-len ${MAX_MODEL_LEN} \
-            --dtype bfloat16 \
+            --rope-scaling '${rope_scaling}' \
+            --max-model-len ${expanded_max_len} \
+            --cpu-offload-gb ${CPU_OFFLOAD_GB} \
             --port ${port} \
+            --dtype float16 \
             > '${log_file}' 2>&1 &"
 
+    log_info "构建的vLLM命令:\n${vllm_cmd//\\/\\\\}"
+
     # 4. 在后台启动服务
-    log_info "🔄 执行部署命令到节点 ${node}, 实例 ${instance_id}, 端口 ${port}"
+    log_info "🔄 执行部署命令到节点: ${node}, 实例: ${instance_id}, 端口: ${port}"
     ssh_run "$node" "$vllm_cmd" &
-    log_info "✅ 节点 ${node} vllm 模型部署启动命令发送成功"
+    log_info "✅ 节点 ${node} vLLM 模型部署命令发送成功"
 }
 
 # 健康检查（HTTP 探活 + 日志回退）

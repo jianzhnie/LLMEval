@@ -131,6 +131,7 @@ readonly DEVICE_COUNT_MULTIPLIER=${DEVICE_COUNT_MULTIPLIER:-2}
 # 注：两者不宜同时设过大，推荐根据模型大小按 1-2 次试跑观测 GPU 利用率后调整
 readonly MAX_NUM_SEQS=${MAX_NUM_SEQS:-1024}                         # 同时并发处理的序列数
 readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768}    # 动态批次内最大 token 数
+readonly CPU_OFFLOAD_GB=${CPU_OFFLOAD_GB:-0}                        # CPU 卸载 GB 内存（默认 0 不启用）
 
 # 其他推理参数
 readonly N_SAMPLES=${N_SAMPLES:-8}                   # 每条样本的重复采样次数
@@ -214,7 +215,7 @@ verify_node_device_capacity() {
 # =======================================================
 
 # 关闭请求逐条日志，减少 IO 抖动
-readonly DISABLE_LOG_REQUESTS=${DISABLE_LOG_REQUESTS:-1}
+readonly DISABLE_LOG_REQUESTS=${DISABLE_LOG_REQUESTS:-True}
 
 # 额外引擎参数（按需追加，例如 "--dtype bfloat16 --enforce-eager"）
 readonly EXTRA_ENGINE_ARGS="${EXTRA_ENGINE_ARGS:-}"
@@ -811,6 +812,9 @@ deploy_model_service() {
     #   --tensor-parallel-size      使用多卡并行
     #   --gpu-memory-utilization    控制显存水位（避免 OOM）
     #   --max-model-len             控制上下文长度
+    #   --cpu-offload-gb            启用 CPU 卸载（GB 内存）
+    #   --enforce-eager             强制使用 eager 模式
+    #   --dtype                     模型精度
     # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
     local vllm_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
@@ -823,9 +827,7 @@ deploy_model_service() {
             --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
             --max-model-len ${MAX_MODEL_LEN} \
-            --max-num-seqs ${MAX_NUM_SEQS} \
-            --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
-            --disable-log-requests ${DISABLE_LOG_REQUESTS} \
+            --cpu-offload-gb ${CPU_OFFLOAD_GB} \
             --port ${port} \
             --dtype float16 \
             > '${log_file}' 2>&1 &"
@@ -950,7 +952,6 @@ wait_for_services() {
 
     log_warn "⏰ 超时: 服务在 ${MAX_WAIT_TIME} 秒内未完全就绪，将继续使用已就绪的服务"
 }
-
 
 # 将数据文件按轮询方式分配到各个实例
 # Args:

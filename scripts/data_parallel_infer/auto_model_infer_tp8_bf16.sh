@@ -131,6 +131,7 @@ readonly DEVICE_COUNT_MULTIPLIER=${DEVICE_COUNT_MULTIPLIER:-2}
 # 注：两者不宜同时设过大，推荐根据模型大小按 1-2 次试跑观测 GPU 利用率后调整
 readonly MAX_NUM_SEQS=${MAX_NUM_SEQS:-1024}                         # 同时并发处理的序列数
 readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768}    # 动态批次内最大 token 数
+readonly CPU_OFFLOAD_GB=${CPU_OFFLOAD_GB:-0}                        # CPU 卸载 GB 内存（默认 0 不启用）
 
 # 其他推理参数
 readonly N_SAMPLES=${N_SAMPLES:-8}                   # 每条样本的重复采样次数
@@ -811,6 +812,9 @@ deploy_model_service() {
     #   --tensor-parallel-size      使用多卡并行
     #   --gpu-memory-utilization    控制显存水位（避免 OOM）
     #   --max-model-len             控制上下文长度
+    #   --cpu-offload-gb            启用 CPU 卸载（GB 内存）
+    #   --enforce-eager             强制使用 eager 模式
+    #   --dtype                     模型精度
     # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
     local vllm_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
@@ -823,8 +827,8 @@ deploy_model_service() {
             --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
             --max-model-len ${MAX_MODEL_LEN} \
-            --dtype bfloat16 \
             --port ${port} \
+            --dtype bfloat16 \
             > '${log_file}' 2>&1 &"
 
     # 4. 在后台启动服务

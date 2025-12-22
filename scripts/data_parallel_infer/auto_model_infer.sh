@@ -214,7 +214,7 @@ verify_node_device_capacity() {
 # =======================================================
 
 # 关闭请求逐条日志，减少 IO 抖动
-readonly DISABLE_LOG_REQUESTS=${DISABLE_LOG_REQUESTS:-1}
+readonly DISABLE_LOG_REQUESTS=${DISABLE_LOG_REQUESTS:-True}
 
 # 额外引擎参数（按需追加，例如 "--dtype bfloat16 --enforce-eager"）
 readonly EXTRA_ENGINE_ARGS="${EXTRA_ENGINE_ARGS:-}"
