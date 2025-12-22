@@ -23,8 +23,8 @@ python ./llmeval/vllm/online_server.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
-    --temperature 0.6  \
     --system_prompt_type amthinking \
+    --temperature 0.6  \
     --max_workers 64
 
 # aime24 (repeated sample 64 times)
@@ -35,8 +35,8 @@ python ./llmeval/vllm/online_server.py \
     --base_url "${base_url}" \
     --model_name "${model_name}" \
     --n_samples "${n_samples}" \
-    --temperature 0.6  \
     --system_prompt_type amthinking \
+    --temperature 0.6  \
     --max_workers 64
 
 echo "🎉 All inference tasks completed successfully!"

@@ -4,8 +4,8 @@ source set_env.sh
 set -euo pipefail
 
 # --- Configuration ---
-output_dir="./output/PCL-Reasoner-v1"
-n_samples=64 # Default sample size for aime24 and aime25
+output_dir="./output/opg_qwen25_32b"
+n_samples=32 # Default sample size for aime24 and aime25
 
 # Evaluation output directory
 reval_dir="${output_dir}/eval_score"
