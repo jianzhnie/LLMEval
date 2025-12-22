@@ -1,10 +1,11 @@
 #!/bin/bash
+source set_env_sglang.sh
 
 set -euo pipefail
 
 # --- Configuration ---
-output_dir="./output/PCL-Reasoner-v1-sft-fp16-step64-sglang"
-model_name="PCL-Reasoner-v1-sft-fp16-step64"
+output_dir="./output/PCL-Reasoner-v1-sglangv2"
+model_name="PCL-Reasoner-v1-sglang"
 
 base_url="http://127.0.0.1:8090/v1"
 n_samples=64  # Default sample size for aime24 and aime25
