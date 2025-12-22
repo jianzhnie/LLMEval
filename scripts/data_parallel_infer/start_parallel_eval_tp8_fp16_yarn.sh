@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Absolute paths
-AUTO_INFER_SH="/home/jianzhnie/llmtuner/llm/LLMEval/scripts/data_parallel_infer/auto_model_infer_tp8_bf16.sh"
+AUTO_INFER_SH="/home/jianzhnie/llmtuner/llm/LLMEval/scripts/data_parallel_infer/auto_model_infer_tp8_fp16_yarn.sh"
 DEFAULT_NODE_LIST="/home/jianzhnie/llmtuner/llm/LLMEval/available_nodes.txt"
 
 # Override below as needed (or export before running)
@@ -13,11 +13,11 @@ export MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/llm/LLMEval/work_dir/o
 export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-8}"
 export INSTANCES_PER_NODE="${INSTANCES_PER_NODE:-1}"
 export MEMORY_UTILIZATION="${MEMORY_UTILIZATION:-0.9}"
-export CPU_OFFLOAD_GB="${CPU_OFFLOAD_GB:32}"
+export CPU_OFFLOAD_GB="${CPU_OFFLOAD_GB:-0}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 export MAX_NUM_SEQS="${MAX_NUM_SEQS:-1024}"
-export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-512000}"
-export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-opg_qwen25_32b}"
+export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-131072}"
+export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-opg_qwen25_32b_yarn}"
 export N_SAMPLES="${N_SAMPLES:-4}"
 
 # Project
@@ -37,7 +37,7 @@ export INPUT_KEY="${INPUT_KEY:-prompt}"                            # 输入字�
 
 # Client concurrency
 export SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
-export MAX_WORKERS="${MAX_WORKERS:-128}"
+export MAX_WORKERS="${MAX_WORKERS:-32}"
 
 # Server
 export DISABLE_LOG_REQUESTS="${DISABLE_LOG_REQUESTS:-1}"
