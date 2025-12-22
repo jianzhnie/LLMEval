@@ -6,7 +6,7 @@ set -euo pipefail
 
 # --- Configuration ---
 output_dir="./output/fdd"
-model_name="PCL-Reasoner-aime"
+model_name="PCL-Reasoner-v1"
 
 base_url="http://127.0.0.1:8090/v1"
 n_samples=64  # Default sample size for aime24 and aime25

@@ -2,8 +2,8 @@
 
 source set_env.sh
 
-model_path="/home/jianzhnie/llmtuner/llm/LLMEval/output/mg2hf_steps_159"
-model_name="PCL-Reasoner-aime"
+model_path="/home/jianzhnie/llmtuner/hfhub/mindspeed/models/mindspore/hf_sft_packing_0703_step6476"
+model_name="PCL-Reasoner-v1"
 
 num_gpus=8
 max_model_len=131072  # ✅ 支持 32k 上下文
