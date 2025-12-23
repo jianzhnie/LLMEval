@@ -823,7 +823,6 @@ deploy_model_service() {
         nohup python -m vllm.entrypoints.openai.api_server \
             --model '${MODEL_PATH}' \
             --trust-remote-code \
-            --enforce-eager \
             --served-model-name '${SERVED_MODEL_NAME}' \
             --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \

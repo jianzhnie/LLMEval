@@ -132,6 +132,7 @@ readonly DEVICE_COUNT_MULTIPLIER=${DEVICE_COUNT_MULTIPLIER:-2}
 readonly MAX_NUM_SEQS=${MAX_NUM_SEQS:-1024}                         # 同时并发处理的序列数
 readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768}    # 动态批次内最大 token 数
 readonly CPU_OFFLOAD_GB=${CPU_OFFLOAD_GB:-0}                        # CPU 卸载 GB 内存（默认 0 不启用）
+readonly SWAP_SPACE=${SWAP_SPACE:-0}                                # 交换空间 GB 内存（默认 0 不启用）
 
 # 其他推理参数
 readonly N_SAMPLES=${N_SAMPLES:-8}                   # 每条样本的重复采样次数
@@ -827,14 +828,21 @@ deploy_model_service() {
             --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
             --max-model-len ${MAX_MODEL_LEN} \
+            --max_num_batched_tokens ${MAX_NUM_BATCHED_TOKENS} \
+            --cpu-offload-gb ${CPU_OFFLOAD_GB} \
+            --max-num-seqs ${MAX_NUM_SEQS} \
+            --enable-chunked-prefill \
+            --swap-space ${SWAP_SPACE} \
             --port ${port} \
             --dtype bfloat16 \
             > '${log_file}' 2>&1 &"
 
+    log_info "构建的vLLM命令:\n${vllm_cmd//\\/\\\\}"
+
     # 4. 在后台启动服务
-    log_info "🔄 执行部署命令到节点 ${node}, 实例 ${instance_id}, 端口 ${port}"
+    log_info "🔄 执行部署命令到节点: ${node}, 实例: ${instance_id}, 端口: ${port}"
     ssh_run "$node" "$vllm_cmd" &
-    log_info "✅ 节点 ${node} vllm 模型部署启动命令发送成功"
+    log_info "✅ 节点 ${node} vLLM 模型部署命令发送成功"
 }
 
 # 健康检查（HTTP 探活 + 日志回退）
