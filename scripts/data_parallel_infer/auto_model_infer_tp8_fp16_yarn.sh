@@ -720,7 +720,8 @@ discover_remote_dataset_files() {
     log_info "🔍 正在节点 ${head_node} 上发现数据文件: ${search_path}"
 
     # Bash 技巧: 使用 xargs -n1 basename | sort -V 实现按自然数值排序的文件名列表
-    local find_cmd="sh -lc 'find ${DATASET_DIR} -maxdepth 1 -name \"${DATASET_GLOB}\" 2>/dev/null | xargs -n1 basename | LC_ALL=C sort -V'"
+    # 修复: 使用 -type f 确保只查找文件，不包括目录
+    local find_cmd="sh -lc 'find ${DATASET_DIR} -maxdepth 1 -name \"${DATASET_GLOB}\" -type f 2>/dev/null | xargs -n1 basename | LC_ALL=C sort -V'"
 
     local out
     if ! out=$(ssh_run "$head_node" "$find_cmd"); then
@@ -844,7 +845,11 @@ deploy_model_service() {
             --gpu-memory-utilization ${MEMORY_UTILIZATION} \
             --rope-scaling '${rope_scaling}' \
             --max-model-len ${expanded_max_len} \
+            --max_num_batched_tokens ${MAX_NUM_BATCHED_TOKENS} \
             --cpu-offload-gb ${CPU_OFFLOAD_GB} \
+            --max-num-seqs ${MAX_NUM_SEQS} \
+            --enable-chunked-prefill \
+            --swap-space ${SWAP_SPACE} \
             --port ${port} \
             --dtype float16 \
             > '${log_file}' 2>&1 &"
