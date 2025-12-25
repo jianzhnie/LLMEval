@@ -132,6 +132,7 @@ readonly DEVICE_COUNT_MULTIPLIER=${DEVICE_COUNT_MULTIPLIER:-2}
 readonly MAX_NUM_SEQS=${MAX_NUM_SEQS:-1024}                         # 同时并发处理的序列数
 readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768}    # 动态批次内最大 token 数
 readonly CPU_OFFLOAD_GB=${CPU_OFFLOAD_GB:-0}                        # CPU 卸载 GB 内存（默认 0 不启用）
+readonly SWAP_SPACE=${SWAP_SPACE:-0}                                # 交换空间 GB 内存（默认 0 不启用）
 
 # Yarn 配置
 readonly ROPE_FACTOR=${ROPE_FACTOR:-2.0}
