@@ -58,7 +58,7 @@
 #   - CUDA/NPU 驱动
 #
 # 作者：LLM Eval Team
-# 版本：3.0
+# 版本：3.2
 # 更新日期：2025
 # =======================================================
 
@@ -274,6 +274,11 @@ declare -a FILES                    # 存储发现的数据文件列表（文件
 declare -a READY_INSTANCE_NODES     # 存储已就绪实例所属节点（按实例展开）
 declare -a READY_INSTANCE_PORTS     # 存储已就绪实例端口
 declare -a READY_INSTANCE_IDS       # 存储已就绪实例在节点内的 index
+
+# 全局关联数组：记录每个节点分配的文件列表
+# 键: 节点地址_端口，值: 文件列表（空格分隔）
+declare -A NODE_FILE_ASSIGNMENTS    # 存储节点到文件的映射关系
+declare -A NODE_PROCESSED_FILES     # 记录已处理的文件（用于避免重复重试）
 
 # =======================================================
 #                  工具函数区域
@@ -965,7 +970,7 @@ wait_for_services() {
 # Args:
 #   $1: total_instances (int) - 总实例数量
 # Returns:
-#   None (分配结果存储在全局变量 INSTANCE_ASSIGNMENTS_X 中)
+#   None (分配结果存储在全局变量 INSTANCE_ASSIGNMENTS_X 中和 NODE_FILE_ASSIGNMENTS 中)
 assign_data_to_instances() {
     local total_instances="$1"
 
@@ -977,6 +982,9 @@ assign_data_to_instances() {
         eval "INSTANCE_ASSIGNMENTS_$i=()"
     done
 
+    # 清空全局节点文件映射
+    NODE_FILE_ASSIGNMENTS=()
+
     # 轮询分配文件
     for idx in "${!FILES[@]}"; do
         local file="${FILES[idx]}"
@@ -986,11 +994,24 @@ assign_data_to_instances() {
         log_info "分配文件: ${file} -> 实例 ${instance_idx}"
     done
 
-    # 打印分配结果统计
+    # 打印分配结果统计，并记录节点与文件的映射关系
     for ((i = 0; i < total_instances; i++)); do
         local count
         eval "count=\${#INSTANCE_ASSIGNMENTS_${i}[@]}"
         log_info "实例 ${i} 分配 ${count} 个文件"
+
+        # 获取该实例对应的节点和端口
+        local node="${READY_INSTANCE_NODES[i]}"
+        local port="${READY_INSTANCE_PORTS[i]}"
+        local node_key="${node}_${port}"
+
+        # 将该实例分配的所有文件记录到节点映射中
+        local files_var="INSTANCE_ASSIGNMENTS_$i"
+        local -n files_ref="$files_var"
+        local files_str=$(printf "%s " "${files_ref[@]}" | sed 's/ $//')
+
+        NODE_FILE_ASSIGNMENTS["$node_key"]="$files_str"
+        log_info "节点 ${node}:${port} 分配文件: $files_str"
     done
 
     log_info "✅ 数据文件分配完成"
@@ -1066,133 +1087,272 @@ run_task_batch_parallel() {
         log_warn "节点 ${node} 上没有有效的推理任务命令，跳过执行"
     fi
 
-    # 等待任务完成
-    wait_for_batch_completion_and_cleanup "$node" "$port" ${#commands[@]}
+    log_info "✅ 节点 ${node} ${port} 上的推理任务已完成"
+    auto_model_deploy_and_infer "$node" "$port"
 }
 
-run_task_batch() {
+# 检查节点上的推理数据是否完整
+# 计算预期的输出条数（input_data * N_SAMPLES）并与实际数据进行对比
+# Args:
+#   $1: node (string) - 节点地址
+#   $2: input_file (string) - 输入数据文件路径
+#   $3: output_file (string) - 输出数据文件路径
+#   $4: n_samples (int) - 采样次数
+# Returns:
+#   0: 数据完整，1: 数据不完整
+check_inference_data_completeness() {
     local node="$1"
-    local model_name="$2"
-    local base_url="$3"
-    shift 3
-    local files=("$@")
+    local input_file="$2"
+    local output_file="$3"
+    local n_samples="$4"
 
-    log_info "👉 在节点 ${node} 上启动 ${#files[@]} 个推理任务..."
-
-    # 检查是否有文件需要处理
-    if [[ ${#files[@]} -eq 0 ]]; then
-        log_warn "节点 ${node} 没有分配到任何文件，跳过任务启动"
-        return 0
+    # 检查输入文件是否存在
+    if ! ssh_run "$node" "test -f '${input_file}'" >/dev/null 2>&1; then
+        log_error "❌ 输入文件不存在: ${input_file}"
+        return 1
     fi
 
-    # 限制单个节点上同时运行的推理任务数量
-    local max_concurrent_tasks_per_node=${MAX_CONCURRENT_TASKS_PER_NODE:-8}
-    local total_tasks=${#files[@]}
+    # 获取输入文件的行数（样本数量）
+    local input_lines
+    input_lines=$(ssh_run "$node" "wc -l < '${input_file}'" 2>/dev/null | tr -d ' ')
 
-    # 分批处理任务以控制并发数
-    local batch_start=0
-    while [[ $batch_start -lt $total_tasks ]]; do
-        # 计算当前批次大小
-        local batch_end=$((batch_start + max_concurrent_tasks_per_node))
-        if [[ $batch_end -gt $total_tasks ]]; then
-            batch_end=$total_tasks
+    if ! [[ "$input_lines" =~ ^[0-9]+$ ]]; then
+        log_error "❌ 无法获取输入文件行数"
+        return 1
+    fi
+
+    # 计算预期的输出条数
+    local expected_output_lines=$((input_lines * n_samples))
+
+    # 检查输出文件是否存在
+    if ! ssh_run "$node" "test -f '${output_file}'" >/dev/null 2>&1; then
+        log_error "❌ 输出文件不存在: ${output_file} (预期: ${expected_output_lines} 条记录)"
+        return 1
+    fi
+
+    # 获取输出文件的行数
+    local output_lines
+    output_lines=$(ssh_run "$node" "wc -l < '${output_file}'" 2>/dev/null | tr -d ' ')
+
+    if ! [[ "$output_lines" =~ ^[0-9]+$ ]]; then
+        log_error "❌ 无法获取输出文件行数"
+        return 1
+    fi
+
+    # 比较预期值与实际值
+    if [[ $output_lines -eq $expected_output_lines ]]; then
+        log_info "✅ 数据完整: ${output_file} (${output_lines}/${expected_output_lines} 条记录)"
+        return 0
+    else
+        log_warn "⚠️ 数据不完整: ${output_file} (${output_lines}/${expected_output_lines} 条记录)"
+        return 1
+    fi
+}
+
+# 重启指定节点的模型部署脚本和数据提交脚本
+# Args:
+#   $1: node (string) - 节点地址
+#   $2: port (int) - 服务端口
+#   $3: instance_id (int) - 实例 ID
+#   $4: input_file (string) - 输入文件路径（可选）
+# Returns:
+#   None
+restart_node_services() {
+    local node="$1"
+    local port="$2"
+    local instance_id="${3:-0}"
+    local input_file="${4:-}"
+
+    log_info "🔄 正在重启节点 ${node} (端口: ${port}) 的服务..."
+
+    # 首先停止现有服务
+    log_warn "停止现有服务..."
+    stop_service_on_node "$node" "$port"
+    sleep 3
+
+    # 清理旧的日志文件
+    local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}.log"
+    ssh_run "$node" "rm -f '${log_file}' || true" >/dev/null 2>&1
+
+    # 重新部署模型服务
+    log_info "重新部署模型服务..."
+    deploy_model_service "$node" "$port" "$instance_id"
+
+    # 等待服务就绪
+    log_info "等待服务启动..."
+    local retry_count=0
+    local max_retries=60  # 最多重试 60 次，间隔 10 秒，共 600 秒
+
+    while [[ $retry_count -lt $max_retries ]]; do
+        if check_service_ready "$node" "$port"; then
+            log_info "✅ 节点 ${node} 服务已重启并就绪"
+            return 0
         fi
-
-        log_info "处理批次: 从 ${batch_start} 到 $((batch_end - 1)) (共 $((batch_end - batch_start)) 个任务)"
-
-        # 构建当前批次的推理命令
-        local commands=()
-        for (( i=batch_start; i<batch_end; i++ )); do
-            local file="${files[$i]}"
-            local input_file="${DATASET_DIR}/${file}"
-            # 移除文件扩展名
-            local base_name="${file%.*}"
-            local output_file="${OUTPUT_DIR}/infer_${model_name//\//_}_${base_name}_bz${N_SAMPLES}.jsonl"
-            local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${base_name}.log"
-
-            log_info "  -> 准备处理文件: ${file} (输出: ${output_file})"
-
-            # 检查输入文件是否存在
-            if ! ssh_run "$node" "test -f '${input_file}'" >/dev/null 2>&1; then
-                log_error "❌ 输入文件 ${input_file} 在节点 ${node} 上不存在"
-                continue
-            fi
-
-            # 构建推理命令
-            local infer_cmd="cd '${PROJECT_DIR}' && \
-                source '${SET_ENV_SCRIPT}' && \
-                nohup python '${INFER_SCRIPT}' \
-                    --input_file '${input_file}' \
-                    --output_file '${output_file}' \
-                    --input_key '${INPUT_KEY}' \
-                    --base_url '${base_url}' \
-                    --model_name '${model_name}' \
-                    --n_samples ${N_SAMPLES} \
-                    --system_prompt_type '${SYSTEM_PROMPT_TYPE}' \
-                    --max_workers ${MAX_WORKERS} \
-                    > '${log_file}' 2>&1 &"
-
-            commands+=("$infer_cmd")
-        done
-
-        # 将当前批次的所有命令组合成一个命令字符串并执行
-        if [[ ${#commands[@]} -gt 0 ]]; then
-            local combined_cmd=$(printf "%s " "${commands[@]}")
-            local remote_cmd="($combined_cmd) >/dev/null 2>&1 &"
-            ssh_run "$node" "$remote_cmd"
-            log_info "✅ 节点 ${node} 上的 ${#commands[@]} 个推理任务已提交"
-        fi
-
-        # 等待当前批次任务完成
-        log_info "等待当前批次任务完成..."
-        wait_for_batch_completion "$node" ${#commands[@]}
-
-        # 移动到下一批次
-        batch_start=$batch_end
+        log_info "⏳ 等待服务就绪... (第 $((retry_count + 1))/${max_retries} 次)"
+        sleep 10
+        retry_count=$((retry_count + 1))
     done
 
-    log_info "✅ 节点 ${node} 上的所有 ${#files[@]} 个推理任务已完成"
+    log_error "❌ 节点 ${node} 服务重启失败"
+    return 1
+}
+
+# 重新提交数据到节点进行推理
+# Args:
+#   $1: node (string) - 节点地址
+#   $2: port (int) - 服务端口
+#   $3: input_file (string) - 输入文件路径
+#   $4: output_file (string) - 输出文件路径
+#   $5: model_name (string) - 模型名称
+# Returns:
+#   None
+resubmit_inference_task() {
+    local node="$1"
+    local port="$2"
+    local input_file="$3"
+    local output_file="$4"
+    local model_name="$5"
+
+    log_info "📤 正在重新提交推理任务..."
+
+    local base_url="http://127.0.0.1:${port}/v1"
+
+    # 清理现有的输出文件（确保重新生成）
+    ssh_run "$node" "rm -f '${output_file}' || true" >/dev/null 2>&1
+
+    # 构建推理命令
+    local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_retry.log"
+    local infer_cmd="cd '${PROJECT_DIR}' && \
+        source '${SET_ENV_SCRIPT}' && \
+        nohup python '${INFER_SCRIPT}' \
+            --input_file '${input_file}' \
+            --output_file '${output_file}' \
+            --input_key '${INPUT_KEY}' \
+            --base_url '${base_url}' \
+            --model_name '${model_name}' \
+            --n_samples ${N_SAMPLES} \
+            --system_prompt_type '${SYSTEM_PROMPT_TYPE}' \
+            --max_workers ${MAX_WORKERS} \
+            > '${log_file}' 2>&1 &"
+
+    log_info "🚀 重新启动推理任务: ${input_file} -> ${output_file}"
+    ssh_run "$node" "$infer_cmd" >/dev/null 2>&1
+    sleep 2
+
+    log_info "✅ 推理任务已重新提交"
 }
 
 # Args:
 #   $1: node (string) - 节点地址
 #   $2: port (int) - 服务端口
-#   $3: expected_count (int) - 预期完成的任务数
 # Returns:
 #   None
-wait_for_batch_completion_and_cleanup() {
+auto_model_deploy_and_infer() {
     local node="$1"
     local port="$2"
-    local expected_count="$3"
-    local max_wait_time=864000  # 最大等待时间（秒）(10天)
-    local wait_interval=600     # 检查间隔（秒）
-    local total_wait_time=0
+    local node_key="${node}_${port}"
 
-    log_info "⏳ 等待节点 ${node} 上的 ${expected_count} 个任务完成..."
+    log_info "✅ 节点 ${node} 上的推理任务已完成，正在验证分配的数据完整性..."
 
-    while [[ $total_wait_time -lt $max_wait_time ]]; do
-        local current_running_tasks
-        current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
+    # 从全局映射中获取该节点分配的所有文件
+    local node_files="${NODE_FILE_ASSIGNMENTS[$node_key]:-}"
 
-        if [[ $current_running_tasks -le 0 ]]; then
-            log_info "✅ 节点 ${node} 上的 ${expected_count} 个推理任务已完成"
+    # 检查是否有分配的文件需要验证
+    if [[ -z "$node_files" ]]; then
+        log_warn "⚠️ 未找到节点 ${node} 分配的文件信息，跳过数据完整性检查"
+    else
+        # 将文件字符串转换为数组
+        local -a assigned_files=($node_files)
+        log_info "📊 开始验证节点 ${node} 分配的 ${#assigned_files[@]} 个文件的数据完整性..."
 
-            # 任务完成后，停止该节点的 vLLM 服务
-            log_info "📋 推理任务完成，正在清理资源..."
-            stop_service_on_node "$node" "$port"
+        local incomplete_files=()
+        local incomplete_count=0
 
-            return 0
+        # 逐个检查分配的文件
+        for file in "${assigned_files[@]}"; do
+            local output_file="${OUTPUT_DIR}/infer_${SERVED_MODEL_NAME//\//_}_${file%.*}_bz${N_SAMPLES}.jsonl"
+            local input_file="${DATASET_DIR}/${file}"
+
+            if ! check_inference_data_completeness "$node" "$input_file" "$output_file" "$N_SAMPLES"; then
+                incomplete_files+=("$file")
+                incomplete_count=$((incomplete_count + 1))
+                log_warn "⚠️ 文件 ${file} 数据不完整"
+            fi
+        done
+
+        # 如果有数据不完整的文件，则进行重启和重试
+        if [[ $incomplete_count -gt 0 ]]; then
+            log_warn "⚠️ 节点 ${node} 共有 ${incomplete_count} 个文件数据不完整，准备重启服务并重新提交任务..."
+
+            # 检查是否已尝试重启过（避免无限循环）
+            local node_retry_key="${node_key}_retry_count"
+            local retry_count=${NODE_PROCESSED_FILES[$node_retry_key]:-0}
+
+            if [[ $retry_count -lt 2 ]]; then
+                retry_count=$((retry_count + 1))
+                NODE_PROCESSED_FILES[$node_retry_key]=$retry_count
+
+                log_warn "🔄 这是第 ${retry_count}/2 次重试..."
+
+                # 重启服务
+                if restart_node_services "$node" "$port" 0; then
+                    log_info "📤 开始重新提交 ${incomplete_count} 个不完整的文件..."
+
+                    # 重新提交所有不完整的文件
+                    for file in "${incomplete_files[@]}"; do
+                        local output_file="${OUTPUT_DIR}/infer_${SERVED_MODEL_NAME//\//_}_${file%.*}_bz${N_SAMPLES}.jsonl"
+                        local input_file="${DATASET_DIR}/${file}"
+                        resubmit_inference_task "$node" "$port" "$input_file" "$output_file" "$SERVED_MODEL_NAME"
+                    done
+
+                    # 等待任务完成（根据文件数量动态调整等待时间，每个文件预期 1 分钟）
+                    local wait_time=$((incomplete_count * 60))
+                    [[ $wait_time -lt 30 ]] && wait_time=30
+                    [[ $wait_time -gt 600 ]] && wait_time=600
+                    log_info "⏳ 等待重新提交的任务完成 (${wait_time}秒)..."
+                    sleep "$wait_time"
+
+                    # 再次检查所有不完整文件的数据完整性
+                    log_info "🔍 再次验证重试后的数据完整性..."
+                    local still_incomplete=0
+                    for file in "${incomplete_files[@]}"; do
+                        local output_file="${OUTPUT_DIR}/infer_${SERVED_MODEL_NAME//\//_}_${file%.*}_bz${N_SAMPLES}.jsonl"
+                        local input_file="${DATASET_DIR}/${file}"
+
+                        if check_inference_data_completeness "$node" "$input_file" "$output_file" "$N_SAMPLES"; then
+                            log_info "✅ 文件 ${file} 重试后数据已完整"
+                        else
+                            log_error "❌ 文件 ${file} 重试后数据仍不完整"
+                            still_incomplete=$((still_incomplete + 1))
+                        fi
+                    done
+
+                    if [[ $still_incomplete -eq 0 ]]; then
+                        log_info "✅ 所有文件重试后均已完整"
+                    else
+                        log_error "❌ 仍有 ${still_incomplete} 个文件数据不完整，记录为失败"
+                    fi
+                else
+                    log_error "❌ 节点 ${node} 服务重启失败，无法重新提交任务"
+                fi
+            else
+                log_error "❌ 节点 ${node} 已达到最大重试次数 (2)，放弃重试"
+            fi
+        else
+            log_info "✅ 节点 ${node} 分配的所有 ${#assigned_files[@]} 个文件数据均已完整"
         fi
+    fi
 
-        log_info "⏳ 节点 ${node} 上仍有 ${current_running_tasks} 个任务在运行，已等待 ${total_wait_time} 秒"
-        sleep $wait_interval
-        total_wait_time=$((total_wait_time + wait_interval))
-    done
-
-    log_warn "⏰ 等待超时，节点 ${node} 上的任务可能仍在运行，已等待 ${total_wait_time} 秒"
-    # 即使超时，仍然尝试停止服务
-    log_warn "正在强制停止节点 ${node} 上的 vLLM 服务..."
+    # 任务验证完成后，停止该节点的 vLLM 服务
+    log_info "📋 推理任务验证完成，正在清理资源..."
     stop_service_on_node "$node" "$port"
+
+    sleep 3
+    # 再次确保服务已停止
+    if ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' >/dev/null"; then
+        log_warn "⚠️ 节点 ${node} 服务仍在运行，尝试强制停止..."
+        stop_service_on_node "$node" "$port"
+    fi
 }
 
 # 分发并启动所有推理任务
