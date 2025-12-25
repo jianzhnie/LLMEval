@@ -264,8 +264,8 @@ readonly SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
 readonly MAX_WORKERS=${MAX_WORKERS:-128}               # 客户端每进程内部的线程/协程并发
 
 # 等待推理完成的默认配置
-readonly INFER_WAIT_TIMEOUT=${INFER_WAIT_TIMEOUT:-1800}   # 等待远端推理完成的最大秒数（默认 30 分钟）
-readonly INFER_POLL_INTERVAL=${INFER_POLL_INTERVAL:-10}   # 轮询间隔（秒）
+readonly INFER_WAIT_TIMEOUT=${INFER_WAIT_TIMEOUT:-864000}   # 等待远端推理完成的最大秒数（默认 10 天）
+readonly INFER_POLL_INTERVAL=${INFER_POLL_INTERVAL:-1800}   # 轮询间隔（秒）
 
 # =======================================================
 #                  全局变量声明
@@ -1092,19 +1092,22 @@ run_task_batch_parallel() {
         log_warn "节点 ${node} 上没有有效的推理任务命令，跳过执行"
     fi
 
-    log_info "✅ 节点 ${node} ${port} 上的推理任务已提交，等待远端输出完成..."
+    log_info "✅ 节点 ${node} ${port} 上的推理任务已提交"
+    log_info "⏳ 现在等待任务在远端完成... (这可能需要较长时间)"
 
-    # 提交完成后执行验证与必要的重试/清理
-    auto_model_deploy_and_infer "$node" "$port"
+    # 动态等待任务完成，然后验证数据
+    wait_and_verify_inference_completion "$node" "$port"
 }
 
 # 检查节点上的推理数据是否完整
 # 计算预期的输出条数（input_data * N_SAMPLES）并与实际数据进行对比
+# 支持增量完整性检查（允许文件继续增长）
 # Args:
 #   $1: node (string) - 节点地址
 #   $2: input_file (string) - 输入数据文件路径
 #   $3: output_file (string) - 输出数据文件路径
 #   $4: n_samples (int) - 采样次数
+#   $5: allow_incremental (bool, optional) - 是否允许增量完成（默认0，要求完全完成）
 # Returns:
 #   0: 数据完整，1: 数据不完整
 check_inference_data_completeness() {
@@ -1112,6 +1115,7 @@ check_inference_data_completeness() {
     local input_file="$2"
     local output_file="$3"
     local n_samples="$4"
+    local allow_incremental="${5:-0}"
 
     # 检查输入文件是否存在
     if ! ssh_run "$node" "test -f '${input_file}'" >/dev/null 2>&1; then
@@ -1124,7 +1128,7 @@ check_inference_data_completeness() {
     input_lines=$(ssh_run "$node" "wc -l < '${input_file}'" 2>/dev/null | tr -d ' ')
 
     if ! [[ "$input_lines" =~ ^[0-9]+$ ]]; then
-        log_error "❌ 无法获取输入文件行数"
+        log_error "❌ 无法获取输入文件行数: $input_lines"
         return 1
     fi
 
@@ -1133,7 +1137,7 @@ check_inference_data_completeness() {
 
     # 检查输出文件是否存在
     if ! ssh_run "$node" "test -f '${output_file}'" >/dev/null 2>&1; then
-        log_error "❌ 输出文件不存在: ${output_file} (预期: ${expected_output_lines} 条记录)"
+        log_warn "⚠️ 输出文件尚未创建: ${output_file} (预期: ${expected_output_lines} 条记录)"
         return 1
     fi
 
@@ -1142,18 +1146,137 @@ check_inference_data_completeness() {
     output_lines=$(ssh_run "$node" "wc -l < '${output_file}'" 2>/dev/null | tr -d ' ')
 
     if ! [[ "$output_lines" =~ ^[0-9]+$ ]]; then
-        log_error "❌ 无法获取输出文件行数"
+        log_error "❌ 无法获取输出文件行数: $output_lines"
         return 1
     fi
 
     # 比较预期值与实际值
     if [[ $output_lines -eq $expected_output_lines ]]; then
-        log_info "✅ 数据完整: ${output_file} (${output_lines}/${expected_output_lines} 条记录)"
+        log_info "✅ 数据完整 (${output_lines}/${expected_output_lines}): ${output_file}"
         return 0
+    elif [[ $allow_incremental -eq 1 && $output_lines -gt 0 ]]; then
+        # 允许增量完成模式：只要有进度就认为在处理中
+        local progress=$((output_lines * 100 / expected_output_lines))
+        log_info "⏳ 数据处理中 (${progress}%: ${output_lines}/${expected_output_lines}): ${output_file}"
+        return 1
     else
-        log_warn "⚠️ 数据不完整: ${output_file} (${output_lines}/${expected_output_lines} 条记录)"
+        log_warn "⚠️ 数据不完整 (${output_lines}/${expected_output_lines}): ${output_file}"
         return 1
     fi
+}
+
+# 动态等待推理任务完成并验证数据完整性
+# 通过轮询检查输出文件的增长情况，判断任务是否完成
+# Args:
+#   $1: node (string) - 节点地址
+#   $2: port (int) - 服务端口
+# Returns:
+#   None
+wait_and_verify_inference_completion() {
+    local node="$1"
+    local port="$2"
+    local node_key="${node}_${port}"
+
+    log_info "🔄 开始监控节点 ${node} 的推理任务进度..."
+
+    # 从全局映射中获取该节点分配的所有文件
+    local node_files="${NODE_FILE_ASSIGNMENTS[$node_key]:-}"
+
+    if [[ -z "$node_files" ]]; then
+        log_warn "⚠️ 未找到节点 ${node} 分配的文件信息，跳过任务监控"
+        return 0
+    fi
+
+    # 将文件字符串转换为数组
+    local -a assigned_files=($node_files)
+    local total_files=${#assigned_files[@]}
+
+    log_info "📊 需要监控 ${total_files} 个文件的推理任务"
+
+    # 启动监控循环：轮询检查所有文件的完成状态
+    local max_iterations=$((INFER_WAIT_TIMEOUT / INFER_POLL_INTERVAL))
+    local iteration=0
+    local prev_progress_map=""  # 用于检测进度是否停滞
+    local no_progress_count=0
+    local max_no_progress_iterations=6  # 允许 60 秒（6 * 10s）无进展
+
+    while [[ $iteration -lt $max_iterations ]]; do
+        local current_progress_map=""
+        local all_complete=true
+        local total_progress=0
+
+        # 逐个检查文件完成情况
+        for file in "${assigned_files[@]}"; do
+            local output_file="${OUTPUT_DIR}/infer_${SERVED_MODEL_NAME//\//_}_${file%.*}_bz${N_SAMPLES}.jsonl"
+            local input_file="${DATASET_DIR}/${file}"
+
+            # 获取输入和输出行数
+            local input_lines
+            input_lines=$(ssh_run "$node" "[[ -f '${input_file}' ]] && wc -l < '${input_file}' || echo 0" 2>/dev/null | tr -d ' ')
+            input_lines=${input_lines:-0}
+
+            local output_lines
+            output_lines=$(ssh_run "$node" "[[ -f '${output_file}' ]] && wc -l < '${output_file}' || echo 0" 2>/dev/null | tr -d ' ')
+            output_lines=${output_lines:-0}
+
+            if ! [[ "$input_lines" =~ ^[0-9]+$ ]]; then input_lines=0; fi
+            if ! [[ "$output_lines" =~ ^[0-9]+$ ]]; then output_lines=0; fi
+
+            local expected=$((input_lines * N_SAMPLES))
+
+            if [[ $expected -eq 0 ]]; then
+                # 文件不存在或为空
+                current_progress_map="${current_progress_map}${file}:0/0;"
+            elif [[ $output_lines -ge $expected ]]; then
+                # 文件完成
+                current_progress_map="${current_progress_map}${file}:${output_lines}/${expected}✓;"
+                total_progress=$((total_progress + 100))
+            else
+                # 文件处理中
+                all_complete=false
+                local file_progress=$((output_lines * 100 / expected))
+                current_progress_map="${current_progress_map}${file}:${file_progress}%;"
+                total_progress=$((total_progress + file_progress))
+            fi
+        done
+
+        local avg_progress=$((total_progress / total_files))
+
+        # 检查进度是否停滞
+        if [[ "$current_progress_map" == "$prev_progress_map" ]]; then
+            no_progress_count=$((no_progress_count + 1))
+            log_warn "⚠️ 检测到进度停滞 (${no_progress_count}/${max_no_progress_iterations}), 平均进度: ${avg_progress}%"
+        else
+            no_progress_count=0
+            log_info "📈 推理任务进度: ${avg_progress}% | ${current_progress_map}"
+        fi
+
+        prev_progress_map="$current_progress_map"
+
+        # 检查是否所有文件都完成
+        if [[ "$all_complete" == true ]]; then
+            log_info "✅ 所有 ${total_files} 个推理任务已完成"
+            # 验证完成后的数据完整性
+            auto_model_deploy_and_infer "$node" "$port"
+            return 0
+        fi
+
+        # 检查进度是否长时间停滞（可能表示任务异常）
+        if [[ $no_progress_count -gt $max_no_progress_iterations ]]; then
+            log_error "❌ 推理任务长时间无进展（已 ${max_no_progress_iterations}0 秒），可能存在异常"
+            log_info "📋 将触发节点 ${node} 的故障诊断和重启流程"
+            # 不返回，继续让 auto_model_deploy_and_infer 处理
+            break
+        fi
+
+        iteration=$((iteration + 1))
+        sleep "$INFER_POLL_INTERVAL"
+    done
+
+    # 等待超时或进度停滞
+    log_warn "⏰ 推理任务等待超时或停滞 (>${INFER_WAIT_TIMEOUT}秒或${max_no_progress_iterations}0秒无进展)"
+    log_info "📋 将执行数据完整性验证和故障修复流程"
+    auto_model_deploy_and_infer "$node" "$port"
 }
 
 # 重启指定节点的模型部署脚本和数据提交脚本
@@ -1257,7 +1380,7 @@ auto_model_deploy_and_infer() {
     local port="$2"
     local node_key="${node}_${port}"
 
-    log_info "✅ 节点 ${node} 上的推理任务已完成，正在验证分配的数据完整性..."
+    log_info "🔍 节点 ${node} 开始数据完整性验证流程..."
 
     # 从全局映射中获取该节点分配的所有文件
     local node_files="${NODE_FILE_ASSIGNMENTS[$node_key]:-}"
@@ -1272,18 +1395,24 @@ auto_model_deploy_and_infer() {
 
         local incomplete_files=()
         local incomplete_count=0
+        local complete_count=0
 
         # 逐个检查分配的文件
         for file in "${assigned_files[@]}"; do
             local output_file="${OUTPUT_DIR}/infer_${SERVED_MODEL_NAME//\//_}_${file%.*}_bz${N_SAMPLES}.jsonl"
             local input_file="${DATASET_DIR}/${file}"
 
-            if ! check_inference_data_completeness "$node" "$input_file" "$output_file" "$N_SAMPLES"; then
+            if check_inference_data_completeness "$node" "$input_file" "$output_file" "$N_SAMPLES"; then
+                complete_count=$((complete_count + 1))
+            else
                 incomplete_files+=("$file")
                 incomplete_count=$((incomplete_count + 1))
-                log_warn "⚠️ Prompt ${file} 数据尚未推理完成，需要再提交推理任务"
+                log_warn "⚠️ 文件 ${file} 数据尚未推理完成，需要进行重试"
             fi
         done
+
+        # 输出检查结果统计
+        log_info "📋 数据完整性检查结果: 完成 ${complete_count}/${#assigned_files[@]}, 不完整 ${incomplete_count}/${#assigned_files[@]}"
 
         # 如果有数据不完整的文件，则进行重启和重试
         if [[ $incomplete_count -gt 0 ]]; then
@@ -1293,20 +1422,25 @@ auto_model_deploy_and_infer() {
             local node_retry_key="${node_key}_retry_count"
             local retry_count=${NODE_PROCESSED_FILES[$node_retry_key]:-0}
 
-            if [[ $retry_count -lt $MAX_RESTART_COUNTS ]]; then
+            # 设置最大重试次数为 2（保留历史值）
+            local max_retries=$((MAX_RESTART_COUNTS > 0 ? MAX_RESTART_COUNTS : 2))
+
+            if [[ $retry_count -lt $max_retries ]]; then
                 retry_count=$((retry_count + 1))
                 NODE_PROCESSED_FILES[$node_retry_key]=$retry_count
 
-                log_warn "🔄 这是第 ${retry_count}/${MAX_RESTART_COUNTS} 次重试..."
+                log_warn "🔄 这是第 ${retry_count}/${max_retries} 次重试..."
 
                 # 重启服务
                 if restart_node_services "$node" "$port" 0; then
+                    log_info "✅ 节点 ${node} 服务重启成功"
                     log_info "📤 开始重新提交 ${incomplete_count} 个不完整的文件..."
 
                     # 重新提交所有不完整的文件
                     for file in "${incomplete_files[@]}"; do
                         local output_file="${OUTPUT_DIR}/infer_${SERVED_MODEL_NAME//\//_}_${file%.*}_bz${N_SAMPLES}.jsonl"
                         local input_file="${DATASET_DIR}/${file}"
+                        log_info "  -> 重新提交: ${file}"
                         resubmit_inference_task "$node" "$port" "$input_file" "$output_file" "$SERVED_MODEL_NAME"
                     done
 
@@ -1333,15 +1467,16 @@ auto_model_deploy_and_infer() {
                     done
 
                     if [[ $still_incomplete -eq 0 ]]; then
-                        log_info "✅ 所有文件重试后均已完整"
+                        log_info "✅ 所有 ${#incomplete_files[@]} 个文件重试后均已完整"
                     else
-                        log_error "❌ 仍有 ${still_incomplete} 个文件数据不完整，记录为失败"
+                        log_error "❌ 仍有 ${still_incomplete}/${#incomplete_files[@]} 个文件数据不完整"
                     fi
                 else
                     log_error "❌ 节点 ${node} 服务重启失败，无法重新提交任务"
                 fi
             else
-                log_error "❌ 节点 ${node} 已达到最大重试次数 (2)，放弃重试"
+                log_error "❌ 节点 ${node} 已达到最大重试次数 (${max_retries})，放弃重试"
+                log_error "❌ 失败文件列表: ${incomplete_files[*]}"
             fi
         else
             log_info "✅ 节点 ${node} 分配的所有 ${#assigned_files[@]} 个文件数据均已完整"
