@@ -24,7 +24,7 @@ duplicate_datasets() {
 
     rm -rf "${TEMP_DATASET_DIR}"
     mkdir -p "${TEMP_DATASET_DIR}"
-    
+
     for dataset in "${DATASET_FILES[@]}"; do
         local filename=$(basename "$dataset" .jsonl)
         local extension=".jsonl"
