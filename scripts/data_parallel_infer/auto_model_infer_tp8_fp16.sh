@@ -263,6 +263,10 @@ readonly INPUT_KEY="${INPUT_KEY:-question}"           # 输入字段键名
 readonly SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
 readonly MAX_WORKERS=${MAX_WORKERS:-128}               # 客户端每进程内部的线程/协程并发
 
+# 等待推理完成的默认配置
+readonly INFER_WAIT_TIMEOUT=${INFER_WAIT_TIMEOUT:-1800}   # 等待远端推理完成的最大秒数（默认 30 分钟）
+readonly INFER_POLL_INTERVAL=${INFER_POLL_INTERVAL:-10}   # 轮询间隔（秒）
+
 # =======================================================
 #                  全局变量声明
 # =======================================================
@@ -279,6 +283,7 @@ declare -a READY_INSTANCE_IDS       # 存储已就绪实例在节点内的 index
 # 键: 节点地址_端口，值: 文件列表（空格分隔）
 declare -A NODE_FILE_ASSIGNMENTS    # 存储节点到文件的映射关系
 declare -A NODE_PROCESSED_FILES     # 记录已处理的文件（用于避免重复重试）
+declare -A MAX_RESTART_COUNTS       # 存储每个节点的最大重启次数
 
 # =======================================================
 #                  工具函数区域
@@ -1087,7 +1092,9 @@ run_task_batch_parallel() {
         log_warn "节点 ${node} 上没有有效的推理任务命令，跳过执行"
     fi
 
-    log_info "✅ 节点 ${node} ${port} 上的推理任务已完成"
+    log_info "✅ 节点 ${node} ${port} 上的推理任务已提交，等待远端输出完成..."
+
+    # 提交完成后执行验证与必要的重试/清理
     auto_model_deploy_and_infer "$node" "$port"
 }
 
@@ -1154,14 +1161,12 @@ check_inference_data_completeness() {
 #   $1: node (string) - 节点地址
 #   $2: port (int) - 服务端口
 #   $3: instance_id (int) - 实例 ID
-#   $4: input_file (string) - 输入文件路径（可选）
 # Returns:
 #   None
 restart_node_services() {
     local node="$1"
     local port="$2"
     local instance_id="${3:-0}"
-    local input_file="${4:-}"
 
     log_info "🔄 正在重启节点 ${node} (端口: ${port}) 的服务..."
 
@@ -1217,11 +1222,10 @@ resubmit_inference_task() {
 
     local base_url="http://127.0.0.1:${port}/v1"
 
-    # 清理现有的输出文件（确保重新生成）
-    ssh_run "$node" "rm -f '${output_file}' || true" >/dev/null 2>&1
-
     # 构建推理命令
-    local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_retry.log"
+    local base_name="${input_file%.*}"
+    local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${base_name}_retry.log"
+
     local infer_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
         nohup python '${INFER_SCRIPT}' \
@@ -1235,6 +1239,7 @@ resubmit_inference_task() {
             --max_workers ${MAX_WORKERS} \
             > '${log_file}' 2>&1 &"
 
+    log_info "🚀 节点 ${node} 提交 OpenAI API Server 进行推理任务..."
     log_info "🚀 重新启动推理任务: ${input_file} -> ${output_file}"
     ssh_run "$node" "$infer_cmd" >/dev/null 2>&1
     sleep 2
@@ -1276,7 +1281,7 @@ auto_model_deploy_and_infer() {
             if ! check_inference_data_completeness "$node" "$input_file" "$output_file" "$N_SAMPLES"; then
                 incomplete_files+=("$file")
                 incomplete_count=$((incomplete_count + 1))
-                log_warn "⚠️ 文件 ${file} 数据不完整"
+                log_warn "⚠️ Prompt ${file} 数据尚未推理完成，需要再提交推理任务"
             fi
         done
 
@@ -1288,11 +1293,11 @@ auto_model_deploy_and_infer() {
             local node_retry_key="${node_key}_retry_count"
             local retry_count=${NODE_PROCESSED_FILES[$node_retry_key]:-0}
 
-            if [[ $retry_count -lt 2 ]]; then
+            if [[ $retry_count -lt $MAX_RESTART_COUNTS ]]; then
                 retry_count=$((retry_count + 1))
                 NODE_PROCESSED_FILES[$node_retry_key]=$retry_count
 
-                log_warn "🔄 这是第 ${retry_count}/2 次重试..."
+                log_warn "🔄 这是第 ${retry_count}/${MAX_RESTART_COUNTS} 次重试..."
 
                 # 重启服务
                 if restart_node_services "$node" "$port" 0; then
