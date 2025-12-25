@@ -62,7 +62,9 @@ def should_keep_example(example: Dict[str, Any],
     """Determine if example should be kept based on filtering criteria."""
     # Keep examples that have boxed{} and are within token limit
     exceeded = example['max_token_length'] > max_token_length
-    return example['has_boxed'] or exceeded
+    if not example['has_boxed'] or exceeded:
+        return True
+    return False
 
 
 def load_and_validate_args() -> argparse.Namespace:
@@ -94,18 +96,6 @@ def load_and_validate_args() -> argparse.Namespace:
                         help='Number of processes for filtering')
 
     return parser.parse_args()
-
-
-def validate_paths(input_path: str, output_file: str) -> None:
-    """Validate input and output paths."""
-    input_files = list(Path().glob(input_path))
-    if not input_files:
-        raise ValueError(f'No files found matching pattern: {input_path}')
-
-    output_path = Path(output_file)
-    if output_path.exists() and not output_path.is_file():
-        raise ValueError(
-            f'Output path exists but is not a file: {output_file}')
 
 
 def process_dataset(dataset: Dataset, tokenizer: AutoTokenizer,
@@ -147,9 +137,6 @@ def main():
     try:
         # Load and validate arguments
         args = load_and_validate_args()
-
-        # Validate paths
-        validate_paths(args.input_path, args.output_file)
 
         # Setup output directory
         output_file = Path(args.output_file)
