@@ -2,29 +2,29 @@
 set -euo pipefail
 
 # Absolute paths
-AUTO_INFER_SH="/home/jianzhnie/llmtuner/llm/LLMEval/scripts/data_parallel_infer/auto_model_infer_tp8_bf16.sh"
-DEFAULT_NODE_LIST="/home/jianzhnie/llmtuner/llm/LLMEval/available_nodes.txt"
+AUTO_INFER_SH="/home/jianzhnie/llmtuner/llm/LLMEval/scripts/data_parallel_infer/auto_model_infer_tp8_fp16_v1.sh"
+DEFAULT_NODE_LIST="/home/jianzhnie/llmtuner/llm/LLMEval/node_list_graph.txt"
 
 # Override below as needed (or export before running)
 export SSH_USER="${SSH_USER:-jianzhnie}"
 
 # Model/engine
-export MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/llm/LLMEval/work_dir/opg_32b_nv_cot_lt_42k_step_350}"
+export MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/llm/LLMEval/work_dir/opg_32b_step_800}"
 export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-8}"
 export INSTANCES_PER_NODE="${INSTANCES_PER_NODE:-1}"
 export MEMORY_UTILIZATION="${MEMORY_UTILIZATION:-0.9}"
-export CPU_OFFLOAD_GB="${CPU_OFFLOAD_GB:32}"
-export SWAP_SPACE="${SWAP_SPACE:-0}"
+export CPU_OFFLOAD_GB="${CPU_OFFLOAD_GB:-8}"
+export SWAP_SPACE="${SWAP_SPACE:-8}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
-export MAX_NUM_SEQS="${MAX_NUM_SEQS:-1024}"
-export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-512000}"
-export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-opg_32b_nv_cot_lt_42k_step_350}"
+export MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
+export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
+export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-opg_32b_step_800_graph}"
 export N_SAMPLES="${N_SAMPLES:-4}"
 
 # Project
 export PROJECT_DIR="${PROJECT_DIR:-/home/jianzhnie/llmtuner/llm/LLMEval}"
 export INFER_SCRIPT="${INFER_SCRIPT:-${PROJECT_DIR}/llmeval/vllm/online_server.py}"
-export SET_ENV_SCRIPT="${SET_ENV_SCRIPT:-${PROJECT_DIR}/set_env.sh}"
+export SET_ENV_SCRIPT="${SET_ENV_SCRIPT:-${PROJECT_DIR}/set_env3.sh}"
 
 # IO
 export OUTPUT_ROOT="${OUTPUT_ROOT:-/home/jianzhnie/llmtuner/llm/LLMEval/output}"
@@ -38,7 +38,7 @@ export INPUT_KEY="${INPUT_KEY:-prompt}"                            # 输入字�
 
 # Client concurrency
 export SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
-export MAX_WORKERS="${MAX_WORKERS:-128}"
+export MAX_WORKERS="${MAX_WORKERS:-16}"
 
 # Server
 export DISABLE_LOG_REQUESTS="${DISABLE_LOG_REQUESTS:-1}"
@@ -66,6 +66,7 @@ echo "Starting distributed inference:"
 echo "  Nodes file: $NODE_LIST_FILE"
 echo "  Model: ${MODEL_PATH}"
 echo "  Served name: ${SERVED_MODEL_NAME}"
+echo "  Set Env : ${SET_ENV_SCRIPT}"
 echo "  Tensor parallel size(TP): ${TENSOR_PARALLEL_SIZE}"
 echo "  Memoary Utilization:  ${MEMORY_UTILIZATION}"
 echo "  Concurrency: MAX_NUM_SEQS=${MAX_NUM_SEQS}, MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS}"
