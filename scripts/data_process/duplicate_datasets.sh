@@ -5,7 +5,7 @@ set -euo pipefail
 # === 数据集相关 ===
 readonly PROJECT_DIR="/home/jianzhnie/llmtuner/llm/LLMEval"
 readonly DATASET_DIR="${PROJECT_DIR}/data/"
-readonly TEMP_DATASET_DIR="${DATASET_DIR}/clone_datasets"
+readonly TEMP_DATASET_DIR="${DATASET_DIR}/aime"
 
 # 要复制的本地数据集文件
 readonly DATASET_FILES=(
@@ -13,7 +13,7 @@ readonly DATASET_FILES=(
     "${DATASET_DIR}/aime25.jsonl"
 )
 
-readonly NUM_DUPLICATES=8      # 数据集复制份数
+readonly NUM_DUPLICATES=16      # 数据集复制份数
 
 # 复制数据集多份
 duplicate_datasets() {
