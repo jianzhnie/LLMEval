@@ -651,7 +651,9 @@ class EvalTaskArguments:
         if self.timeout <= 0:
             raise ValueError(f'timeout must be positive, got {self.timeout}')
         valid_tasks = [
-            'math_opensource/aime24', 'math_opensource/aime25',
+            'math_opensource/math500', 'math_opensource/math',
+            'math_opensource/gsm8k', 'math_opensource/aime24',
+            'math_opensource/aime25', 'math_opensource/hmmt25',
             'livecodebench', 'ifeval'
         ]
         if self.task_name not in valid_tasks:
