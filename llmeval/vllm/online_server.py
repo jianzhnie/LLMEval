@@ -6,6 +6,8 @@ supporting concurrent requests, retry logic, and resume functionality for large-
 inference tasks.
 """
 
+from __future__ import annotations
+
 import collections
 import concurrent.futures
 import copy
@@ -211,13 +213,14 @@ class InferenceClient:
         # Make API call with exponential backoff retry logic
         last_exception = None
         for attempt in range(self.max_retries + 1):
+            completion = None
             try:
                 completion = self.client.chat.completions.create(**call_args)
                 result = completion.choices[0].message.content
                 return result
             except AttributeError as e:
                 # Handle missing or invalid completion attributes
-                err_msg = getattr(completion, 'message', '')
+                err_msg = getattr(completion, 'message', '') if completion else ''
                 if err_msg:
                     sleep_time = (2**attempt) + random.randint(10, 20)
                     logger.warning(
@@ -243,7 +246,7 @@ class InferenceClient:
                 # Handle context length and other API errors
                 if 'maximum context length' in e.message:
                     logger.warning(f'Max context length exceeded: {e.message}')
-                    return {'gen': '', 'end_reason': 'max length exceeded'}
+                    return ''
                 logger.error(f'API error: {e.message}')
                 if attempt < self.max_retries:
                     sleep_time = (2**attempt) + random.randint(25, 35)
@@ -647,8 +650,7 @@ class InferenceRunner:
                     try:
                         result = future.result()
                         if result is None:
-                            with self._stats_lock:
-                                self._stats['failed'] += 1
+                            pass  # process_item already updated stats
                     except Exception as e:
                         logger.error(
                             f'An unexpected error occurred in a thread: {e}',
@@ -732,9 +734,9 @@ class InferenceRunner:
 
             logger.info('\n=== Execution Summary ===')
             logger.info(f'Total samples in dataset: {total_samples}')
-            logger.info(f'Successfully processed: {self._stats["processed"]}')
-            logger.info(f'Failed: {self._stats["failed"]}')
-            logger.info(f'Skipped: {self._stats["skipped"]}')
+            logger.info(f'Successfully processed: {self._stats['processed']}')
+            logger.info(f'Failed: {self._stats['failed']}')
+            logger.info(f'Skipped: {self._stats['skipped']}')
             logger.info(f'Success rate: {success_rate:.2f}%')
             logger.info(f'Total duration: {duration:.2f} seconds')
             logger.info(f'Output file: {self.args.output_file}')

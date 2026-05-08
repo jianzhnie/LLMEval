@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Configuration classes for a large language model evaluation pipeline.
 

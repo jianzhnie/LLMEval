@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Dict, Final, Optional
 
 # Defaults (used only if CLI values are not provided)

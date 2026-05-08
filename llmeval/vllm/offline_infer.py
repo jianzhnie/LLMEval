@@ -10,6 +10,8 @@ This module provides a small, documented wrapper around vLLM to:
 The output schema appends generations into a `gen` list for each input record.
 """
 
+from __future__ import annotations
+
 import collections
 import copy
 import json
@@ -268,8 +270,7 @@ class OfflineInferenceRunner:
 
                         # Only write if we got a valid response
                         if model_response and model_response.strip():
-                            result: Dict[str,
-                                         Any] = copy.deepcopy(original_item)
+                            result: Dict[str, Any] = original_item.copy()
                             result.setdefault(DEFAULT_RESPONSE_KEY,
                                               []).append(model_response)
 
@@ -534,7 +535,7 @@ class OfflineInferenceRunner:
                 messages: Optional[List[Dict[
                     str, str]]] = self.convert_to_messages_format(item)
                 if messages is not None:
-                    valid_items.append(copy.deepcopy(item))
+                    valid_items.append(item)
                     valid_messages.append(messages)
             except ValueError as e:
                 # Log the error but continue processing other items

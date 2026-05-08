@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional, Union
 
@@ -70,19 +73,11 @@ def init_logger(
         # Create directory if it doesn't exist
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Use RotatingFileHandler for log rotation
-        try:
-            from logging.handlers import RotatingFileHandler
-            file_handler = RotatingFileHandler(log_path,
-                                               mode=file_mode,
-                                               maxBytes=max_bytes,
-                                               backupCount=backup_count,
-                                               encoding='utf-8')
-        except ImportError:
-            # Fallback to regular FileHandler if RotatingFileHandler is not available
-            file_handler = logging.FileHandler(log_path,
-                                               mode=file_mode,
-                                               encoding='utf-8')
+        file_handler = RotatingFileHandler(log_path,
+                                           mode=file_mode,
+                                           maxBytes=max_bytes,
+                                           backupCount=backup_count,
+                                           encoding='utf-8')
 
         file_handler.setFormatter(formatter)
         file_handler.setLevel(level)

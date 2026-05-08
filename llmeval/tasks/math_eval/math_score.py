@@ -37,9 +37,11 @@ try:
     from math_verify.metric import math_metric
     from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 except ImportError as e:
-    logger.error(f'Missing required dependency: {e}\n'
-                 f'To use Math-Verify, install required packages:\n'
-                 f'pip install {" ".join(REQUIRED_PACKAGES.values())}')
+    logger.error(
+        f'Missing required dependency: {e}\n'
+        f'To use Math-Verify, install required packages:\n'
+        f'pip install {" ".join(REQUIRED_PACKAGES.values())}'
+    )
     import sys
     sys.exit(1)
 

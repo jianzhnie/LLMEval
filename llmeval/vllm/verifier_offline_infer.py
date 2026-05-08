@@ -6,6 +6,8 @@ for the Verifier evaluation system. It supports batch processing, resume
 functionality, and robust error handling.
 """
 
+from __future__ import annotations
+
 import collections
 import copy
 import json
@@ -518,7 +520,7 @@ class VerifierOfflineInferenceRunner:
         Returns:
             Processed result item ready for JSON serialization.
         """
-        result = copy.deepcopy(original_item)
+        result = original_item.copy()
         result['Verifier_response'] = model_response
 
         # Optionally strip original large fields to reduce output size
@@ -538,9 +540,17 @@ class VerifierOfflineInferenceRunner:
             result['Verifier_judgment'] = process_judgment_cursor(
                 model_response)
         elif self.args.verifier_prompt_type in [
-                'compassverify_prompt', 'compassverify_cot_prompt'
+                'compassverify_prompt',
+                'compassverify_cot_prompt',
+                'compassverify_prompt_zh',
+                'compassverify_cot_prompt_zh',
         ]:
             result['Verifier_judgment'] = process_judgment(model_response)
+        elif self.args.verifier_prompt_type in [
+                'fdd_verify_prompt', 'fdd_verify_prompt_zh'
+        ]:
+            result['Verifier_judgment'] = process_judgment_cursor(
+                model_response)
         else:
             raise NotImplementedError(
                 f'Unknown verifier_prompt_type: {self.args.verifier_prompt_type}'
@@ -716,7 +726,7 @@ class VerifierOfflineInferenceRunner:
                 'Engine is not initialized. Call setup_vllm_engine() before processing.'
             )
 
-        original_items = copy.deepcopy(batch_data)
+        original_items = batch_data
         batch_prompts: List[Optional[str]] = []
 
         # Convert data format and filter invalid items

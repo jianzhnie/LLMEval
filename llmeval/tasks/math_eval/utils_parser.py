@@ -3,6 +3,8 @@ This module provides a utility function to parse ground truth data
 from various datasets, extracting the chain-of-thought (CoT) and
 the final answer.
 """
+from __future__ import annotations
+
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -41,6 +43,8 @@ def parse_ground_truth(example: Dict[str, Any],
         raise TypeError("'label_key' must be a string or None")
 
     # Get the ground truth value
+    if label_key is None:
+        label_key = 'answer'
     if label_key not in example:
         raise ValueError(
             f"The ground truth key '{label_key}' not found in example. Available keys: {list(example.keys())}"
