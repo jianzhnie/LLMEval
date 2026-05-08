@@ -1,3 +1,37 @@
 [build-system]
-requires = ["setuptools>=64.0"]
+requires = ["setuptools>=64.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmeval"
+version = "0.1.0"
+authors = [
+    {name = "jianzhnie", email = "jianzhnie@gmail.com"},
+]
+description = "A package for evaluating large language models."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "datasets",
+    "math-verify",
+    "numpy",
+    "openai",
+    "Pebble",
+    "tokenizers",
+    "torch",
+    "tqdm",
+    "transformers",
+]
+
+[project.urls]
+Homepage = "https://gitee.com/jianzhnie/LLMEval"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["llmeval*"]
