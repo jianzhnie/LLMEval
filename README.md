@@ -6,105 +6,101 @@
 
 </div>
 
-[toc]
-
 ## Overview
+
+LLMEval is a comprehensive evaluation system for assessing Large Language Models (LLMs) on mathematical reasoning benchmarks. It supports both online (API-based) and offline (local inference) modes with built-in answer verification.
+
+### Key Features
+
+- **Multiple Inference Backends**: Support for vLLM (GPU/NPU) and SGLang with data parallelism
+- **Flexible Evaluation Modes**: Online server mode and offline local inference
+- **Benchmark Coverage**: AIME 2024/2025, MATH-500, GSM8K, and more
+- **Resume Capability**: Automatically resume interrupted evaluations
+- **Verification Support**: Built-in answer extraction and correctness verification
+
+## Results
+
 We have successfully reproduced various open-source model results on the AIME 2024 & AIME 2025 benchmarks.
 
-For benchmarks like AIME24, which contains only 30 problems, it is crucial to sample multiple responses as this can introduce high variance across repeated runs. The number of responses sampled per prompt likely accounts for the slight differences between our evaluation results and those reported by DeepSeek.
+For benchmarks like AIME24, which contains only 30 problems, it is crucial to sample multiple responses as this can introduce high variance across repeated runs. All results below use 64 samples per problem to ensure stability.
 
 ### DeepSeek-R1-Distill-Qwen-32B
 
-| Datasets | (🤗 LLMEval) | DeepSeek-R1-Distill-Qwen-32B（Reported） |
-| :------: | :---------: | :--------------------------------------: |
-|  AIME24  |   70.625    |                   72.6                   |
-|  AIME25  |   55.052    |                   59.0                   |
-| MATH-500 |    93.2     |                   94.3                   |
-
+| Dataset | LLMEval | Official Report |
+|:-------:|:-------:|:---------------:|
+| AIME24  | 70.625  |      72.6       |
+| AIME25  | 55.052  |      59.0       |
+| MATH-500|  93.2   |      94.3       |
 
 ### QwQ-32B
 
-| Datasets | (🤗 LLMEval) | QwQ-32B（Reported） |
-| :------: | :---------: | :-----------------: |
-|  AIME24  |    78.65    |        79.5         |
-|  AIME25  |    67.22    |        69.5         |
-
-
+| Dataset | LLMEval | Official Report |
+|:-------:|:-------:|:---------------:|
+| AIME24  |  78.65  |       79.5      |
+| AIME25  |  67.22  |       69.5      |
 
 ### Skywork-OR1-32B
 
-| Datasets | (🤗 LLMEval) | Skywork-OR1-32B（Reported） |
-| :------: | :---------: | :-------------------------: |
-|  AIME24  |    81.25    |            82.2             |
-|  AIME25  |    72.66    |            73.3             |
-
-
+| Dataset | LLMEval | Official Report |
+|:-------:|:-------:|:---------------:|
+| AIME24  |  81.25  |       82.2      |
+| AIME25  |  72.66  |       73.3      |
 
 ### OpenThinker3-7B
 
-| Datasets | (🤗 LLMEval) | OpenThinker3-7B（Reported） |
-| :------: | :---------: | :-------------------------: |
-| AIME24   | 70.41      | 69.0                    |
-| AIME25   | 59.16      | 53.3                    |
-
+| Dataset | LLMEval | Official Report |
+|:-------:|:-------:|:---------------:|
+| AIME24  |  70.41  |       69.0      |
+| AIME25  |  59.16  |       53.3      |
 
 ## Installation
 
-### Basic Environment Setup
+### Requirements
 
-| software  | version    |
-| --------- | ---------- |
-| Python    | == 3.10    |
-| CANN      | == 8.1.RC1 |
-| torch     | == 2.5.1   |
-| torch_npu | == 2.5.1   |
+| Software | Version |
+|----------|---------|
+| Python   | >= 3.10 |
+| torch    | >= 2.0  |
 
-For basic environment setup, please refer to this [documentation](https://gitee.com/ascend/pytorch).
+For Huawei Ascend NPU users:
+- CANN >= 8.1.RC1
+- torch_npu >= 2.5.1
+- vllm-ascend >= 0.7.3.post1
 
-### vllm & vllm-ascend
-
-To properly use vllm to accelerate inference, you need to compile and install vllm and vllm-ascend using the following commands. Please note the installation method varies depending on your machine type.
+### Install from Source
 
 ```bash
-# vllm
+git clone https://github.com/jianzhnie/LLMEval.git
+# Or use gitee mirror: git clone https://gitee.com/jianzhnie/LLMEval.git
+cd LLMEval
+pip install -e .
+```
+
+### Install vLLM (Optional)
+
+For GPU users:
+```bash
+pip install vllm>=0.7.0
+```
+
+For Huawei Ascend NPU users:
+```bash
+# Install vllm
 git clone -b v0.7.3 --depth 1 https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements-build.txt
-
-# for Atlas 200T A2 Box16
-VLLM_TARGET_DEVICE=empty pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
-
-# for Atlas 900 A2 PODc
 VLLM_TARGET_DEVICE=empty pip install -e .
-# vllm-ascend
+
+# Install vllm-ascend
 git clone -b v0.7.3.post1 --depth 1 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 export COMPILE_CUSTOM_KERNELS=1
 python setup.py install
 ```
 
-### llmeval
+## Quick Start
 
-Install the `llmeval` package by cloning the repository and then using `pip` to install it in editable mode. This will also install all the necessary dependencies.
-
-```bash
-# For github source
-git clone https://github.com/jianzhnie/LLMEval.git
-# For gitee source
-# git clone https://gitee.com/jianzhnie/LLMEval.git
-cd LLMEval
-pip install -e .
-```
-
-## Evaluation
-
-The VLLM library provides two modes for inference: online server mode and offline mode. Below are the instructions for both methods.
-
-### Online Server Mode with vLLM
-
-This method involves starting a vLLM server and then sending requests to it for inference. This approach is more flexible and can handle multiple requests concurrently.
-
-#### Step 1: Start vLLM Server
+### Step 1: Start vLLM Server (Online Mode)  
 
 First, start the vLLM server with the following command:
 
@@ -127,13 +123,9 @@ python -m vllm.entrypoints.openai.api_server \
     --port 8090
 ```
 
-Adjust the `tensor_parallel_size` parameter based on your available devices.
+Adjust the `tensor_parallel_size` parameter based on your available devices. Please refer to the [script](./scripts/model_server.sh) for more details.
 
-Please refer to the [script](./scripts/model_server.sh) for more details.
-
-### Optional : Start SGLang server/router
-
-Since the evaluation could takes days, we also suggest using SGLang with data parallelism to accelerate the evaluation. Refer to [SGLang documentation](https://docs.sglang.ai/router/router.html) for more details.
+Optional, Start SGLang server/router.Since the evaluation could takes days, we also suggest using SGLang with data parallelism to accelerate the evaluation. Refer to [SGLang documentation](https://docs.sglang.ai/router/router.html) for more details.
 
 ```bash
 # Use router to support better data parallelism
@@ -143,7 +135,7 @@ python -m sglang_router.launch_server --model-path Qwen/QwQ-32B --dp-size 4 --ho
 Adjust the `dp_size` parameter based on your available devices. Also adjust the port in following commands.
 
 
-#### Step 2: Run Inference
+### Step 2: Run Inference
 
 After starting the vLLM service, run the inference script to generate responses.
 
@@ -183,70 +175,6 @@ Please refer to the [script](./scripts/QwQ/online_infer.sh) for more details.
 
 **Note:** We apply repeated sampling to reduce evaluation variance, but it may take a long time to complete (more than 8 hours depending on your device).
 
-##### Parameter Description
-
-- `--base_url`: Base URL of the vLLM service
-- `--model_name`: Must match the model name used in Step 1
-- `--n_samples`: Number of samples per prompt
-  - AIME24 / AIME 25: Recommended 64 samples
-- `--input_file`: Input data file path
-- `--output_file`: Output result file path, model responses will be stored in the `gen` field
-- `--max_workers`: Maximum number of concurrent threads to control inference speed and resource usage
-
-##### Sampling Parameters
-
-We use ``top_p=0.95``, ``temperature=0.6``, ``top_k=40``, ``max_tokens=32768`` for sampling.
-
-##### Resuming Interrupted Inference
-
-If the inference process is interrupted, simply rerun the same command to resume. The script will automatically read the previous output file and process any prompts that haven't completed the required number of samples.
-
-
-### Offline Inference with vLLM
-
-This method involves loading the model into memory and then running inference locally. This approach is faster and more efficient, but it requires more memory and may not be suitable for large models.
-
-
-```bash
-# --- Configuration ---
-output_dir="./output/Qwen/QwQ-32B"
-model_name_or_path="Qwen/QwQ-32B"
-n_samples=64  # Default sample size for aime24 and aime25
-
-# Create output directory if it doesn't exist
-mkdir -p "${output_dir}"
-
-# --- Run Inference Tasks ---
-# aime24 (repeated sample 64 times)
-python llmeval/vllm/offline_infer.py \
-    --input_file "./data/aime24.jsonl" \
-    --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
-    --batch_size 32 \
-    --model_name_or_path "${model_name_or_path}" \
-    --trust_remote_code \
-    --max_model_len 32768 \
-    --gpu_memory_utilization 0.9 \
-    --tensor_parallel_size 8 \
-    --enforce_eager \
-    --n_samples "${n_samples}"
-
-# aime25 (repeated sample 64 times)
-python llmeval/vllm/offline_infer.py \
-    --input_file "./data/aime25.jsonl" \
-    --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
-    --batch_size 32 \
-    --model_name_or_path "${model_name_or_path}" \
-    --trust_remote_code \
-    --max_model_len 32768 \
-    --gpu_memory_utilization 0.9 \
-    --tensor_parallel_size 8 \
-    --enforce_eager \
-    --n_samples "${n_samples}"
-```
-Please refer to the [script](./scripts/QwQ/offline_infer.sh) for more details.
-
-The result format is consistent with the online server mode, and the model responses will be stored in the `gen` field.
-
 ### Step 3: Scoring
 
 After completing the inference, use the following commands for scoring:
@@ -279,14 +207,95 @@ python ./llmeval/tasks/math_eval/eval.py \
 ```
 Please refer to the [script](./scripts/get_scores.sh) for more details.
 
-#### Parameter Description
+## Detailed Usage
 
-- `--input_path`: Input file path, can directly use the output file from multi-threaded inference or other files with consistent format. Requirements:
-  - JSONL format
-  - Contains `prompt` and corresponding fields
-  - Model responses stored in the `gen` field
-- `--cache_path`: Cache directory for storing temporary files during evaluation
-- `--task_name`: Evaluation task name, must be one of the following options:
-  - `math_opensource/aime24`
-  - `math_opensource/aime25`
-- `max_workers`: Maximum number of concurrent threads to control evaluation speed and resource usage.
+### Inference Parameters
+
+Common parameters for both online and offline modes:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--n_samples` | 1 | Number of samples per problem |
+| `--temperature` | 0.6 | Sampling temperature |
+| `--top_p` | 0.95 | Nucleus sampling parameter |
+| `--top_k` | 40 | Top-k sampling parameter |
+| `--max_tokens` | 32768 | Maximum tokens to generate |
+
+Online mode specific:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--base_url` | Required | API server URL |
+| `--model_name` | Required | Model name for API |
+| `--max_workers` | 128 | Concurrent request threads |
+
+Offline mode specific:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--model_name_or_path` | Required | Local model path or HuggingFace ID |
+| `--tensor_parallel_size` | 1 | GPU count for tensor parallelism |
+| `--gpu_memory_utilization` | 0.9 | GPU memory fraction |
+| `--batch_size` | 128 | Inference batch size |
+
+### Supported Tasks
+
+- `math_opensource/aime24`
+- `math_opensource/aime25`
+- `math_opensource/math500`
+- `math_opensource/hmmt25`
+- `math_opensource/gsm8k`
+
+### Resume Interrupted Evaluation
+
+If inference is interrupted, simply re-run the same command. The script automatically:
+1. Reads existing output file
+2. Counts completed samples per problem
+3. Continues from where it left off
+
+### Context Length Extension (YaRN)
+
+For contexts exceeding 32K tokens, use RoPE scaling:
+
+**vLLM:**
+```bash
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-8B \
+    --rope-scaling '{"rope_type":"yarn","factor":4.0}' \
+    --max-model-len 131072
+```
+
+**SGLang:**
+```bash
+python -m sglang.launch_server \
+    --model-path Qwen/Qwen3-8B \
+    --json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0}}' \
+    --context-length 131072
+```
+
+## Project Structure
+
+```
+LLMEval/
+├── llmeval/
+│   ├── vllm/              # Inference engines
+│   │   ├── online_server.py
+│   │   ├── offline_infer.py
+│   │   └── verifier_offline_infer.py
+│   ├── tasks/             # Evaluation tasks
+│   │   └── math_eval/
+│   │       ├── eval.py
+│   │       ├── math_score.py
+│   │       └── utils_parser.py
+│   └── utils/             # Utilities
+│       ├── config.py
+│       ├── logger.py
+│       ├── template.py
+│       └── verifier_template.py
+├── scripts/               # Shell script examples
+└── data/                  # Benchmark datasets
+```
+
+## License
+
+This project is licensed under the MIT License.

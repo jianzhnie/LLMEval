@@ -6,333 +6,256 @@
 
 </div>
 
-
-[toc]
-
 ## 概述
 
-LLMEval 是一个用于评测大型语言模型（LLM）在各种任务上性能的系统。它支持多种评测任务和数据集，并提供了易于使用的接口来运行评测。主要特性包括：
+LLMEval 是一个用于评测大型语言模型（LLM）数学推理能力的综合评估系统。支持在线（API 模式）和离线（本地推理）两种模式，内置答案提取和正确性验证功能。
 
-- 支持 VLLM 和 SGLang 推理引擎
-- 支持在线 API Server 评测和加载本地模型评测
-- 多任务支持，包括数学评测（AIME24, AIME25, GSM8K, MATH-500 等）
-- 友好的日志系统，便于跟踪评测过程和结果
-- 可扩展性强，易于添加新的评测任务和数据集
+### 主要特性
 
+- **多推理后端**：支持 vLLM（GPU/NPU）和 SGLang（数据并行）
+- **灵活评测模式**：在线服务器模式和离线本地推理
+- **丰富基准测试**：AIME 2024/2025、MATH-500、GSM8K 等
+- **断点续评**：自动恢复中断的评测任务
+- **答案验证**：内置答案提取和正确性验证
 
-## 结果复现
+## 评测结果
 
 我们成功在 AIME 2024 和 AIME 2025 基准测试上复现了多个开源模型的结果。
 
-对于像 AIME24 这样只包含 30 个问题的基准测试，采样多个响应至关重要，因为这样可以降低随机性采样带来的误差。 下面的结果均采用了64次采样的平均值,以确保评估的稳定性。我们的评估结果与 DeepSeek 报告的结果之间仍存在细微差异，如果增加采样次数，这些差异可能会减小。
+对于 AIME24 这类仅包含 30 道题的基准测试，多次采样至关重要，因为随机采样会引入较大方差。以下结果均采用每题 64 次采样取平均值，以确保评估稳定性。
 
 ### DeepSeek-R1-Distill-Qwen-32B
 
-|  数据集  | (🤗 LLMEval) | DeepSeek-R1-Distill-Qwen-32B（官方报告） |
-| :------: | :---------: | :--------------------------------------: |
-|  AIME24  |   70.625    |                   72.6                   |
-|  AIME25  |   55.052    |                   59.0                   |
-| MATH-500 |    93.2     |                   94.3                   |
+| 数据集   | LLMEval | 官方报告 |
+|:-------:|:-------:|:-------:|
+| AIME24  | 70.625  |  72.6   |
+| AIME25  | 55.052  |  59.0   |
+| MATH-500|  93.2   |  94.3   |
 
 ### DeepSeek-R1-Distill-Qwen-7B
 
-|  数据集  | (🤗 LLMEval) | DeepSeek-R1-Distill-Qwen-7B（官方报告） |
-| :------: | :---------: | :--------------------------------------: |
-|  AIME24  |   51.77    |                   55.5                 |
-|  AIME25  |   36.77    |                   39.2               |
-
+| 数据集   | LLMEval | 官方报告 |
+|:-------:|:-------:|:-------:|
+| AIME24  |  51.77  |  55.5   |
+| AIME25  |  36.77  |  39.2   |
 
 ### DeepSeek-R1-Distill-Qwen-1.5B
 
-|  数据集  | (🤗 LLMEval) | DeepSeek-R1-Distill-Qwen-1.5B（官方报告） |
-| :------: | :---------: | :--------------------------------------: |
-|  AIME24  |   27.92    |                   28.9                 |
-|  AIME25  |   23.44    |                   21.4                |
-
+| 数据集   | LLMEval | 官方报告 |
+|:-------:|:-------:|:-------:|
+| AIME24  |  27.92  |  28.9   |
+| AIME25  |  23.44  |  21.4   |
 
 ### QwQ-32B
 
-| 数据集 | (🤗 LLMEval) | QwQ-32B（官方报告） |
-| :----: | :---------: | :-----------------: |
-| AIME24 |    78.80    |        79.5         |
-| AIME25 |    67.50    |        69.5         |
+| 数据集   | LLMEval | 官方报告 |
+|:-------:|:-------:|:-------:|
+| AIME24  |  78.65  |  79.5   |
+| AIME25  |  67.22  |  69.5   |
 
 ### Skywork-OR1-32B
 
-| 数据集 | (🤗 LLMEval) | Skywork-OR1-32B（官方报告） |
-| :----: | :---------: | :-------------------------: |
-| AIME24 |    81.25    |            82.2             |
-| AIME25 |    72.66    |            73.3             |
+| 数据集   | LLMEval | 官方报告 |
+|:-------:|:-------:|:-------:|
+| AIME24  |  81.25  |  82.2   |
+| AIME25  |  72.66  |  73.3   |
 
 ### OpenThinker3-7B
 
-| 数据集 | (🤗 LLMEval) | OpenThinker3-7B（官方报告） |
-| :----: | :---------: | :-------------------------: |
-| AIME24 |    70.41    |            69.0             |
-| AIME25 |    59.16    |            53.3             |
+| 数据集   | LLMEval | 官方报告 |
+|:-------:|:-------:|:-------:|
+| AIME24  |  70.41  |  69.0   |
+| AIME25  |  59.16  |  53.3   |
 
 ## 安装
 
-### 基础环境配置
+### 环境要求
 
-| 软件      | 版本       |
-| --------- | ---------- |
-| Python    | == 3.10    |
-| CANN      | == 8.1.RC1 |
-| torch     | == 2.5.1   |
-| torch_npu | == 2.5.1   |
+| 软件     | 版本      |
+|---------|----------|
+| Python  | >= 3.10  |
+| torch   | >= 2.0   |
 
-关于基础环境配置，请参考[此文档](https://gitee.com/ascend/pytorch)。
+华为昇腾 NPU 用户额外需要：
+- CANN == 8.1.RC1
+- torch_npu == 2.5.1
 
-### vllm 和 vllm-ascend
-
-为了正确使用 vllm 加速推理，您需要使用以下命令编译和安装 vllm 和 vllm-ascend。请注意，安装方法因机器类型而异。
+### 从源码安装
 
 ```bash
-# vllm
+git clone https://github.com/jianzhnie/LLMEval.git
+# 或使用 gitee 镜像：git clone https://gitee.com/jianzhnie/LLMEval.git
+cd LLMEval
+pip install -e .
+```
+
+### 安装 vLLM（可选）
+
+GPU 用户：
+```bash
+pip install vllm>=0.7.0
+```
+
+华为昇腾 NPU 用户：
+```bash
+# 安装 vllm
 git clone -b v0.7.3 --depth 1 https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements-build.txt
-
-# 对于 Atlas 200T A2 Box16
-VLLM_TARGET_DEVICE=empty pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
-
-# 对于 Atlas 900 A2 PODc
 VLLM_TARGET_DEVICE=empty pip install -e .
-# vllm-ascend
+
+# 安装 vllm-ascend
 git clone -b v0.7.3.post1 --depth 1 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 export COMPILE_CUSTOM_KERNELS=1
 python setup.py install
 ```
 
-对于其他版本的 vllm, 请参考[vllm 官方文档](https://vllm-project.github.io/) 和 [vllm-ascend 官方文档](https://vllm-project.github.io/vllm-ascend/) 获取更多信息。
+## 快速开始
 
-### llmeval
+### 1. 启动推理服务器（在线模式）
 
-通过克隆仓库并使用 `pip` 以可编辑模式安装 `llmeval` 包。这将同时安装所有必要的依赖。
-
+使用 vLLM：
 ```bash
-# For github source
-git clone https://github.com/jianzhnie/LLMEval.git
-# For gitee source
-# git clone https://gitee.com/jianzhnie/LLMEval.git
-cd LLMEval
-pip install -e .
-```
-
-## 评测
-
-评测过程分为以下三个步骤：
-
-- 启动 vLLM 服务器, 这一步涉及启动一个 vLLM 服务器,该服务器将接收推理请求并返回结果。
-- 运行推理, 这一步涉及向 vLLM 服务器发送推理请求，并将生成的响应保存到指定的输出文件中。
-- 计算得分, 这一步涉及对生成的响应进行评分，并将结果保存到指定的评测目录中。
-
-
-### 步骤 1：启动 vLLM 服务器
-
-首先，使用以下命令启动 vLLM 服务器：
-
-```bash
-model_path="Qwen/QwQ-32B"  # 或指向模型所在位置的路径
-model_name="Qwen/QwQ-32B"
-
-num_gpus=8
-max_model_len=32768  # ✅ 支持 32k 上下文
-gpu_memory_utilization=0.9  # ✅ 提高内存利用率
-
 python -m vllm.entrypoints.openai.api_server \
-    --model $model_path \
-    --trust-remote-code \
-    --served-model-name $model_name \
-    --tensor-parallel-size $num_gpus \
-    --gpu-memory-utilization $gpu_memory_utilization \
-    --max-model-len $max_model_len  \
-    --enforce-eager \
+    --model Qwen/QwQ-32B \
+    --served-model-name QwQ-32B \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 32768 \
     --port 8090
 ```
 
-根据可用设备调整 `tensor_parallel_size` 参数。
-
-详细信息请参考[脚本](./scripts/QwQ/model_server.sh)。
-
-
-### 步骤1（可选）：启动 SGLang 服务器
-
-由于评估可能需要几天时间，我们还建议使用具有数据并行性的 SGLang 来加速评估。有关详细信息，请参阅  [SGLang 文档](https://docs.sglang.ai/advanced_features/server_arguments.html) 。
-
+使用 SGLang（支持数据并行）：
 ```bash
-model_path="/Qwen/QwQ-32B"
-model_name="Qwen/QwQ-32B"
-
-num_gpus=8
-max_model_len=32768
-mem_fraction_static=0.7
-
-python -m sglang.launch_server \
-    --model $model_path \
-    --trust-remote-code \
-    --served-model-name $model_name \
-    --tensor-parallel-size $num_gpus \
-    --mem-fraction-static $mem_fraction_static \
-    --context-length $max_model_len  \
-    --schedule-conservativeness 1.5 \
-    --chunked-prefill-size 1024 \
-    --cuda-graph-max-bs 96 \
-    --max-prefill-tokens 2048 \
-    --attention-backend ascend \
-    --sampling-backend ascend \
-    --device npu \
-    --port 8090
+python -m sglang_router.launch_server \
+    --model-path Qwen/QwQ-32B \
+    --dp-size 4 \
+    --port 30000
 ```
 
-根据可用设备调整 `tensor_parallel_size` 参数。
+### 2. 运行推理
 
-### 步骤 2：运行推理
-
-启动 vLLM 服务后，运行推理脚本生成响应, 并将结果保存到指定的输出文件中。
-
+在线模式：
 ```bash
-output_dir="./output/Qwen/QwQ-32B"
-model_name="Qwen/QwQ-32B"
-
-base_url="http://127.0.0.1:8090/v1"
-n_samples=64  # aime24 和 aime25 的默认样本数
-
-# 如果输出目录不存在则创建
-mkdir -p "${output_dir}"
-
-# --- 运行推理任务 ---
-# aime24 (重复采样 64 次)
 python ./llmeval/vllm/online_server.py \
     --input_file "./data/aime24.jsonl" \
-    --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
-    --base_url "${base_url}" \
-    --model_name "${model_name}" \
-    --n_samples "${n_samples}" \
-    --system_prompt_type empty \
-    --max_workers 8
-
-# aime25 (重复采样 64 次)
-python ./llmeval/vllm/online_server.py \
-    --input_file "./data/aime25.jsonl" \
-    --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
-    --base_url "${base_url}" \
-    --model_name "${model_name}" \
-    --n_samples "${n_samples}" \
-    --system_prompt_type empty \
+    --output_file "./output/aime24.jsonl" \
+    --base_url "http://127.0.0.1:8090/v1" \
+    --model_name "QwQ-32B" \
+    --n_samples 64 \
     --max_workers 8
 ```
 
-详细信息请参考[脚本](./scripts/QwQ/online_infer.sh)。
+离线模式（无需启动服务器）：
+```bash
+python llmeval/vllm/offline_infer.py \
+    --input_file "./data/aime24.jsonl" \
+    --output_file "./output/aime24.jsonl" \
+    --model_name_or_path "Qwen/QwQ-32B" \
+    --tensor_parallel_size 8 \
+    --n_samples 64
+```
 
-**注意：** 我们使用重复采样来减少评估方差，但可能需要较长时间才能完成（根据设备情况可能超过8小时）。
-
-#### 参数说明
-
-- `--base_url`：vLLM 服务的基础 URL
-- `--model_name`：必须与步骤1中使用的模型名称匹配
-- `--n_samples`：每个提示的样本数
-  - AIME24 / AIME 25：建议64个样本
-- `--input_file`：输入数据文件路径
-- `--output_file`：输出结果文件路径，模型响应将存储在 `gen` 字段中
-- `--max_workers`：最大并发线程数，用于控制推理速度和资源使用
-- `--system_prompt_type`：系统提示类型，可选值为 `empty`、`default` 或 `deepseek_r1`, 具体取决于所使用的模型和任务需求。
-
-#### 采样参数
-
-我们使用 `top_p=0.95`、`temperature=0.6`、`top_k=40`、`max_tokens=32768` 进行采样。
-
-更多参数，可以通过 `--help` 查看。
-
-
-#### 恢复中断的推理
-
-如果推理过程中断，只需重新运行相同的命令即可恢复。脚本会自动读取之前的输出文件，并处理尚未完成所需样本数的提示。
-
-### 步骤 3：评分
-
-完成推理后，使用以下命令进行评分：
+### 3. 评分
 
 ```bash
-output_dir="./output/Qwen/QwQ-32B"
-n_samples=64  # aime24 和 aime25 的默认样本数
-
-# 评估输出目录
-reval_dir="${output_dir}/eval_score"
-# 如果评估目录不存在则创建
-mkdir -p "${reval_dir}"
-
-# --- 评估每个任务 ---
-# 评估 aime24
 python ./llmeval/tasks/math_eval/eval.py \
-    --input_path "${output_dir}/aime24_bz${n_samples}.jsonl" \
-    --cache_path "${reval_dir}/aime24_bz${n_samples}.jsonl" \
+    --input_path "./output/aime24.jsonl" \
+    --cache_path "./output/aime24_scores.jsonl" \
     --task_name "math_opensource/aime24" \
-    --max_workers 16 \
-    > "${reval_dir}/aime24_bz${n_samples}_res_result.txt"
-
-# 评估 aime25
-python ./llmeval/tasks/math_eval/eval.py \
-    --input_path "${output_dir}/aime25_bz${n_samples}.jsonl" \
-    --cache_path "${reval_dir}/aime25_bz${n_samples}.jsonl" \
-    --task_name "math_opensource/aime25" \
-    --max_workers 16 \
-    > "${reval_dir}/aime25_bz${n_samples}_res_result.txt"
+    --max_workers 16
 ```
 
-详细信息请参考[脚本](./scripts/get_scores.sh)。
+## 详细使用说明
 
-#### 参数说明
+### 推理参数
 
-- `--input_path`：输入文件路径，可以直接使用多线程推理的输出文件或其他格式一致的文件。要求：
-  - JSONL 格式
-  - 包含 `prompt` 和对应字段
-  - 模型响应存储在 `gen` 字段中
-- `--cache_path`：用于存储评估过程中临时文件的缓存目录
-- `--task_name`：评估任务名称，必须是以下选项之一：
-  - `math_opensource/aime24`
-  - `math_opensource/aime25`
-- `max_workers`：最大并发线程数，用于控制评估速度和资源使用。
+在线和离线模式通用参数：
 
+| 参数             | 默认值   | 说明                     |
+|----------------|---------|------------------------|
+| `--n_samples`   | 1       | 每道题采样次数              |
+| `--temperature` | 0.6     | 采样温度                   |
+| `--top_p`       | 0.95    | 核采样参数                  |
+| `--top_k`       | 40      | Top-k 采样参数             |
+| `--max_tokens`  | 32768   | 最大生成 token 数          |
 
-### 上下文长度和模型长度外推
+在线模式特有参数：
 
-很多模型在预训练中的上下文长度最长为 32,768 个 token。为了处理显著超过 32,768 个 token 的上下文长度，应应用 RoPE 缩放技术。我们已经验证了 [YaRN](https://arxiv.org/abs/2309.00071) 的性能，这是一种增强模型长度外推的技术，可确保在长文本上的最佳性能。
+| 参数             | 默认值   | 说明                     |
+|----------------|---------|------------------------|
+| `--base_url`    | 必填     | API 服务器地址             |
+| `--model_name`  | 必填     | API 使用的模型名称          |
+| `--max_workers` | 128     | 并发请求线程数              |
 
-#### VLLM 实现 YaRN 缩放
+离线模式特有参数：
 
+| 参数                      | 默认值  | 说明                      |
+|--------------------------|--------|--------------------------|
+| `--model_name_or_path`   | 必填    | 本地模型路径或 HuggingFace ID |
+| `--tensor_parallel_size` | 1      | 张量并行 GPU 数量           |
+| `--gpu_memory_utilization`| 0.9   | GPU 显存使用比例            |
+| `--batch_size`           | 128    | 推理批次大小                |
 
-vLLM 支持 YaRN，可以配置为
+### 支持的评测任务
 
+- `math_opensource/aime24`
+- `math_opensource/aime25`
+- `math_opensource/math500`
+- `math_opensource/hmmt25`
+- `math_opensource/gsm8k`
+
+### 断点续评
+
+如果推理过程中断，直接重新运行相同命令即可。脚本会自动：
+1. 读取已有输出文件
+2. 统计每道题已完成采样数
+3. 从断点继续评测
+
+### 上下文长度扩展（YaRN）
+
+处理超过 32K token 的长文本时，使用 RoPE 缩放技术：
+
+**vLLM：**
 ```bash
 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-8B \
-    --rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \
+    --rope-scaling '{"rope_type":"yarn","factor":4.0}' \
     --max-model-len 131072
 ```
 
-> 备注
->vLLM 实现了静态 YaRN，这意味着无论输入长度如何，缩放因子都保持不变，**这可能会对较短文本的性能产生影响。** 我们建议仅在需要处理长上下文时添加 `rope_scaling` 配置。还建议根据需要调整 `factor`。例如，如果您的应用程序的典型上下文长度为 65,536 个 token，则最好将 `factor` 设置为 2.0。
-
-> 备注
-> 如果未指定 `--max-model-len`，`config.json` 中的默认 `max_position_embeddings` 被设置为 40,960，vLLM 将使用该值。此分配包括为输出保留 32,768 个 token，为典型提示保留 8,192 个 token，这足以应对大多数涉及短文本处理的场景，并为模型思考留出充足空间。如果平均上下文长度不超过 32,768 个 token，我们不建议在此场景中启用 YaRN，因为这可能会降低模型性能。
-
-#### SGLang 实现 YaRN 缩放
-
-SGLang 支持 YaRN，可以配置为
-
+**SGLang：**
 ```bash
 python -m sglang.launch_server \
     --model-path Qwen/Qwen3-8B \
-    --json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}' \
+    --json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0}}' \
     --context-length 131072
 ```
 
->备注
-SGLang 实现了静态 YaRN，这意味着无论输入长度如何，缩放因子都保持不变，这可能会对较短文本的性能产生影响。 我们建议仅在需要处理长上下文时添加 rope_scaling 配置。还建议根据需要调整 factor。例如，如果您的应用程序的典型上下文长度为 65,536 个 token，则最好将 factor 设置为 2.0。
+## 项目结构
 
+```
+LLMEval/
+├── llmeval/
+│   ├── vllm/              # 推理引擎
+│   │   ├── online_server.py
+│   │   ├── offline_infer.py
+│   │   └── verifier_offline_infer.py
+│   ├── tasks/             # 评测任务
+│   │   └── math_eval/
+│   │       ├── eval.py
+│   │       ├── math_score.py
+│   │       └── utils_parser.py
+│   └── utils/             # 工具函数
+│       ├── config.py
+│       ├── logger.py
+│       ├── template.py
+│       └── verifier_template.py
+├── scripts/               # 脚本示例
+└── data/                  # 评测数据集
+```
 
->备注
-config.json 中的默认 max_position_embeddings 被设置为 40,960，SGLang 将使用该值。此分配包括为输出保留 32,768 个 token，为典型提示保留 8,192 个 token，这足以应对大多数涉及短文本处理的场景，并为模型思考留出充足空间。如果平均上下文长度不超过 32,768 个 token，我们不建议在此场景中启用 YaRN，因为这可能会降低模型性能。
+## 许可证
+
+本项目采用 MIT 许可证。
