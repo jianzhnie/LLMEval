@@ -13,7 +13,6 @@ The output schema appends generations into a `gen` list for each input record.
 from __future__ import annotations
 
 import collections
-import copy
 import json
 import logging
 import os
@@ -271,8 +270,10 @@ class OfflineInferenceRunner:
                         # Only write if we got a valid response
                         if model_response and model_response.strip():
                             result: Dict[str, Any] = original_item.copy()
-                            result.setdefault(DEFAULT_RESPONSE_KEY,
-                                              []).append(model_response)
+                            gen_list: List[str] = list(
+                                result.get(DEFAULT_RESPONSE_KEY, []))
+                            gen_list.append(model_response)
+                            result[DEFAULT_RESPONSE_KEY] = gen_list
 
                             f.write(
                                 json.dumps(result, ensure_ascii=False) + '\n')
@@ -460,7 +461,7 @@ class OfflineInferenceRunner:
             remaining: int = max(0, self.args.n_samples - completed)
 
             for _ in range(remaining):
-                expanded_data.append(copy.deepcopy(item))
+                expanded_data.append(item.copy())
 
         if skipped_items > 0:
             logger.warning(

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import collections
 import concurrent.futures
-import copy
 import dataclasses
 import json
 import logging
@@ -502,7 +501,7 @@ class InferenceRunner:
             remaining: int = max(0, self.args.n_samples - completed)
 
             for _ in range(remaining):
-                expanded_data.append(copy.deepcopy(item))
+                expanded_data.append(item.copy())
 
         if skipped_items > 0:
             logger.warning(
@@ -576,8 +575,10 @@ class InferenceRunner:
                     self._stats['failed'] += 1
                 return None
 
-            result = copy.deepcopy(item)
-            result.setdefault(DEFAULT_RESPONSE_KEY, []).append(response)
+            result = item.copy()
+            gen_list = list(result.get(DEFAULT_RESPONSE_KEY, []))
+            gen_list.append(response)
+            result[DEFAULT_RESPONSE_KEY] = gen_list
             return result
 
         # Step 1: Input Validation

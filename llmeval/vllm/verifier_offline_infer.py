@@ -9,7 +9,6 @@ functionality, and robust error handling.
 from __future__ import annotations
 
 import collections
-import copy
 import json
 import logging
 import os
@@ -526,7 +525,8 @@ class VerifierOfflineInferenceRunner:
         # Optionally strip original large fields to reduce output size
         if not self.args.keep_origin_data:
             input_key, _, response_key = self._effective_keys()
-            # Clear only the original input/response fields from the source data, not Verifier fields
+            # Clear original input/response fields and verbose verifier response
+            # to reduce output size; Verifier_judgment is preserved below.
             if input_key in result:
                 result[input_key] = ''
             if response_key in result:
@@ -694,7 +694,7 @@ class VerifierOfflineInferenceRunner:
             remaining = max(0, self.args.n_samples - completed)
 
             for _ in range(remaining):
-                expanded_data.append(copy.deepcopy(item))
+                expanded_data.append(item.copy())
 
         if skipped_items > 0:
             logger.warning(
