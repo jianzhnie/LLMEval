@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import collections
 import concurrent.futures
+import copy
 import dataclasses
 import json
 import logging
@@ -209,23 +210,34 @@ class InferenceClient:
                 completion = self.client.chat.completions.create(**call_args)
                 result = completion.choices[0].message.content
                 return result
-            except AttributeError as e:
-                # Handle missing or invalid completion attributes
-                err_msg = getattr(completion, "message", "") if completion else ""
-                if err_msg:
-                    sleep_time = (2**attempt) + random.randint(10, 20)
+            except (IndexError, AttributeError) as e:
+                # Handle missing choices, message attributes in completion response
+                err_msg = ""
+                if completion is not None:
+                    try:
+                        err_msg = (
+                            completion.choices[0].message.content
+                            if completion.choices
+                            else "(empty choices)"
+                        )
+                    except (IndexError, AttributeError):
+                        err_msg = "(invalid completion structure)"
+                if attempt < self.max_retries:
+                    sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
                     logger.warning(
-                        f"AttributeError on attempt {attempt + 1}/{self.max_retries + 1}. "
-                        f"Sleeping for {sleep_time:.2f}s. Error: {err_msg}"
+                        f"{type(e).__name__} on attempt {attempt + 1}/{self.max_retries + 1}. "
+                        f"Sleeping for {sleep_time:.2f}s. Message: {err_msg}"
                     )
                     time.sleep(sleep_time)
-                    last_exception = ClientError(err_msg, e)
+                    last_exception = ClientError(err_msg or str(e), e)
                 else:
-                    raise ClientError("Invalid completion response", e) from e
+                    raise ClientError(
+                        f"Max retries exceeded: {err_msg or str(e)}", e
+                    ) from e
             except (APIConnectionError, RateLimitError) as e:
-                # Handle retryable errors with backoff
+                # Handle retryable errors with exponential backoff
                 if attempt < self.max_retries:
-                    sleep_time = (2**attempt) + random.randint(20, 30)
+                    sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
                     logger.warning(
                         f"{type(e).__name__} on attempt {attempt + 1}/{self.max_retries + 1}. "
                         f"Sleeping for {sleep_time:.2f}s. Error: {e!s}"
@@ -241,7 +253,7 @@ class InferenceClient:
                     return ""
                 logger.error(f"API error: {e.message}")
                 if attempt < self.max_retries:
-                    sleep_time = (2**attempt) + random.randint(25, 35)
+                    sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
                     time.sleep(sleep_time)
                     last_exception = ClientError(e.message, e)
                 else:
@@ -250,7 +262,7 @@ class InferenceClient:
                 # Handle any other unexpected exceptions
                 logger.error(f"Unexpected error: {e!s}", exc_info=True)
                 if attempt < self.max_retries:
-                    sleep_time = (2**attempt) + random.randint(15, 25)
+                    sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
                     logger.warning(
                         f"Unexpected error on attempt {attempt + 1}/{self.max_retries + 1}. "
                         f"Sleeping for {sleep_time:.2f}s. Error: {e!s}"
@@ -490,7 +502,7 @@ class InferenceRunner:
             remaining: int = max(0, self.args.n_samples - completed)
 
             for _ in range(remaining):
-                expanded_data.append(item.copy())
+                expanded_data.append(copy.deepcopy(item))
 
         if skipped_items > 0:
             logger.warning(

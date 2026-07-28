@@ -95,8 +95,9 @@ class DataArguments:
 
         # Validate input file exists
         if not Path(self.input_file).exists():
-            logger.warning(
-                f"Input file {self.input_file} does not exist. Make sure to provide a valid input file path."
+            raise ValueError(
+                f"Input file '{self.input_file}' does not exist. "
+                "Please provide a valid input file path."
             )
 
         # Ensure cache directory exists
@@ -140,7 +141,10 @@ class PromptArguments:
     system_prompt_type: str = field(
         default="empty",
         metadata={
-            "help": "Optional system prompt to prepend to each input (if applicable)."
+            "help": (
+                "System prompt type. Valid: deepseek_r1, amthinking, openr1, "
+                "default, empty (no prompt). Default: 'empty'."
+            )
         },
     )
     # Computed value based on system_prompt_type; not settable via CLI
@@ -237,8 +241,10 @@ class GenerationArguments:
             )
         if not 0 <= self.top_p <= 1:
             raise ValueError(f"Top-p must be between 0 and 1, but got {self.top_p}.")
-        if self.top_k <= 0:
-            raise ValueError(f"Top-k must be positive, got: {self.top_k}")
+        if self.top_k < -1 or self.top_k == 0:
+            raise ValueError(
+                f"Top-k must be positive or -1 (disabled), got: {self.top_k}"
+            )
         if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError(
                 f"Max tokens must be a positive integer when specified, but got {self.max_tokens}."
@@ -511,7 +517,7 @@ class OnlineInferArguments(
         if self.temperature <= 0.0:
             self.do_sample = False
             logger.warning(
-                "Temperature is 0, setting do_sample=Falsefor greedy decoding."
+                "Temperature is 0, setting do_sample=False for greedy decoding."
             )
 
 
@@ -569,7 +575,13 @@ class VerifierInferArguments(
     verifier_prompt_type: str = field(
         default="fdd_prompt_cursor",
         metadata={
-            "help": "The type of verifier prompt to use. Options: compass_verifier, compass_verifier_with_reasoning"
+            "help": (
+                "The type of verifier prompt to use. "
+                "Valid options: compassverify_prompt, compassverify_prompt_zh, "
+                "compassverify_cot_prompt, compassverify_cot_prompt_zh, "
+                "fdd_prompt_cursor, fdd_prompt, "
+                "fdd_verify_prompt, fdd_verify_prompt_zh"
+            )
         },
     )
     keep_origin_data: bool = field(
@@ -596,7 +608,7 @@ class VerifierInferArguments(
         if self.temperature <= 0.0:
             self.do_sample = False
             logger.warning(
-                "Temperature is 0, setting do_sample=Falsefor greedy decoding."
+                "Temperature is 0, setting do_sample=False for greedy decoding."
             )
 
         # Validate and resolve verifier prompt

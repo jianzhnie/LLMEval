@@ -13,6 +13,7 @@ The output schema appends generations into a `gen` list for each input record.
 from __future__ import annotations
 
 import collections
+import copy
 import json
 import logging
 import os
@@ -189,26 +190,20 @@ class OfflineInferenceRunner:
         """
         # Determine field keys with fallbacks
         input_key: str = getattr(self.args, "input_key", None) or DEFAULT_INPUT_KEY
-        label_key: str = getattr(self.args, "label_key", None) or DEFAULT_LABEL_KEY
 
-        required_keys: list[str] = [input_key, label_key]
-        missing_keys: list[str] = [key for key in required_keys if key not in item]
-
-        if missing_keys:
+        # Only input_key is required for inference; label is only needed at scoring time
+        if input_key not in item:
             logger.warning(
-                f"Missing required keys {missing_keys} in item: {list(item.keys())}"
+                f"Missing required key '{input_key}' in item: {list(item.keys())}"
             )
             return None
 
         # Extract required fields
         prompt: Any = item.get(input_key)
-        ground_truth: Any = item.get(label_key)
 
         # Validate required fields
-        if not prompt or not ground_truth:
-            logger.warning(
-                f"Empty required field in item - question: {bool(prompt)}, ground_truth: {bool(ground_truth)}"
-            )
+        if not prompt:
+            logger.warning("Empty prompt field in item")
             return None
 
         # Convert prompt to string for template checking
@@ -259,7 +254,7 @@ class OfflineInferenceRunner:
             try:
                 with open(self.args.output_file, "a", encoding="utf-8") as f:
                     for idx, (original_item, output) in enumerate(
-                        zip(original_items, outputs, strict=False)
+                        zip(original_items, outputs, strict=True)
                     ):
                         model_response: str = self._extract_model_response(output)
 
@@ -456,7 +451,9 @@ class OfflineInferenceRunner:
             remaining: int = max(0, self.args.n_samples - completed)
 
             for _ in range(remaining):
-                expanded_data.append(item.copy())
+                # deepcopy prevents shared mutable references (e.g. gen list)
+                # across expanded copies of the same raw item.
+                expanded_data.append(copy.deepcopy(item))
 
         if skipped_items > 0:
             logger.warning(

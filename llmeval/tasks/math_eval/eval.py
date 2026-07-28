@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,20 +44,61 @@ def _get_after_think(text: str) -> str:
     Extract the text content that appears after the '</think>' tag in the input string.
 
     This helper function is used to process model outputs that may contain thinking steps
-    or reasoning enclosed in think tags. It efficiently extracts the final answer or
-    conclusion that follows the thinking process.
+    or reasoning enclosed in think tags. It handles various tag formats:
+    - ``</think>\\n\\n`` (double newline)
+    - ``</think>\\n`` (single newline)
+    - ``</think >`` (with trailing space)
+    - ``</think>`` (no whitespace)
+    - ``<answer>...</answer>`` tag extraction as fallback
 
     Args:
         text: The input string that may contain a '</think>' tag followed by text.
-            Example: "Let me think...\n</think>\n\nThe answer is 42"
 
     Returns:
-        str: The substring after '</think>\n\n', or the original text if the tag is not found.
-            In the example above, would return "The answer is 42"
+        str: The content after the think tag, with <answer> tag content preferred if available.
+            Returns the original text if no think tag is found.
     """
-    # Using str.partition for efficiency instead of split
-    # partition returns a 3-tuple: (before_separator, separator, after_separator)
-    return text.partition("</think>\n\n")[2]
+    if not text or not isinstance(text, str):
+        return ""
+
+    # Prefer content inside <answer>...</answer> tags
+    answer_pattern = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
+    match = answer_pattern.search(text)
+    if match:
+        # Return stripped content even if empty — empty answer is valid extraction
+        return match.group(1).strip()
+
+    # Fallback: extract content after </think> (with optional spaces and newlines)
+    think_end_pattern = re.compile(r"</think\s*>", re.IGNORECASE)
+    match = think_end_pattern.search(text)
+    if match:
+        tail = text[match.end() :].strip()
+        if tail:
+            return tail
+
+    # If nothing matched, return the original text
+    return text
+
+
+def _preprocess_answers(
+    data: list[dict[str, Any]], response_key: str
+) -> list[dict[str, Any]]:
+    """Strip think tags from all generated responses before scoring.
+
+    Args:
+        data: List of data items with generated responses.
+        response_key: The dictionary key for model responses.
+
+    Returns:
+        The modified list (in-place) with cleaned responses.
+    """
+    for item in data:
+        gen = item.get(response_key, [])
+        if isinstance(gen, list):
+            item[response_key] = [_get_after_think(str(g)) for g in gen]
+        elif isinstance(gen, str):
+            item[response_key] = _get_after_think(gen)
+    return data
 
 
 def _process_item(
@@ -226,6 +268,12 @@ def main() -> int:
         except (ValueError, TypeError) as e:
             logger.error(f"❌ Error processing data: {e!s}")
             return 1
+
+        # Strip <think> tags from model responses before scoring.
+        # Models using deepseek_r1/openr1 system prompts output
+        # <think>...</think><answer>...</answer> format, and math_verify
+        # may fail to extract answers from raw think-tagged text.
+        # _preprocess_answers(processed_data, args.response_key)
 
         # Run evaluation and get results
         accuracy = evaluate_task(

@@ -167,8 +167,10 @@ def process_answers(args: tuple[int, DataDict, str, str]) -> ProcessResult:
 
         return index, float(grade), pred_ans, gold_ans
 
-    except TimeoutError as te:
-        logger.warning(f"⏰ [Timeout] Job {index} timed out after {te} seconds")
+    # Note: Pebble enforces timeouts at the pool level (terminating subprocess),
+    # so TimeoutError here is a safety net for timeouts from math_verify internals.
+    except TimeoutError:
+        logger.warning(f"⏰ [Timeout] Job {index} timed out")
         return index, 0.0, "Timeout", "Timeout"
     except ValueError as ve:
         logger.error(f"❌ [Value Error] Invalid input format for job {index}: {ve}")
@@ -233,9 +235,11 @@ def compute_scores(
     stats = ProcessingStats(total=total)
     processed_indices = set()
 
-    # Optimize worker count based on system resources
+    # Optimize worker count based on system resources.
+    # Use min(total, max_workers, cpu_count-1) to avoid over-provisioning
+    # for small datasets (e.g., AIME24 has only 30 items).
     cpu_count = os.cpu_count() or 1
-    optimal_workers = min(max_workers, max(1, min(cpu_count - 1, total // 4)))
+    optimal_workers = min(total, max_workers, max(1, cpu_count - 1))
 
     with (
         tqdm(total=total, desc="Processing jobs", unit="job") as pbar,
@@ -278,9 +282,9 @@ def compute_scores(
             except StopIteration:
                 break
             except TimeoutError:
-                # Handle global timeout for the entire operation
-                logger.warning("Global timeout reached for processing")
-                break
+                # Handle timeout for individual task — skip and continue
+                logger.warning("Individual task timed out, skipping and continuing")
+                continue
             except Exception as e:
                 # Catch exceptions from the iterator, e.g., if a worker fails.
                 logger.error(f"❌ An error occurred while retrieving a result: {e}")

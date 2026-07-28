@@ -18,17 +18,27 @@ from llmeval.utils.config import (
 
 class TestDataArguments:
     def test_defaults_are_valid(self, tmp_path: Path) -> None:
-        args = DataArguments(input_file=str(tmp_path / "nonexistent.jsonl"))
+        in_file = tmp_path / "input.jsonl"
+        in_file.touch()  # DataArguments now raises on missing input
+        args = DataArguments(input_file=str(in_file))
         assert args.batch_size > 0
 
     def test_invalid_batch_size_raises(self, tmp_path: Path) -> None:
+        in_file = tmp_path / "x.jsonl"
+        in_file.touch()
         with pytest.raises(ValueError, match="positive integer"):
-            DataArguments(input_file=str(tmp_path / "x.jsonl"), batch_size=-1)
+            DataArguments(input_file=str(in_file), batch_size=-1)
 
     def test_output_dir_created(self, tmp_path: Path) -> None:
+        in_file = tmp_path / "x.jsonl"
+        in_file.touch()
         out = tmp_path / "sub" / "out.jsonl"
-        DataArguments(input_file=str(tmp_path / "x.jsonl"), output_file=str(out))
+        DataArguments(input_file=str(in_file), output_file=str(out))
         assert out.parent.exists()
+
+    def test_missing_input_file_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match=r"does not exist"):
+            DataArguments(input_file=str(tmp_path / "nonexistent.jsonl"))
 
 
 class TestPromptArguments:
@@ -54,7 +64,7 @@ class TestGenerationArguments:
 
     @pytest.mark.parametrize("temp", [-0.1, 2.1])
     def test_invalid_temperature_raises(self, temp: float) -> None:
-        with pytest.raises(ValueError, match="[Tt]emperature"):
+        with pytest.raises(ValueError, match=r"[Tt]emperature"):
             GenerationArguments(temperature=temp)
 
     def test_zero_temperature_sets_greedy(self) -> None:

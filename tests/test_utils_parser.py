@@ -25,11 +25,11 @@ class TestParseGroundTruthGeneric:
         assert answer == "99"
 
     def test_empty_answer_raises(self) -> None:
-        with pytest.raises(ValueError, match="[Ee]mpty"):
+        with pytest.raises(ValueError, match=r"[Ee]mpty"):
             parse_ground_truth({"answer": ""}, "aime24")
 
     def test_none_answer_raises(self) -> None:
-        with pytest.raises(ValueError, match="[Ee]mpty"):
+        with pytest.raises(ValueError, match=r"[Ee]mpty"):
             parse_ground_truth({"answer": None}, "aime24")
 
     def test_missing_key_raises(self) -> None:
@@ -58,7 +58,7 @@ class TestParseGroundTruthOlympiadbench:
         assert answer == "x^2"
 
     def test_empty_list_raises(self) -> None:
-        with pytest.raises(ValueError, match="[Ee]mpty"):
+        with pytest.raises(ValueError, match=r"[Ee]mpty"):
             parse_ground_truth({"answer": []}, "olympiadbench")
 
 

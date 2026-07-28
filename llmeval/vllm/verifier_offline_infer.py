@@ -9,6 +9,7 @@ functionality, and robust error handling.
 from __future__ import annotations
 
 import collections
+import copy
 import json
 import logging
 import os
@@ -140,14 +141,16 @@ def process_judgment(judgment_str: str) -> str:
         if paren_matches:
             return paren_matches[-1]
 
-        # Look for any A-D in the final section
-        letter_pattern: re.Pattern[str] = re.compile(r"([A-D])")
+        # Look for standalone A-D letters (with word boundaries) in the final section
+        letter_pattern: re.Pattern[str] = re.compile(
+            r"(?<![A-Za-z])([A-D])(?![A-Za-z])"
+        )
         letter_matches = letter_pattern.findall(final_section)
         if letter_matches:
             return letter_matches[-1]
 
-    # Strategy 4: Look for any A-D in the entire string
-    letter_pattern: re.Pattern[str] = re.compile(r"([A-D])")
+    # Strategy 4: Look for standalone A-D in the entire string
+    letter_pattern: re.Pattern[str] = re.compile(r"(?<![A-Za-z])([A-D])(?![A-Za-z])")
     all_matches = letter_pattern.findall(judgment_str)
     if all_matches:
         return all_matches[-1]
@@ -213,6 +216,20 @@ def process_judgment_cursor(judgment_str: str) -> str:
         return all_matches[-1].upper()
 
     return ""
+
+
+# Map verifier prompt types to their judgment extraction functions.
+# When adding a new prompt type to VERIFY_PROMPT_FACTORY, add its entry here too.
+JUDGMENT_EXTRACTOR: dict[str, type] = {
+    "fdd_prompt_cursor": process_judgment_cursor,
+    "fdd_prompt": process_judgment_cursor,
+    "compassverify_prompt": process_judgment,
+    "compassverify_prompt_zh": process_judgment,
+    "compassverify_cot_prompt": process_judgment,
+    "compassverify_cot_prompt_zh": process_judgment,
+    "fdd_verify_prompt": process_judgment_cursor,
+    "fdd_verify_prompt_zh": process_judgment_cursor,
+}
 
 
 class VerifierOfflineInferenceRunner:
@@ -460,7 +477,7 @@ class VerifierOfflineInferenceRunner:
             try:
                 with open(self.args.output_file, "a", encoding="utf-8") as f:
                     for idx, (original_item, output) in enumerate(
-                        zip(original_items, outputs, strict=False)
+                        zip(original_items, outputs, strict=True)
                     ):
                         # Extract model response
                         model_response = self._extract_model_response(output)
@@ -524,33 +541,20 @@ class VerifierOfflineInferenceRunner:
         # Optionally strip original large fields to reduce output size
         if not self.args.keep_origin_data:
             input_key, _, response_key = self._effective_keys()
-            # Clear original input/response fields and verbose verifier response
-            # to reduce output size; Verifier_judgment is preserved below.
+            # Clear original input/response fields to reduce output size.
+            # Verifier_response and Verifier_judgment are preserved for auditability.
             if input_key in result:
                 result[input_key] = ""
             if response_key in result:
                 result[response_key] = ""
-            result["Verifier_response"] = ""
 
-        # Add judgment
-        if self.args.verifier_prompt_type in ["fdd_prompt_cursor", "fdd_prompt"]:
-            result["Verifier_judgment"] = process_judgment_cursor(model_response)
-        elif self.args.verifier_prompt_type in [
-            "compassverify_prompt",
-            "compassverify_cot_prompt",
-            "compassverify_prompt_zh",
-            "compassverify_cot_prompt_zh",
-        ]:
-            result["Verifier_judgment"] = process_judgment(model_response)
-        elif self.args.verifier_prompt_type in [
-            "fdd_verify_prompt",
-            "fdd_verify_prompt_zh",
-        ]:
-            result["Verifier_judgment"] = process_judgment_cursor(model_response)
-        else:
+        # Extract judgment using the mapped extractor for the prompt type
+        extractor = JUDGMENT_EXTRACTOR.get(self.args.verifier_prompt_type)
+        if extractor is None:
             raise NotImplementedError(
                 f"Unknown verifier_prompt_type: {self.args.verifier_prompt_type}"
             )
+        result["Verifier_judgment"] = extractor(model_response)
 
         return result
 
@@ -685,7 +689,7 @@ class VerifierOfflineInferenceRunner:
             remaining = max(0, self.args.n_samples - completed)
 
             for _ in range(remaining):
-                expanded_data.append(item.copy())
+                expanded_data.append(copy.deepcopy(item))
 
         if skipped_items > 0:
             logger.warning(
