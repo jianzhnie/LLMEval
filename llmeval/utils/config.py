@@ -25,7 +25,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from transformers import HfArgumentParser
 
@@ -34,18 +34,18 @@ from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
 from llmeval.utils.verifier_template import VERIFY_PROMPT_FACTORY
 
 __all__ = [
-    'DataArguments',
-    'PromptArguments',
-    'GenerationArguments',
-    'VLLMEngineArguments',
-    'ServerArguments',
-    'OnlineInferArguments',
-    'OfflineInferArguments',
-    'VerifierInferArguments',
-    'EvalTaskArguments',
+    "DataArguments",
+    "EvalTaskArguments",
+    "GenerationArguments",
+    "OfflineInferArguments",
+    "OnlineInferArguments",
+    "PromptArguments",
+    "ServerArguments",
+    "VLLMEngineArguments",
+    "VerifierInferArguments",
 ]
 
-logger = init_logger('eval_config')
+logger = init_logger("eval_config")
 
 
 @dataclass
@@ -63,19 +63,23 @@ class DataArguments:
         task (str): Name of the evaluation task (e.g., 'aime24').
         batch_size (int): The number of samples to process in each batch.
     """
+
     input_file: str = field(
-        default='input.jsonl',
-        metadata={'help': 'Input JSONL file containing prompts.'})
+        default="input.jsonl", metadata={"help": "Input JSONL file containing prompts."}
+    )
     cache_dir: str = field(
-        default_factory=lambda: os.path.expanduser('~/.cache/huggingface'),
-        metadata={'help': 'Cache directory for models.'})
+        default_factory=lambda: os.path.expanduser("~/.cache/huggingface"),
+        metadata={"help": "Cache directory for models."},
+    )
     output_file: str = field(
-        default='output.jsonl',
-        metadata={'help': 'Output JSONL file to save results.'})
-    task: str = field(default='aime24',
-                      metadata={'help': 'Name of the evaluation task.'})
-    batch_size: int = field(default=128,
-                            metadata={'help': 'Batch size for data loading.'})
+        default="output.jsonl", metadata={"help": "Output JSONL file to save results."}
+    )
+    task: str = field(
+        default="aime24", metadata={"help": "Name of the evaluation task."}
+    )
+    batch_size: int = field(
+        default=128, metadata={"help": "Batch size for data loading."}
+    )
 
     def __post_init__(self) -> None:
         """
@@ -86,13 +90,14 @@ class DataArguments:
         """
         if self.batch_size <= 0:
             raise ValueError(
-                f'Batch size must be a positive integer, but got {self.batch_size}.'
+                f"Batch size must be a positive integer, but got {self.batch_size}."
             )
 
         # Validate input file exists
         if not Path(self.input_file).exists():
-            logger.warning(f'Input file {self.input_file} does not exist. '
-                           'Make sure to provide a valid input file path.')
+            logger.warning(
+                f"Input file {self.input_file} does not exist. Make sure to provide a valid input file path."
+            )
 
         # Ensure cache directory exists
         Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
@@ -122,21 +127,24 @@ class PromptArguments:
         ValueError: If input_key or label_key is empty, or if system_prompt_type
                    is not found in SYSTEM_PROMPT_FACTORY.
     """
-    input_key: str = field(default='prompt',
-                           metadata={'help': 'Key for input text in dataset.'})
+
+    input_key: str = field(
+        default="prompt", metadata={"help": "Key for input text in dataset."}
+    )
     label_key: str = field(
-        default='answer',
-        metadata={'help': 'Key for target/label text in dataset.'})
+        default="answer", metadata={"help": "Key for target/label text in dataset."}
+    )
     response_key: str = field(
-        default='gen', metadata={'help': 'Key for model generated text.'})
+        default="gen", metadata={"help": "Key for model generated text."}
+    )
     system_prompt_type: str = field(
-        default='empty',
+        default="empty",
         metadata={
-            'help':
-            'Optional system prompt to prepend to each input (if applicable).'
-        })
+            "help": "Optional system prompt to prepend to each input (if applicable)."
+        },
+    )
     # Computed value based on system_prompt_type; not settable via CLI
-    system_prompt: Optional[str] = field(init=False, default=None)
+    system_prompt: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         """
@@ -147,21 +155,26 @@ class PromptArguments:
                        is not found in SYSTEM_PROMPT_FACTORY.
         """
         if not self.input_key:
-            raise ValueError('Input key must be a non-empty string.')
+            raise ValueError("Input key must be a non-empty string.")
         if not self.label_key:
-            raise ValueError('Label key must be a non-empty string.')
+            raise ValueError("Label key must be a non-empty string.")
 
-        if (self.system_prompt_type is not None
-                and self.system_prompt_type not in SYSTEM_PROMPT_FACTORY):
+        if (
+            self.system_prompt_type is not None
+            and self.system_prompt_type not in SYSTEM_PROMPT_FACTORY
+        ):
             raise ValueError(
-                f'Invalid system prompt type: {self.system_prompt_type}. '
-                f'Valid options are: {list(SYSTEM_PROMPT_FACTORY.keys())}')
+                f"Invalid system prompt type: {self.system_prompt_type}. "
+                f"Valid options are: {list(SYSTEM_PROMPT_FACTORY.keys())}"
+            )
         self.system_prompt = SYSTEM_PROMPT_FACTORY.get(self.system_prompt_type)
-        logger.info(f'Using system_prompt_type: {self.system_prompt_type}, '
-                    f'content: {self.system_prompt}')
         logger.info(
-            'If you want to customize the system prompt, please modify the '
-            'SYSTEM_PROMPT_FACTORY in llmeval/utils/template.py')
+            f"Using system_prompt_type: {self.system_prompt_type}, content: {self.system_prompt}"
+        )
+        logger.info(
+            "If you want to customize the system prompt, please modify the "
+            "SYSTEM_PROMPT_FACTORY in llmeval/utils/template.py"
+        )
 
 
 @dataclass
@@ -186,28 +199,30 @@ class GenerationArguments:
     Raises:
         ValueError: If any parameter is outside its valid range.
     """
+
     do_sample: bool = field(
-        default=True,
-        metadata={'help': 'Whether to use sampling vs greedy decoding.'})
+        default=True, metadata={"help": "Whether to use sampling vs greedy decoding."}
+    )
     n_samples: int = field(
-        default=1,
-        metadata={'help': 'Number of sequences to generate per prompt.'})
-    temperature: float = field(default=0.6,
-                               metadata={'help': 'Sampling temperature.'})
+        default=1, metadata={"help": "Number of sequences to generate per prompt."}
+    )
+    temperature: float = field(default=0.6, metadata={"help": "Sampling temperature."})
     top_p: float = field(
-        default=0.95,
-        metadata={'help': 'Nucleus sampling probability threshold.'})
-    top_k: int = field(default=40,
-                       metadata={'help': 'Top-k sampling parameter.'})
-    max_tokens: Optional[int] = field(
-        default=None,
-        metadata={'help': 'The Maximum number of tokens to generate.'})
+        default=0.95, metadata={"help": "Nucleus sampling probability threshold."}
+    )
+    top_k: int = field(default=40, metadata={"help": "Top-k sampling parameter."})
+    max_tokens: int | None = field(
+        default=None, metadata={"help": "The Maximum number of tokens to generate."}
+    )
     skip_special_tokens: bool = field(
-        default=True, metadata={'help': 'Remove special tokens from output.'})
+        default=True, metadata={"help": "Remove special tokens from output."}
+    )
     repetition_penalty: float = field(
-        default=1.0, metadata={'help': 'Repetition penalty parameter.'})
+        default=1.0, metadata={"help": "Repetition penalty parameter."}
+    )
     enable_thinking: bool = field(
-        default=False, metadata={'help': 'Enable thinking mode for LLMs.'})
+        default=False, metadata={"help": "Enable thinking mode for LLMs."}
+    )
 
     def __post_init__(self) -> None:
         """
@@ -218,28 +233,27 @@ class GenerationArguments:
         """
         if not (0.0 <= self.temperature <= 2.0):
             raise ValueError(
-                f'Temperature must be between 0.0 and 2.0, got: {self.temperature}'
+                f"Temperature must be between 0.0 and 2.0, got: {self.temperature}"
             )
         if not 0 <= self.top_p <= 1:
-            raise ValueError(
-                f'Top-p must be between 0 and 1, but got {self.top_p}.')
+            raise ValueError(f"Top-p must be between 0 and 1, but got {self.top_p}.")
         if self.top_k <= 0:
-            raise ValueError(f'Top-k must be positive, got: {self.top_k}')
+            raise ValueError(f"Top-k must be positive, got: {self.top_k}")
         if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError(
-                f'Max tokens must be a positive integer when specified, '
-                f'but got {self.max_tokens}.')
+                f"Max tokens must be a positive integer when specified, but got {self.max_tokens}."
+            )
         if self.n_samples <= 0:
             raise ValueError(
-                f'Number of samples must be positive, but got {self.n_samples}.'
+                f"Number of samples must be positive, but got {self.n_samples}."
             )
         if self.repetition_penalty < 0:
             raise ValueError(
-                f'Repetition penalty must be non-negative, got: {self.repetition_penalty}'
+                f"Repetition penalty must be non-negative, got: {self.repetition_penalty}"
             )
         # Log generation mode for clarity
         if self.temperature <= 0.0:
-            logger.info('Generation mode: Greedy decoding (temperature=0)')
+            logger.info("Generation mode: Greedy decoding (temperature=0)")
 
 
 @dataclass
@@ -274,61 +288,64 @@ class VLLMEngineArguments:
         ValueError: If any parameter is outside its valid range or if
                    rope_scaling contains invalid JSON.
     """
+
     model_name_or_path: str = field(
-        default='Qwen/Qwen2.5-7B',
-        metadata={'help': 'Path to the model directory.'})
+        default="Qwen/Qwen2.5-7B", metadata={"help": "Path to the model directory."}
+    )
     trust_remote_code: bool = field(
-        default=True, metadata={'help': 'Whether to trust remote code.'})
+        default=True, metadata={"help": "Whether to trust remote code."}
+    )
     dtype: str = field(
-        default='auto',
+        default="auto",
         metadata={
-            'help':
-            'Data type for model execution (e.g., "fp16", "auto", "bfloat16").'
+            "help": 'Data type for model execution (e.g., "fp16", "auto", "bfloat16").'
         },
     )
     max_model_len: int = field(
-        default=32768,
-        metadata={'help': 'Maximum sequence length for the model.'})
+        default=32768, metadata={"help": "Maximum sequence length for the model."}
+    )
     rope_scaling: str = field(
-        default='{}',
-        metadata={'help': 'RoPE scaling configuration as a JSON string.'})
+        default="{}", metadata={"help": "RoPE scaling configuration as a JSON string."}
+    )
     # Parsed representation; not settable via CLI
-    rope_scaling_dict: Optional[Dict[str, Any]] = field(init=False,
-                                                        default=None)
+    rope_scaling_dict: dict[str, Any] | None = field(init=False, default=None)
     gpu_memory_utilization: float = field(
-        default=0.9, metadata={'help': 'Target GPU memory utilization (0-1).'})
+        default=0.9, metadata={"help": "Target GPU memory utilization (0-1)."}
+    )
     tensor_parallel_size: int = field(
-        default=1,
-        metadata={'help': 'Number of GPUs to use for tensor parallelism.'})
+        default=1, metadata={"help": "Number of GPUs to use for tensor parallelism."}
+    )
     pipeline_parallel_size: int = field(
-        default=1,
-        metadata={'help': 'Number of GPUs to use for pipeline parallelism.'})
+        default=1, metadata={"help": "Number of GPUs to use for pipeline parallelism."}
+    )
     enable_chunked_prefill: bool = field(
         default=False,
         metadata={
-            'help':
-            'Enable chunked prefill to reduce memory usage during generation.'
-        })
+            "help": "Enable chunked prefill to reduce memory usage during generation."
+        },
+    )
     enable_prefix_caching: bool = field(
-        default=False,
-        metadata={'help': 'Enable KV cache prefix optimization.'})
-    max_num_batched_tokens: Optional[int] = field(
-        default=512000, metadata={'help': 'Maximum tokens per batch.'})
-    max_num_seqs: Optional[int] = field(
-        default=4096, metadata={'help': 'Maximum parallel sequences.'})
+        default=False, metadata={"help": "Enable KV cache prefix optimization."}
+    )
+    max_num_batched_tokens: int | None = field(
+        default=512000, metadata={"help": "Maximum tokens per batch."}
+    )
+    max_num_seqs: int | None = field(
+        default=4096, metadata={"help": "Maximum parallel sequences."}
+    )
     enforce_eager: bool = field(
         default=True,
-        metadata={'help': 'Enforce eager execution for debugging purposes.'})
-    seed: int = field(default=0,
-                      metadata={'help': 'Random seed for initialization.'})
+        metadata={"help": "Enforce eager execution for debugging purposes."},
+    )
+    seed: int = field(default=0, metadata={"help": "Random seed for initialization."})
     device: str = field(
-        default='cuda',
-        metadata={
-            'help': 'Device to use for inference (e.g., "cuda", "auto").'
-        })
-    quantization: Optional[str] = field(
+        default="cuda",
+        metadata={"help": 'Device to use for inference (e.g., "cuda", "auto").'},
+    )
+    quantization: str | None = field(
         default=None,
-        metadata={'help': 'Quantization method (e.g., "awq", "gptq", None).'})
+        metadata={"help": 'Quantization method (e.g., "awq", "gptq", None).'},
+    )
 
     def __post_init__(self) -> None:
         """
@@ -340,46 +357,51 @@ class VLLMEngineArguments:
         """
         if not 0 < self.gpu_memory_utilization <= 1:
             raise ValueError(
-                f'GPU memory utilization must be between 0 and 1, '
-                f'but got {self.gpu_memory_utilization}.')
+                f"GPU memory utilization must be between 0 and 1, but got {self.gpu_memory_utilization}."
+            )
         if self.max_model_len <= 0:
             raise ValueError(
-                f'Max model length must be positive, but got {self.max_model_len}.'
+                f"Max model length must be positive, but got {self.max_model_len}."
             )
         if self.tensor_parallel_size < 1:
-            raise ValueError(f'Tensor parallel size must be at least 1, '
-                             f'but got {self.tensor_parallel_size}.')
+            raise ValueError(
+                f"Tensor parallel size must be at least 1, but got {self.tensor_parallel_size}."
+            )
         if self.pipeline_parallel_size < 1:
-            raise ValueError(f'Pipeline parallel size must be at least 1, '
-                             f'but got {self.pipeline_parallel_size}.')
+            raise ValueError(
+                f"Pipeline parallel size must be at least 1, but got {self.pipeline_parallel_size}."
+            )
 
         # Validate dtype
-        valid_dtypes = ['auto', 'float16', 'float32', 'bfloat16', 'fp16']
+        valid_dtypes = ["auto", "float16", "float32", "bfloat16", "fp16"]
         if self.dtype not in valid_dtypes:
-            logger.warning(
-                f'Unknown dtype {self.dtype}. Valid options: {valid_dtypes}')
+            logger.warning(f"Unknown dtype {self.dtype}. Valid options: {valid_dtypes}")
 
         # Validate quantization
         if self.quantization and self.quantization not in [
-                'awq', 'gptq', 'squeezellm', None
+            "awq",
+            "gptq",
+            "squeezellm",
+            None,
         ]:
-            logger.warning(f'Unknown quantization method {self.quantization}. '
-                           'Supported: awq, gptq, squeezellm')
+            logger.warning(
+                f"Unknown quantization method {self.quantization}. Supported: awq, gptq, squeezellm"
+            )
 
         # Parse rope_scaling into rope_scaling_dict, keeping the original field as string.
-        text = (self.rope_scaling or '').strip()
+        text = (self.rope_scaling or "").strip()
         if not text:
             self.rope_scaling_dict = None
         else:
             try:
                 self.rope_scaling_dict = json.loads(text)
                 logger.info(
-                    f'Successfully parsed rope_scaling: {self.rope_scaling_dict}'
+                    f"Successfully parsed rope_scaling: {self.rope_scaling_dict}"
                 )
             except json.JSONDecodeError as e:
                 raise ValueError(
-                    f'Invalid JSON string for rope_scaling: {self.rope_scaling}. '
-                    f'Error: {e}') from e
+                    f"Invalid JSON string for rope_scaling: {self.rope_scaling}. Error: {e}"
+                ) from e
 
 
 @dataclass
@@ -402,28 +424,33 @@ class ServerArguments:
     Raises:
         ValueError: If any parameter is outside its valid range.
     """
+
     max_workers: int = field(
-        default=128, metadata={'help': 'Maximum number of worker threads.'})
-    base_url: str = field(default='https://api.openai.com/v1',
-                          metadata={'help': 'Base URL of VLLM server'})
-    model_name: str = field(default='gpt-4o',
-                            metadata={'help': 'Model name of VLLM server'})
+        default=128, metadata={"help": "Maximum number of worker threads."}
+    )
+    base_url: str = field(
+        default="https://api.openai.com/v1",
+        metadata={"help": "Base URL of VLLM server"},
+    )
+    model_name: str = field(
+        default="gpt-4o", metadata={"help": "Model name of VLLM server"}
+    )
     max_retries: int = field(
         default=3,
-        metadata={
-            'help': 'Maximum number of retries for requests to VLLM server.'
-        })
+        metadata={"help": "Maximum number of retries for requests to VLLM server."},
+    )
     request_timeout: int = field(
-        default=99999,
-        metadata={'help': 'Timeout for requests to VLLM server.'})
-    api_key: Optional[str] = field(
+        default=99999, metadata={"help": "Timeout for requests to VLLM server."}
+    )
+    api_key: str | None = field(
         default=None,
         metadata={
-            'help':
-            'API key for authentication (can also use OPENAI_API_KEY env var).'
-        })
-    organization: Optional[str] = field(
-        default=None, metadata={'help': 'Organization ID for API usage.'})
+            "help": "API key for authentication (can also use OPENAI_API_KEY env var)."
+        },
+    )
+    organization: str | None = field(
+        default=None, metadata={"help": "Organization ID for API usage."}
+    )
 
     def __post_init__(self) -> None:
         """
@@ -434,29 +461,32 @@ class ServerArguments:
         """
         if self.max_workers <= 0:
             raise ValueError(
-                f'Maximum number of worker threads must be a positive integer, '
-                f'but got {self.max_workers}.')
+                f"Maximum number of worker threads must be a positive integer, but got {self.max_workers}."
+            )
         if self.request_timeout <= 0:
-            raise ValueError(f'Request timeout must be a positive integer, '
-                             f'but got {self.request_timeout}.')
+            raise ValueError(
+                f"Request timeout must be a positive integer, but got {self.request_timeout}."
+            )
         if self.max_retries < 0:
-            raise ValueError(f'Max retries must be non-negative, '
-                             f'but got {self.max_retries}.')
+            raise ValueError(
+                f"Max retries must be non-negative, but got {self.max_retries}."
+            )
         # Validate URL format
-        if not self.base_url.startswith(('http://', 'https://')):
-            raise ValueError(f'Base URL must start with http:// or https://, '
-                             f'but got {self.base_url}')
+        if not self.base_url.startswith(("http://", "https://")):
+            raise ValueError(
+                f"Base URL must start with http:// or https://, but got {self.base_url}"
+            )
 
         # Check for API key from environment if not provided
-        if self.api_key is None and 'OPENAI_API_KEY' in os.environ:
-            self.api_key = os.environ['OPENAI_API_KEY']
-            logger.info(
-                'Using API key from OPENAI_API_KEY environment variable')
+        if self.api_key is None and "OPENAI_API_KEY" in os.environ:
+            self.api_key = os.environ["OPENAI_API_KEY"]
+            logger.info("Using API key from OPENAI_API_KEY environment variable")
 
 
 @dataclass
-class OnlineInferArguments(DataArguments, PromptArguments, GenerationArguments,
-                           ServerArguments):
+class OnlineInferArguments(
+    DataArguments, PromptArguments, GenerationArguments, ServerArguments
+):
     """
     Arguments specific to online (OpenAI-compatible API) inference.
 
@@ -480,13 +510,15 @@ class OnlineInferArguments(DataArguments, PromptArguments, GenerationArguments,
 
         if self.temperature <= 0.0:
             self.do_sample = False
-            logger.warning('Temperature is 0, setting do_sample=False'
-                           'for greedy decoding.')
+            logger.warning(
+                "Temperature is 0, setting do_sample=Falsefor greedy decoding."
+            )
 
 
 @dataclass
-class OfflineInferArguments(DataArguments, PromptArguments,
-                            GenerationArguments, VLLMEngineArguments):
+class OfflineInferArguments(
+    DataArguments, PromptArguments, GenerationArguments, VLLMEngineArguments
+):
     """
     Arguments specific to offline (local vLLM engine) inference.
 
@@ -509,13 +541,15 @@ class OfflineInferArguments(DataArguments, PromptArguments,
 
         if self.temperature <= 0.0:
             self.do_sample = False
-            logger.warning('Temperature is 0, setting do_sample=False '
-                           'for greedy decoding.')
+            logger.warning(
+                "Temperature is 0, setting do_sample=False for greedy decoding."
+            )
 
 
 @dataclass
-class VerifierInferArguments(DataArguments, PromptArguments,
-                             GenerationArguments, VLLMEngineArguments):
+class VerifierInferArguments(
+    DataArguments, PromptArguments, GenerationArguments, VLLMEngineArguments
+):
     """
     Arguments specific to compass verifier inference using local vLLM engine.
 
@@ -531,19 +565,18 @@ class VerifierInferArguments(DataArguments, PromptArguments,
     Raises:
         ValueError: If verifier_prompt_type is not found in VERIFY_PROMPT_FACTORY.
     """
+
     verifier_prompt_type: str = field(
-        default='fdd_prompt_cursor',
+        default="fdd_prompt_cursor",
         metadata={
-            'help':
-            'The type of verifier prompt to use. '
-            'Options: compass_verifier, compass_verifier_with_reasoning'
+            "help": "The type of verifier prompt to use. Options: compass_verifier, compass_verifier_with_reasoning"
         },
     )
     keep_origin_data: bool = field(
-        default=False,
-        metadata={'help': 'Will keep the original data or not.'})
+        default=False, metadata={"help": "Will keep the original data or not."}
+    )
     # Computed value based on verifier_prompt_type; not settable via CLI
-    verifier_prompt: Optional[str] = field(init=False, default=None)
+    verifier_prompt: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         """
@@ -562,24 +595,28 @@ class VerifierInferArguments(DataArguments, PromptArguments,
 
         if self.temperature <= 0.0:
             self.do_sample = False
-            logger.warning('Temperature is 0, setting do_sample=False'
-                           'for greedy decoding.')
+            logger.warning(
+                "Temperature is 0, setting do_sample=Falsefor greedy decoding."
+            )
 
         # Validate and resolve verifier prompt
-        if (self.verifier_prompt_type is not None
-                and self.verifier_prompt_type not in VERIFY_PROMPT_FACTORY):
+        if (
+            self.verifier_prompt_type is not None
+            and self.verifier_prompt_type not in VERIFY_PROMPT_FACTORY
+        ):
             raise ValueError(
-                f'Invalid verifier prompt type: {self.verifier_prompt_type}. '
-                f'Valid options are: {list(VERIFY_PROMPT_FACTORY.keys())}')
+                f"Invalid verifier prompt type: {self.verifier_prompt_type}. "
+                f"Valid options are: {list(VERIFY_PROMPT_FACTORY.keys())}"
+            )
 
-        self.verifier_prompt = VERIFY_PROMPT_FACTORY.get(
-            self.verifier_prompt_type)
+        self.verifier_prompt = VERIFY_PROMPT_FACTORY.get(self.verifier_prompt_type)
         logger.info(
-            f'Using verifier_prompt_type: {self.verifier_prompt_type}, '
-            f'content: {self.verifier_prompt}')
+            f"Using verifier_prompt_type: {self.verifier_prompt_type}, content: {self.verifier_prompt}"
+        )
         logger.info(
-            'If you want to customize the verifier prompt, please modify the '
-            'VERIFY_PROMPT_FACTORY in llmeval/utils/verifier_template.py')
+            "If you want to customize the verifier prompt, please modify the "
+            "VERIFY_PROMPT_FACTORY in llmeval/utils/verifier_template.py"
+        )
 
 
 @dataclass
@@ -604,35 +641,37 @@ class EvalTaskArguments:
 
         timeout (int): Timeout for LLM inference in seconds.
     """
+
     input_path: str = field(
-        metadata={
-            'help': 'Path to the input JSONL file containing evaluation data.'
-        })
+        metadata={"help": "Path to the input JSONL file containing evaluation data."}
+    )
     task_name: str = field(
-        default='math_opensource/aime24',
+        default="math_opensource/aime24",
         metadata={
-            'help':
-            'Task must be in [math_opensource/aime24, math_opensource/aime25, '
-            'livecodebench, ifeval].'
-        })
-    input_key: str = field(default='prompt',
-                           metadata={'help': 'Key for input text in dataset.'})
+            "help": "Task must be in [math_opensource/aime24, math_opensource/aime25, livecodebench, ifeval]."
+        },
+    )
+    input_key: str = field(
+        default="prompt", metadata={"help": "Key for input text in dataset."}
+    )
     label_key: str = field(
-        default='answer',
-        metadata={'help': 'Key for target/label text in dataset.'})
+        default="answer", metadata={"help": "Key for target/label text in dataset."}
+    )
     response_key: str = field(
-        default='gen', metadata={'help': 'Key for model generated text.'})
+        default="gen", metadata={"help": "Key for model generated text."}
+    )
 
     cache_path: str = field(
-        default='./cache',
-        metadata={'help': 'Directory path for saving cached results.'})
+        default="./cache",
+        metadata={"help": "Directory path for saving cached results."},
+    )
     max_workers: int = field(
         default=128,
-        metadata={
-            'help': 'Maximum number of worker threads for parallel processing.'
-        })
+        metadata={"help": "Maximum number of worker threads for parallel processing."},
+    )
     timeout: int = field(
-        default=20, metadata={'help': 'Timeout for LLM inference in seconds.'})
+        default=20, metadata={"help": "Timeout for LLM inference in seconds."}
+    )
 
     def __post_init__(self) -> None:
         """
@@ -642,25 +681,28 @@ class EvalTaskArguments:
             ValueError: If required fields are missing or invalid.
         """
         if not self.input_path:
-            raise ValueError('input_path is required')
+            raise ValueError("input_path is required")
         if not Path(self.input_path).exists():
-            raise ValueError(f'input_path {self.input_path} does not exist')
+            raise ValueError(f"input_path {self.input_path} does not exist")
         if not self.cache_path:
-            raise ValueError('cache_path is required')
+            raise ValueError("cache_path is required")
         if self.max_workers <= 0:
-            raise ValueError(
-                f'max_workers must be positive, got {self.max_workers}')
+            raise ValueError(f"max_workers must be positive, got {self.max_workers}")
         if self.timeout <= 0:
-            raise ValueError(f'timeout must be positive, got {self.timeout}')
+            raise ValueError(f"timeout must be positive, got {self.timeout}")
         valid_tasks = [
-            'math_opensource/math500', 'math_opensource/math',
-            'math_opensource/gsm8k', 'math_opensource/aime24',
-            'math_opensource/aime25', 'math_opensource/hmmt25',
-            'livecodebench', 'ifeval'
+            "math_opensource/math500",
+            "math_opensource/math",
+            "math_opensource/gsm8k",
+            "math_opensource/aime24",
+            "math_opensource/aime25",
+            "math_opensource/hmmt25",
+            "livecodebench",
+            "ifeval",
         ]
         if self.task_name not in valid_tasks:
             raise ValueError(
-                f'task_name must be one of {valid_tasks}, got {self.task_name}'
+                f"task_name must be one of {valid_tasks}, got {self.task_name}"
             )
 
 
@@ -683,13 +725,13 @@ def main() -> None:
     parser = HfArgumentParser(OfflineInferArguments)
 
     # Parse command-line arguments into respective dataclasses
-    eval_args, = parser.parse_args_into_dataclasses()
+    (eval_args,) = parser.parse_args_into_dataclasses()
 
     # Log the parsed arguments
-    logger.info('Initializing with parsed command line arguments...')
-    logger.info('\n=== Evaluation Task Arguments ===')
+    logger.info("Initializing with parsed command line arguments...")
+    logger.info("\n=== Evaluation Task Arguments ===")
     logger.info(json.dumps(dataclasses.asdict(eval_args), indent=2))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

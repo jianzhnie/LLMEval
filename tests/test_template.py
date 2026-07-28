@@ -1,4 +1,5 @@
 """Tests for llmeval.utils.template."""
+
 from __future__ import annotations
 
 import pytest
@@ -15,8 +16,7 @@ class TestSystemPromptFactory:
             assert isinstance(key, str)
 
     def test_known_keys_exist(self) -> None:
-        for key in ("deepseek_r1", "amthinking", "openr1", "default",
-                     "empty"):
+        for key in ("deepseek_r1", "amthinking", "openr1", "default", "empty"):
             assert key in SYSTEM_PROMPT_FACTORY
 
     def test_empty_key_returns_none(self) -> None:

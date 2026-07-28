@@ -32,7 +32,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 from datasets import Dataset, IterableDataset, load_dataset
 
@@ -41,18 +41,17 @@ from datasets import Dataset, IterableDataset, load_dataset
 # -----------------------------
 
 DEFAULT_THRESHOLD: float = 0.5
-DEFAULT_SPLIT: str = 'train'
-CORRECT_JUDGMENT: str = 'A'
-TEMP_FIELD_PREFIX: str = '__'
-ACCURACY_FIELD: str = 'accuracy'
-JUDGMENT_FIELD: str = 'compassverifier_judgment'
+DEFAULT_SPLIT: str = "train"
+CORRECT_JUDGMENT: str = "A"
+TEMP_FIELD_PREFIX: str = "__"
+ACCURACY_FIELD: str = "accuracy"
+JUDGMENT_FIELD: str = "compassverifier_judgment"
 
 # Fields to exclude from output records
-EXCLUDED_FIELDS: frozenset[str] = frozenset(
-    ['prompt', 'gen', 'task', 'timeout_cnt'])
+EXCLUDED_FIELDS: frozenset[str] = frozenset(["prompt", "gen", "task", "timeout_cnt"])
 
 # Standard judgment values
-STANDARD_JUDGMENTS: frozenset[str] = frozenset(['A', 'B', 'C'])
+STANDARD_JUDGMENTS: frozenset[str] = frozenset(["A", "B", "C"])
 
 # -----------------------------
 # Data structures and utilities
@@ -70,6 +69,7 @@ class EvalStats:
         different: The number of records where model accuracy mismatches human judgment.
         breakdown: A detailed breakdown of mismatches by judgment type.
     """
+
     total: int = 0
     same: int = 0
     different: int = 0
@@ -93,8 +93,7 @@ class EvalStats:
         """
         return (self.different / self.total) if self.total > 0 else 0.0
 
-    def add_record(self, model_acc: int, judgment_acc: int,
-                   judgment_str: str) -> None:
+    def add_record(self, model_acc: int, judgment_acc: int, judgment_str: str) -> None:
         """
         Add a single record to the statistics.
 
@@ -109,7 +108,7 @@ class EvalStats:
         else:
             self.different += 1
 
-        breakdown_key = f'acc{model_acc}_judg{judgment_str}'
+        breakdown_key = f"acc{model_acc}_judg{judgment_str}"
         self.breakdown[breakdown_key] += 1
 
 
@@ -158,13 +157,13 @@ def get_judgment_string(judgment: Any) -> str:
         A standardized string representation of the judgment.
     """
     if not judgment:
-        return 'OTHER'
+        return "OTHER"
 
     judgment_str = str(judgment).strip().upper()
-    return judgment_str if judgment_str in STANDARD_JUDGMENTS else 'OTHER'
+    return judgment_str if judgment_str in STANDARD_JUDGMENTS else "OTHER"
 
 
-def clean_record_for_output(record: Dict[str, Any]) -> Dict[str, Any]:
+def clean_record_for_output(record: dict[str, Any]) -> dict[str, Any]:
     """
     Clean a record by removing temporary and excluded fields for output.
 
@@ -188,34 +187,32 @@ def pretty_print_stats(stats: EvalStats) -> None:
     Args:
         stats: An `EvalStats` object containing the evaluation results.
     """
-    print('--- Summary ---')
-    print(f'Total records evaluated: {stats.total}')
-    print(f'Matching assessments: {stats.same} ({stats.match_rate():.2%})')
-    print(
-        f'Mismatching assessments: {stats.different} ({stats.mismatch_rate():.2%})'
-    )
+    print("--- Summary ---")
+    print(f"Total records evaluated: {stats.total}")
+    print(f"Matching assessments: {stats.same} ({stats.match_rate():.2%})")
+    print(f"Mismatching assessments: {stats.different} ({stats.mismatch_rate():.2%})")
 
-    print('\nDetailed Breakdown:')
+    print("\nDetailed Breakdown:")
     # Define a consistent order for printing the breakdown keys
     ordered_keys = [
-        'acc1_judgA',
-        'acc1_judgB',
-        'acc1_judgC',
-        'acc1_judgOTHER',
-        'acc0_judgA',
-        'acc0_judgB',
-        'acc0_judgC',
-        'acc0_judgOTHER',
+        "acc1_judgA",
+        "acc1_judgB",
+        "acc1_judgC",
+        "acc1_judgOTHER",
+        "acc0_judgA",
+        "acc0_judgB",
+        "acc0_judgC",
+        "acc0_judgOTHER",
     ]
 
     found_keys = False
     for key in ordered_keys:
         if stats.breakdown.get(key, 0):
-            print(f'  - {key:<15}: {stats.breakdown[key]}')
+            print(f"  - {key:<15}: {stats.breakdown[key]}")
             found_keys = True
 
     if not found_keys:
-        print('  No detailed breakdown data available.')
+        print("  No detailed breakdown data available.")
 
 
 # -----------------------------
@@ -223,7 +220,7 @@ def pretty_print_stats(stats: EvalStats) -> None:
 # -----------------------------
 
 
-def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """
     Parse command-line arguments for the evaluation script.
 
@@ -234,47 +231,51 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         Parsed arguments namespace.
     """
     parser = argparse.ArgumentParser(
-        description=
-        'Compare model accuracy to human judgment in a JSONL dataset.')
+        description="Compare model accuracy to human judgment in a JSONL dataset."
+    )
 
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument(
-        '--input_path',
+        "--input_path",
         type=str,
-        help='Path to a single JSONL file (e.g., ./data/test.jsonl).')
+        help="Path to a single JSONL file (e.g., ./data/test.jsonl).",
+    )
     input_group.add_argument(
-        '--data_files',
+        "--data_files",
         type=str,
         help='Local file pattern for the HF loader (e.g., "data/*.jsonl"). '
-        'Overrides `--input_path` if both are provided.')
+        "Overrides `--input_path` if both are provided.",
+    )
 
     parser.add_argument(
-        '--split',
+        "--split",
         type=str,
         default=DEFAULT_SPLIT,
-        help=f'Dataset split to load (default: {DEFAULT_SPLIT}).')
-    parser.add_argument(
-        '--threshold',
-        type=float,
-        default=DEFAULT_THRESHOLD,
-        help=
-        f'Threshold for binarizing model accuracy (default: {DEFAULT_THRESHOLD}).'
+        help=f"Dataset split to load (default: {DEFAULT_SPLIT}).",
     )
     parser.add_argument(
-        '--num_proc',
+        "--threshold",
+        type=float,
+        default=DEFAULT_THRESHOLD,
+        help=f"Threshold for binarizing model accuracy (default: {DEFAULT_THRESHOLD}).",
+    )
+    parser.add_argument(
+        "--num_proc",
         type=int,
         default=None,
-        help=
-        'Number of processes for HF map/filter. Defaults to os.cpu_count().')
-    parser.add_argument('--output_path',
-                        type=str,
-                        help='Output path for the mismatch JSONL file. '
-                        'Defaults to <input_path>_diff.jsonl.')
+        help="Number of processes for HF map/filter. Defaults to os.cpu_count().",
+    )
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        help="Output path for the mismatch JSONL file. "
+        "Defaults to <input_path>_diff.jsonl.",
+    )
 
     return parser.parse_args(argv)
 
 
-def resolve_paths(args: argparse.Namespace) -> Tuple[str, str]:
+def resolve_paths(args: argparse.Namespace) -> tuple[str, str]:
     """
     Resolve effective input and output paths based on parsed arguments.
 
@@ -289,15 +290,14 @@ def resolve_paths(args: argparse.Namespace) -> Tuple[str, str]:
     """
     effective_data_files = args.data_files or args.input_path
     if not effective_data_files:
-        raise ValueError(
-            'Either --data_files or --input_path must be provided.')
+        raise ValueError("Either --data_files or --input_path must be provided.")
 
     if args.output_path:
         effective_output_path = args.output_path
     else:
         # Extract the first file from the pattern for default output naming
-        first_file = effective_data_files.split('.')[0].strip()
-        effective_output_path = f'{first_file}_diff.jsonl'
+        first_file = effective_data_files.split(".")[0].strip()
+        effective_output_path = f"{first_file}_diff.jsonl"
 
     return effective_data_files, effective_output_path
 
@@ -307,8 +307,9 @@ def resolve_paths(args: argparse.Namespace) -> Tuple[str, str]:
 # -----------------------------
 
 
-def process_record(record: Dict[str, Any],
-                   threshold: float) -> Tuple[Dict[str, Any], int, int, str]:
+def process_record(
+    record: dict[str, Any], threshold: float
+) -> tuple[dict[str, Any], int, int, str]:
     """
     Process a single record and compute accuracy metrics.
 
@@ -329,17 +330,16 @@ def process_record(record: Dict[str, Any],
 
     # Create a copy of the record with computed fields
     processed_record = record.copy()
-    processed_record[f'{TEMP_FIELD_PREFIX}model_acc'] = model_acc
-    processed_record[f'{TEMP_FIELD_PREFIX}judgment_acc'] = judgment_acc
-    processed_record[f'{TEMP_FIELD_PREFIX}mismatch'] = (model_acc !=
-                                                        judgment_acc)
+    processed_record[f"{TEMP_FIELD_PREFIX}model_acc"] = model_acc
+    processed_record[f"{TEMP_FIELD_PREFIX}judgment_acc"] = judgment_acc
+    processed_record[f"{TEMP_FIELD_PREFIX}mismatch"] = model_acc != judgment_acc
 
     return processed_record, model_acc, judgment_acc, judgment_str
 
 
-def write_mismatches_to_file(dataset: Union[Dataset,
-                                            IterableDataset], output_path: str,
-                             num_proc: Optional[int]) -> None:
+def write_mismatches_to_file(
+    dataset: Dataset | IterableDataset, output_path: str, num_proc: int | None
+) -> None:
     """
     Write mismatching records to the output file.
 
@@ -352,32 +352,32 @@ def write_mismatches_to_file(dataset: Union[Dataset,
         OSError: If there's an error writing to the output file.
     """
 
-    def is_mismatch(record: Dict[str, Any]) -> bool:
+    def is_mismatch(record: dict[str, Any]) -> bool:
         """Filter predicate for mismatches."""
-        return record.get(f'{TEMP_FIELD_PREFIX}mismatch', False)
+        return record.get(f"{TEMP_FIELD_PREFIX}mismatch", False)
 
     try:
         # Ensure output directory exists
         output_file_path = Path(output_path)
         output_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(output_path, 'w', encoding='utf-8') as output_file:
+        with open(output_path, "w", encoding="utf-8") as output_file:
             mismatch_dataset = dataset.filter(is_mismatch, num_proc=num_proc)
 
             for record in mismatch_dataset:
                 clean_record_dict = clean_record_for_output(record)
                 output_file.write(
-                    json.dumps(clean_record_dict, ensure_ascii=False) + '\n')
+                    json.dumps(clean_record_dict, ensure_ascii=False) + "\n"
+                )
     except OSError as e:
-        raise OSError(
-            f'Failed to write mismatches to {output_path}: {e}') from e
+        raise OSError(f"Failed to write mismatches to {output_path}: {e}") from e
 
 
 def process_and_evaluate(
-    dataset: Union[Dataset, IterableDataset],
+    dataset: Dataset | IterableDataset,
     threshold: float,
     output_path: str,
-    num_proc: Optional[int],
+    num_proc: int | None,
 ) -> EvalStats:
     """
     Process the dataset, identify mismatches, write them to a file,
@@ -404,7 +404,8 @@ def process_and_evaluate(
         processed_records = []
         for record in dataset:
             processed_record, model_acc, judgment_acc, judgment_str = process_record(
-                record, threshold)
+                record, threshold
+            )
             stats.add_record(model_acc, judgment_acc, judgment_str)
             processed_records.append(processed_record)
 
@@ -416,7 +417,7 @@ def process_and_evaluate(
             processed_dataset = dataset
     else:
         # Parallel processing
-        def map_function(record: Dict[str, Any]) -> Dict[str, Any]:
+        def map_function(record: dict[str, Any]) -> dict[str, Any]:
             """Map function for parallel processing."""
             processed_record, _, _, _ = process_record(record, threshold)
             return processed_record
@@ -424,13 +425,13 @@ def process_and_evaluate(
         processed_dataset = dataset.map(
             map_function,
             num_proc=effective_proc,
-            desc='Computing accuracy and judgment',
+            desc="Computing accuracy and judgment",
         )
 
         # Collect statistics from the processed dataset
         for record in processed_dataset:
-            model_acc = record.get(f'{TEMP_FIELD_PREFIX}model_acc', 0)
-            judgment_acc = record.get(f'{TEMP_FIELD_PREFIX}judgment_acc', 0)
+            model_acc = record.get(f"{TEMP_FIELD_PREFIX}model_acc", 0)
+            judgment_acc = record.get(f"{TEMP_FIELD_PREFIX}judgment_acc", 0)
             judgment_str = get_judgment_string(record.get(JUDGMENT_FIELD))
             stats.add_record(model_acc, judgment_acc, judgment_str)
 
@@ -451,10 +452,10 @@ def main() -> None:
         args = parse_args(sys.argv[1:])
         data_files, output_path = resolve_paths(args)
 
-        print(f'Loading data from: {data_files}')
-        dataset = load_dataset('json', data_files=data_files, split=args.split)
+        print(f"Loading data from: {data_files}")
+        dataset = load_dataset("json", data_files=data_files, split=args.split)
 
-        print(f'Starting evaluation with threshold: {args.threshold}')
+        print(f"Starting evaluation with threshold: {args.threshold}")
         stats = process_and_evaluate(
             dataset=dataset,
             threshold=args.threshold,
@@ -463,15 +464,15 @@ def main() -> None:
         )
 
         pretty_print_stats(stats)
-        print(f'\nMismatching records saved to: {output_path}')
+        print(f"\nMismatching records saved to: {output_path}")
 
     except KeyboardInterrupt:
-        print('\nOperation cancelled by user.', file=sys.stderr)
+        print("\nOperation cancelled by user.", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-        print(f'An error occurred: {e}', file=sys.stderr)
+        print(f"An error occurred: {e}", file=sys.stderr)
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

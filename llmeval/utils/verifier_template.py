@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Dict
-
 CompassVerifier_PROMPT = """Please as a grading expert, judge whether the final answers given by the candidates
 below are consistent with the standard answers, that is, whether the candidates answered correctly.
 
@@ -489,13 +487,13 @@ FDD_Verify_PROMPT_ZH = """作为数学评分专家，给定标准答案和候选
 请将您的返回值（0或1）按要求放在\\boxed{}中，不要任何解释或描述。
 """
 
-VERIFY_PROMPT_FACTORY: Dict[str, str] = {
-    'compassverify_prompt': CompassVerifier_PROMPT,
-    'compassverify_prompt_zh': CompassVerifier_PROMPT_ZH,
-    'compassverify_cot_prompt': CompassVerifier_COT_PROMPT,
-    'compassverify_cot_prompt_zh': CompassVerifier_COT_PROMPT_ZH,
-    'fdd_prompt_cursor': FDD_PROMPT_CURSOR,
-    'fdd_prompt': FDD_PROMPT,
-    'fdd_verify_prompt': FDD_Verify_PROMPT,
-    'fdd_verify_prompt_zh': FDD_Verify_PROMPT_ZH
+VERIFY_PROMPT_FACTORY: dict[str, str] = {
+    "compassverify_prompt": CompassVerifier_PROMPT,
+    "compassverify_prompt_zh": CompassVerifier_PROMPT_ZH,
+    "compassverify_cot_prompt": CompassVerifier_COT_PROMPT,
+    "compassverify_cot_prompt_zh": CompassVerifier_COT_PROMPT_ZH,
+    "fdd_prompt_cursor": FDD_PROMPT_CURSOR,
+    "fdd_prompt": FDD_PROMPT,
+    "fdd_verify_prompt": FDD_Verify_PROMPT,
+    "fdd_verify_prompt_zh": FDD_Verify_PROMPT_ZH,
 }

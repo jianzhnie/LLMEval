@@ -26,7 +26,7 @@ import dataclasses
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from transformers import HfArgumentParser
 
@@ -35,7 +35,7 @@ from llmeval.utils.config import EvalTaskArguments
 from llmeval.utils.logger import init_logger
 
 # Initialize logger for the evaluation module
-logger = init_logger('math_eval')
+logger = init_logger("math_eval")
 
 
 def _get_after_think(text: str) -> str:
@@ -56,13 +56,15 @@ def _get_after_think(text: str) -> str:
     """
     # Using str.partition for efficiency instead of split
     # partition returns a 3-tuple: (before_separator, separator, after_separator)
-    return text.partition('</think>\n\n')[2]
+    return text.partition("</think>\n\n")[2]
 
 
-def _process_item(item: Dict[str, Any],
-                  task_name: str,
-                  label_key: str = 'answer',
-                  response_key: str = 'gen') -> Dict[str, Any]:
+def _process_item(
+    item: dict[str, Any],
+    task_name: str,
+    label_key: str = "answer",
+    response_key: str = "gen",
+) -> dict[str, Any]:
     """
     Process and validate a single data item from the input dataset.
 
@@ -86,32 +88,33 @@ def _process_item(item: Dict[str, Any],
         TypeError: If the item argument is not a dictionary
     """
     if not isinstance(item, dict):
-        raise TypeError(
-            f'Expected dictionary input, got {type(item).__name__}')
+        raise TypeError(f"Expected dictionary input, got {type(item).__name__}")
 
     # Validate required keys with detailed error messages
     if label_key not in item:
         raise ValueError(
-            f"Missing ground truth label key '{label_key}' in item. "
-            f"Available keys: {', '.join(item.keys())}")
+            f"Missing ground truth label key '{label_key}' in item. Available keys: {', '.join(item.keys())}"
+        )
     if response_key not in item:
         raise ValueError(
-            f"Missing model response key '{response_key}' in item. "
-            f"Available keys: {', '.join(item.keys())}")
+            f"Missing model response key '{response_key}' in item. Available keys: {', '.join(item.keys())}"
+        )
 
     # Create a new copy to avoid modifying the original dictionary
     processed_item = item.copy()
-    processed_item['task'] = task_name
+    processed_item["task"] = task_name
     return processed_item
 
 
-def evaluate_task(eval_dataset: List[Dict[str, Any]],
-                  task_name: str,
-                  label_key: str,
-                  response_key: str,
-                  cache_path: Union[str, Path],
-                  max_workers: int,
-                  timeout: int = 20) -> Optional[float]:
+def evaluate_task(
+    eval_dataset: list[dict[str, Any]],
+    task_name: str,
+    label_key: str,
+    response_key: str,
+    cache_path: str | Path,
+    max_workers: int,
+    timeout: int = 20,
+) -> float | None:
     """
     Evaluate model outputs against ground truth data for a specific task.
 
@@ -140,30 +143,30 @@ def evaluate_task(eval_dataset: List[Dict[str, Any]],
         >>> print(f"Accuracy: {accuracy:.2f}")
     """
     if not eval_dataset:
-        logger.warning('Empty dataset provided for evaluation')
+        logger.warning("Empty dataset provided for evaluation")
         return None
 
     # Parse task name to determine evaluation type
-    task_parts = task_name.split('/')
+    task_parts = task_name.split("/")
     dataset_source = task_parts[0] if task_parts else task_name
 
     # Convert cache_path to Path object for consistent handling
     cache_path = Path(cache_path)
 
-    if dataset_source == 'math_opensource':
+    if dataset_source == "math_opensource":
         try:
             accuracy = compute_scores(
                 eval_dataset=eval_dataset,
                 label_key=label_key,
                 response_key=response_key,
-                cache_path=str(
-                    cache_path),  # compute_scores expects string path
+                cache_path=str(cache_path),  # compute_scores expects string path
                 max_workers=max_workers,
-                timeout=timeout)
-            logger.info(f'✅ Task: {task_name}, Accuracy: {accuracy:.2%}')
+                timeout=timeout,
+            )
+            logger.info(f"✅ Task: {task_name}, Accuracy: {accuracy:.2%}")
             return accuracy
         except Exception as e:
-            logger.error(f'❌ Evaluation failed: {str(e)}', exc_info=True)
+            logger.error(f"❌ Evaluation failed: {e!s}", exc_info=True)
             return None
     else:
         logger.error(f"🤷‍♂️ Unsupported task type: '{task_name}'")
@@ -188,12 +191,11 @@ def main() -> int:
     try:
         # Parse command line arguments using HuggingFace's argument parser
         parser = HfArgumentParser(EvalTaskArguments)
-        args, = parser.parse_args_into_dataclasses()
+        (args,) = parser.parse_args_into_dataclasses()
 
         # Log initialization with formatted argument display
-        logger.info(
-            'Initializing evaluation with the following configuration:')
-        logger.info('\n--- Parsed Arguments ---')
+        logger.info("Initializing evaluation with the following configuration:")
+        logger.info("\n--- Parsed Arguments ---")
         logger.info(json.dumps(dataclasses.asdict(args), indent=2))
 
         # Ensure cache directory exists
@@ -202,47 +204,51 @@ def main() -> int:
 
         # Load and validate input data
         try:
-            with open(args.input_path, 'r', encoding='utf-8') as f:
+            with open(args.input_path, encoding="utf-8") as f:
                 data = [json.loads(line) for line in f]
         except FileNotFoundError:
             logger.error(f"❌ Input file not found: '{args.input_path}'")
             return 1
         except json.JSONDecodeError as e:
-            logger.error(
-                f"❌ Invalid JSON format in '{args.input_path}': {str(e)}")
+            logger.error(f"❌ Invalid JSON format in '{args.input_path}': {e!s}")
             return 1
 
         if not data:
-            logger.error('❌ Input file is empty')
+            logger.error("❌ Input file is empty")
             return 1
 
         # Process data items and handle potential errors
         try:
             processed_data = [
-                _process_item(item, args.task_name, args.label_key,
-                              args.response_key) for item in data
+                _process_item(item, args.task_name, args.label_key, args.response_key)
+                for item in data
             ]
         except (ValueError, TypeError) as e:
-            logger.error(f'❌ Error processing data: {str(e)}')
+            logger.error(f"❌ Error processing data: {e!s}")
             return 1
 
         # Run evaluation and get results
-        accuracy = evaluate_task(processed_data, args.task_name,
-                                 args.label_key, args.response_key,
-                                 args.cache_path, args.max_workers,
-                                 args.timeout)
+        accuracy = evaluate_task(
+            processed_data,
+            args.task_name,
+            args.label_key,
+            args.response_key,
+            args.cache_path,
+            args.max_workers,
+            args.timeout,
+        )
 
         if accuracy is not None:
-            logger.info('🎉 Evaluation completed successfully!')
+            logger.info("🎉 Evaluation completed successfully!")
             return 0
         else:
-            logger.error('❌ Evaluation failed to produce results')
+            logger.error("❌ Evaluation failed to produce results")
             return 1
 
     except Exception as e:
-        logger.error(f'❌ Unexpected error: {str(e)}', exc_info=True)
+        logger.error(f"❌ Unexpected error: {e!s}", exc_info=True)
         return 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

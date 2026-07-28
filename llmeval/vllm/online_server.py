@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import httpx
 import openai
@@ -29,23 +29,20 @@ from transformers import HfArgumentParser
 
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.logger import init_logger
-from llmeval.utils.template import (SYSTEM_PROMPT_FACTORY,
-                                    is_chat_template_applied)
+from llmeval.utils.template import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
 
-logger = init_logger('online_vllm_server', logging.INFO)
+logger = init_logger("online_vllm_server", logging.INFO)
 
 # Constants
-DEFAULT_INPUT_KEY: str = 'prompt'
-DEFAULT_LABEL_KEY: str = 'answer'
-DEFAULT_RESPONSE_KEY: str = 'gen'
+DEFAULT_INPUT_KEY: str = "prompt"
+DEFAULT_LABEL_KEY: str = "answer"
+DEFAULT_RESPONSE_KEY: str = "gen"
 
 
 class ClientError(RuntimeError):
     """Custom exception class for client-related errors."""
 
-    def __init__(self,
-                 message: str,
-                 original_error: Optional[Exception] = None) -> None:
+    def __init__(self, message: str, original_error: Exception | None = None) -> None:
         """Initialize ClientError with message and optional original error.
 
         Args:
@@ -70,10 +67,7 @@ class InferenceClient:
         base_url (str): Base URL for the OpenAI-compatible API
     """
 
-    def __init__(self,
-                 base_url: str,
-                 timeout: int,
-                 max_retries: int = 3) -> None:
+    def __init__(self, base_url: str, timeout: int, max_retries: int = 3) -> None:
         """Initialize the inference client with API configuration and validation.
 
         Creates a new OpenAI client instance configured with the provided base URL
@@ -92,12 +86,11 @@ class InferenceClient:
         self.base_url: str = base_url  # Store for potential reconnection
         self.timeout: int = timeout
         self.max_retries: int = max_retries
-        self.api_key: str = os.environ.get('OPENAI_API_KEY', 'EMPTY')
+        self.api_key: str = os.environ.get("OPENAI_API_KEY", "EMPTY")
 
         # Warn if using default EMPTY key
-        if self.api_key == 'EMPTY':
-            logger.warning(
-                "Using default 'EMPTY' API key. This may not be secure.")
+        if self.api_key == "EMPTY":
+            logger.warning("Using default 'EMPTY' API key. This may not be secure.")
 
         # Initialize OpenAI client with validated configuration
         self.client: openai.OpenAI = openai.OpenAI(
@@ -106,12 +99,12 @@ class InferenceClient:
             timeout=httpx.Timeout(self.timeout),
         )
         logger.info(
-            f'Using API Key: {self.api_key}, Timeout: {self.timeout}, Max Retries: {self.max_retries}, base_url: {self.base_url}'
+            f"Using API Key: {self.api_key}, Timeout: {self.timeout}, Max Retries: {self.max_retries}, base_url: {self.base_url}"
         )
 
     def _prepare_messages(
-            self, query: str,
-            system_prompt: Optional[str]) -> List[Dict[str, str]]:
+        self, query: str, system_prompt: str | None
+    ) -> list[dict[str, str]]:
         """Prepare messages for the API call by formatting them into the expected structure.
 
         This method constructs the message list in the format expected by the OpenAI API.
@@ -132,31 +125,32 @@ class InferenceClient:
         """
         if is_chat_template_applied(query):
             logger.warning(
-                'Chat template appears to be already applied to the query. '
-                'Please use the raw prompt, as vLLM will apply the Hugging Face '
-                'chat template automatically.')
+                "Chat template appears to be already applied to the query. "
+                "Please use the raw prompt, as vLLM will apply the Hugging Face "
+                "chat template automatically."
+            )
             raise ValueError(
-                'Your query has been applied with chat_template, please use the raw prompt, '
-                'because the vLLM will apply the Hugging Face chat template automatically!'
+                "Your query has been applied with chat_template, please use the raw prompt, "
+                "because the vLLM will apply the Hugging Face chat template automatically!"
             )
 
-        messages: List[Dict[str, str]] = []
+        messages: list[dict[str, str]] = []
         if system_prompt:
-            messages.append({'role': 'system', 'content': system_prompt})
-        messages.append({'role': 'user', 'content': query})
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": query})
         return messages
 
     def get_content(
         self,
         query: str,
-        system_prompt: Optional[str],
+        system_prompt: str | None,
         model_name: str,
         max_tokens: int,
         temperature: float,
         top_p: float,
         top_k: int,
         enable_thinking: bool,
-    ) -> Union[str, Dict[str, str]]:
+    ) -> str | dict[str, str]:
         """Fetch content from the OpenAI API with comprehensive retry logic.
 
         This method handles the core interaction with the OpenAI API, including
@@ -188,25 +182,23 @@ class InferenceClient:
         """
         # Validate input parameters
         if not query or not query.strip():
-            raise ValueError('Query cannot be empty')
+            raise ValueError("Query cannot be empty")
         if not model_name:
-            raise ValueError('Model name cannot be empty')
+            raise ValueError("Model name cannot be empty")
 
         # Prepare API call parameters
         messages = self._prepare_messages(query, system_prompt)
         call_args = {
-            'model': model_name,
-            'messages': messages,
-            'max_tokens': max_tokens,
-            'temperature': temperature,
-            'top_p': top_p,
-            'extra_body': {
-                'top_k': top_k,
-                'chat_template_kwargs': {
-                    'enable_thinking': enable_thinking
-                },
+            "model": model_name,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "extra_body": {
+                "top_k": top_k,
+                "chat_template_kwargs": {"enable_thinking": enable_thinking},
             },
-            'timeout': self.timeout,
+            "timeout": self.timeout,
         }
 
         # Make API call with exponential backoff retry logic
@@ -219,34 +211,35 @@ class InferenceClient:
                 return result
             except AttributeError as e:
                 # Handle missing or invalid completion attributes
-                err_msg = getattr(completion, 'message', '') if completion else ''
+                err_msg = getattr(completion, "message", "") if completion else ""
                 if err_msg:
                     sleep_time = (2**attempt) + random.randint(10, 20)
                     logger.warning(
-                        f'AttributeError on attempt {attempt + 1}/{self.max_retries + 1}. '
-                        f'Sleeping for {sleep_time:.2f}s. Error: {err_msg}')
+                        f"AttributeError on attempt {attempt + 1}/{self.max_retries + 1}. "
+                        f"Sleeping for {sleep_time:.2f}s. Error: {err_msg}"
+                    )
                     time.sleep(sleep_time)
                     last_exception = ClientError(err_msg, e)
                 else:
-                    raise ClientError('Invalid completion response', e) from e
+                    raise ClientError("Invalid completion response", e) from e
             except (APIConnectionError, RateLimitError) as e:
                 # Handle retryable errors with backoff
                 if attempt < self.max_retries:
                     sleep_time = (2**attempt) + random.randint(20, 30)
                     logger.warning(
-                        f'{type(e).__name__} on attempt {attempt + 1}/{self.max_retries + 1}. '
-                        f'Sleeping for {sleep_time:.2f}s. Error: {str(e)}')
+                        f"{type(e).__name__} on attempt {attempt + 1}/{self.max_retries + 1}. "
+                        f"Sleeping for {sleep_time:.2f}s. Error: {e!s}"
+                    )
                     time.sleep(sleep_time)
                     last_exception = ClientError(str(e), e)
                 else:
-                    raise ClientError(f'Max retries exceeded: {str(e)}',
-                                      e) from e
+                    raise ClientError(f"Max retries exceeded: {e!s}", e) from e
             except APIError as e:
                 # Handle context length and other API errors
-                if 'maximum context length' in e.message:
-                    logger.warning(f'Max context length exceeded: {e.message}')
-                    return ''
-                logger.error(f'API error: {e.message}')
+                if "maximum context length" in e.message:
+                    logger.warning(f"Max context length exceeded: {e.message}")
+                    return ""
+                logger.error(f"API error: {e.message}")
                 if attempt < self.max_retries:
                     sleep_time = (2**attempt) + random.randint(25, 35)
                     time.sleep(sleep_time)
@@ -255,22 +248,24 @@ class InferenceClient:
                     raise ClientError(e.message, e) from e
             except Exception as e:
                 # Handle any other unexpected exceptions
-                logger.error(f'Unexpected error: {str(e)}', exc_info=True)
+                logger.error(f"Unexpected error: {e!s}", exc_info=True)
                 if attempt < self.max_retries:
                     sleep_time = (2**attempt) + random.randint(15, 25)
                     logger.warning(
-                        f'Unexpected error on attempt {attempt + 1}/{self.max_retries + 1}. '
-                        f'Sleeping for {sleep_time:.2f}s. Error: {str(e)}')
+                        f"Unexpected error on attempt {attempt + 1}/{self.max_retries + 1}. "
+                        f"Sleeping for {sleep_time:.2f}s. Error: {e!s}"
+                    )
                     time.sleep(sleep_time)
                     last_exception = ClientError(str(e), e)
                 else:
                     raise ClientError(
-                        f'Max retries exceeded with unexpected error: {str(e)}',
-                        e) from e
+                        f"Max retries exceeded with unexpected error: {e!s}", e
+                    ) from e
 
         # If we've exhausted retries, raise the last exception
-        raise last_exception if last_exception else ClientError(
-            'Unknown error occurred')
+        raise (
+            last_exception if last_exception else ClientError("Unknown error occurred")
+        )
 
 
 class InferenceRunner:
@@ -323,29 +318,24 @@ class InferenceRunner:
             self.client: InferenceClient = InferenceClient(
                 base_url=args.base_url,
                 timeout=args.request_timeout,
-                max_retries=args.max_retries)
-        except (ValueError, EnvironmentError) as e:
-            raise RuntimeError(
-                f'Failed to initialize inference client: {e}') from e
+                max_retries=args.max_retries,
+            )
+        except (OSError, ValueError) as e:
+            raise RuntimeError(f"Failed to initialize inference client: {e}") from e
 
         # Set up system prompt with validation
-        self.system_prompt: Optional[str] = SYSTEM_PROMPT_FACTORY.get(
-            args.system_prompt_type)
+        self.system_prompt: str | None = SYSTEM_PROMPT_FACTORY.get(
+            args.system_prompt_type
+        )
         if args.system_prompt_type and not self.system_prompt:
-            logger.warning(
-                f'Unknown system_prompt_type: {args.system_prompt_type}')
+            logger.warning(f"Unknown system_prompt_type: {args.system_prompt_type}")
 
         # Initialize thread safety and monitoring
         self._file_lock: threading.Lock = threading.Lock()
-        self._stats: Dict[str, int] = {
-            'processed': 0,
-            'failed': 0,
-            'skipped': 0
-        }
-        self._stats_lock: threading.Lock = threading.Lock(
-        )  # Dedicated lock for stats
+        self._stats: dict[str, int] = {"processed": 0, "failed": 0, "skipped": 0}
+        self._stats_lock: threading.Lock = threading.Lock()  # Dedicated lock for stats
 
-    def count_completed_samples(self) -> Dict[str, int]:
+    def count_completed_samples(self) -> dict[str, int]:
         """Count completed samples for resume functionality.
 
         This method scans the output file to determine how many samples have
@@ -361,7 +351,7 @@ class InferenceRunner:
         Returns:
             Dictionary mapping question content to count of completed samples.
         """
-        completed_counts: Dict[str, int] = collections.defaultdict(int)
+        completed_counts: dict[str, int] = collections.defaultdict(int)
 
         if not os.path.exists(self.args.output_file):
             return completed_counts
@@ -370,28 +360,30 @@ class InferenceRunner:
             return completed_counts
 
         try:
-            with open(self.args.output_file, 'r', encoding='utf-8') as f:
+            with open(self.args.output_file, encoding="utf-8") as f:
                 for line_num, line in enumerate(f, 1):
                     try:
-                        item: Dict[str, Any] = json.loads(line.strip())
-                        prompt: Any = item.get(
-                            self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
-                        gen_response = item.get(
-                            self.args.response_key) or item.get(
-                                DEFAULT_RESPONSE_KEY)
-                        gen_count: int = len(gen_response) if isinstance(
-                            gen_response, list) else 0
+                        item: dict[str, Any] = json.loads(line.strip())
+                        prompt: Any = item.get(self.args.input_key) or item.get(
+                            DEFAULT_INPUT_KEY
+                        )
+                        gen_response = item.get(self.args.response_key) or item.get(
+                            DEFAULT_RESPONSE_KEY
+                        )
+                        gen_count: int = (
+                            len(gen_response) if isinstance(gen_response, list) else 0
+                        )
                         if prompt is not None:
                             completed_counts[str(prompt)] += gen_count
                     except json.JSONDecodeError as e:
-                        logger.warning(f'Invalid JSON on line {line_num}: {e}')
+                        logger.warning(f"Invalid JSON on line {line_num}: {e}")
                         continue
         except Exception as e:
-            logger.error(f'Error reading output file for resume check: {e}')
+            logger.error(f"Error reading output file for resume check: {e}")
 
         return completed_counts
 
-    def load_data(self) -> List[Dict[str, Any]]:
+    def load_data(self) -> list[dict[str, Any]]:
         """Load and prepare the dataset, handling resume functionality.
 
         This method performs several key operations:
@@ -410,34 +402,31 @@ class InferenceRunner:
         """
         # Input file validation and loading
         if not os.path.exists(self.args.input_file):
-            raise FileNotFoundError(
-                f'Input file not found: {self.args.input_file}')
+            raise FileNotFoundError(f"Input file not found: {self.args.input_file}")
 
         # Load raw data
-        raw_data: List[Dict[str, Any]] = self._load_raw_data()
-        logger.info(f'Loaded {len(raw_data)} items from input file')
+        raw_data: list[dict[str, Any]] = self._load_raw_data()
+        logger.info(f"Loaded {len(raw_data)} items from input file")
 
         # Resume functionality handling
         completed_counts = self.count_completed_samples()
         total_completed = sum(completed_counts.values())
 
         if total_completed > 0:
-            logger.info(
-                f'Found {total_completed} completed samples from previous run.'
-            )
+            logger.info(f"Found {total_completed} completed samples from previous run.")
 
         # Expand data according to n_samples and resume functionality
-        expanded_data: List[Dict[str, Any]] = self._expand_data_with_resume(
-            raw_data, completed_counts)
+        expanded_data: list[dict[str, Any]] = self._expand_data_with_resume(
+            raw_data, completed_counts
+        )
 
         if not expanded_data:
-            logger.warning('No data to process after expansion')
+            logger.warning("No data to process after expansion")
 
-        logger.info(
-            f'Total remaining samples to process: {len(expanded_data)}')
+        logger.info(f"Total remaining samples to process: {len(expanded_data)}")
         return expanded_data
 
-    def _load_raw_data(self) -> List[Dict[str, Any]]:
+    def _load_raw_data(self) -> list[dict[str, Any]]:
         """Load raw data from input file.
 
         This method handles the loading of raw JSONL data from the input file
@@ -451,23 +440,22 @@ class InferenceRunner:
             json.JSONDecodeError: If an input line is not valid JSON.
         """
         try:
-            with open(self.args.input_file, 'r', encoding='utf-8') as f:
-                data: List[Dict[str, Any]] = [
+            with open(self.args.input_file, encoding="utf-8") as f:
+                data: list[dict[str, Any]] = [
                     json.loads(line) for line in f if line.strip()
                 ]
         except FileNotFoundError as e:
-            logger.critical(
-                f'Input file not found: {self.args.input_file}, {e}')
+            logger.critical(f"Input file not found: {self.args.input_file}, {e}")
             raise
         except json.JSONDecodeError as e:
-            logger.critical(f'Invalid JSON in input file: {e}')
+            logger.critical(f"Invalid JSON in input file: {e}")
             raise
 
         return data
 
     def _expand_data_with_resume(
-            self, raw_data: List[Dict[str, Any]],
-            completed_counts: Dict[str, int]) -> List[Dict[str, Any]]:
+        self, raw_data: list[dict[str, Any]], completed_counts: dict[str, int]
+    ) -> list[dict[str, Any]]:
         """Expand data according to n_samples and resume functionality.
 
         This method processes the raw data and expands it based on the number
@@ -481,17 +469,18 @@ class InferenceRunner:
         Returns:
             Expanded dataset with remaining samples to process.
         """
-        expanded_data: List[Dict[str, Any]] = []
+        expanded_data: list[dict[str, Any]] = []
         skipped_items: int = 0
 
         for item in raw_data:
-            prompt_val: Any = item.get(
-                self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
-            prompt: str = str(prompt_val) if prompt_val is not None else ''
+            prompt_val: Any = item.get(self.args.input_key) or item.get(
+                DEFAULT_INPUT_KEY
+            )
+            prompt: str = str(prompt_val) if prompt_val is not None else ""
 
             if not prompt.strip():
                 logger.warning(
-                    f'No valid prompt found under keys [{self.args.input_key!r}, '
+                    f"No valid prompt found under keys [{self.args.input_key!r}, "
                     f'"{DEFAULT_INPUT_KEY}"] for item with keys: {list(item.keys())}'
                 )
                 skipped_items += 1
@@ -505,12 +494,12 @@ class InferenceRunner:
 
         if skipped_items > 0:
             logger.warning(
-                f'Skipped {skipped_items} items due to missing or empty prompt'
+                f"Skipped {skipped_items} items due to missing or empty prompt"
             )
 
         return expanded_data
 
-    def _write_result(self, result: Dict[str, Any]) -> None:
+    def _write_result(self, result: dict[str, Any]) -> None:
         """Write result to output file in a thread-safe manner.
 
         Args:
@@ -518,14 +507,14 @@ class InferenceRunner:
         """
         with self._file_lock:
             try:
-                with open(self.args.output_file, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                with open(self.args.output_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
                     f.flush()  # Ensure data is immediately written
             except Exception as e:
-                logger.error(f'Error writing batch results: {e}')
-                raise IOError(f'Failed to write batch results: {e}') from e
+                logger.error(f"Error writing batch results: {e}")
+                raise OSError(f"Failed to write batch results: {e}") from e
 
-    def process_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
         """Process a single item through the complete inference pipeline.
 
         This method implements a robust processing pipeline for each input item:
@@ -548,31 +537,28 @@ class InferenceRunner:
             - Progress tracking and statistics collection
         """
 
-        def validate_input() -> Optional[str]:
+        def validate_input() -> str | None:
             """Validate input and extract query."""
             if not isinstance(item, dict):
-                logger.error(f'Invalid item type: {type(item)}, expected dict')
+                logger.error(f"Invalid item type: {type(item)}, expected dict")
                 with self._stats_lock:
-                    self._stats['failed'] += 1
+                    self._stats["failed"] += 1
                 return None
 
-            query = item.get(
-                self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+            query = item.get(self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
             if not query:
-                logger.warning(f'Missing required query field in item: {item}')
+                logger.warning(f"Missing required query field in item: {item}")
                 with self._stats_lock:
-                    self._stats['skipped'] += 1
+                    self._stats["skipped"] += 1
                 return None
             return query
 
-        def process_response(
-                response: Union[str, Dict[str,
-                                          str]]) -> Optional[Dict[str, Any]]:
+        def process_response(response: str | dict[str, str]) -> dict[str, Any] | None:
             """Process and validate API response."""
             if isinstance(response, str) and not response.strip():
-                logger.warning('Empty response received')
+                logger.warning("Empty response received")
                 with self._stats_lock:
-                    self._stats['failed'] += 1
+                    self._stats["failed"] += 1
                 return None
 
             result = item.copy()
@@ -607,17 +593,16 @@ class InferenceRunner:
         try:
             self._write_result(result)
             with self._stats_lock:
-                self._stats['processed'] += 1
-        except IOError as e:
-            logger.error(f'Failed to write result: {e}')
+                self._stats["processed"] += 1
+        except OSError as e:
+            logger.error(f"Failed to write result: {e}")
             with self._stats_lock:
-                self._stats['failed'] += 1
+                self._stats["failed"] += 1
             return None
 
         return result
 
-    def _process_concurrently(self, expanded_data: List[Dict[str,
-                                                             Any]]) -> None:
+    def _process_concurrently(self, expanded_data: list[dict[str, Any]]) -> None:
         """Process items concurrently using thread pool with error handling and progress tracking.
 
         This method manages concurrent processing of inference tasks using a thread pool.
@@ -634,19 +619,18 @@ class InferenceRunner:
             - Maintains thread safety with class-level file lock
         """
         total_tasks = len(expanded_data)
-        failed_tasks: List[Dict[str, Any]] = []
+        failed_tasks: list[dict[str, Any]] = []
 
         with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.args.max_workers,
-                thread_name_prefix='inference_worker') as executor:
+            max_workers=self.args.max_workers, thread_name_prefix="inference_worker"
+        ) as executor:
             futures = [
-                executor.submit(self.process_item, item)
-                for item in expanded_data
+                executor.submit(self.process_item, item) for item in expanded_data
             ]
 
-            with tqdm(total=total_tasks,
-                      desc='Processing samples',
-                      unit='sample') as pbar:
+            with tqdm(
+                total=total_tasks, desc="Processing samples", unit="sample"
+            ) as pbar:
                 for future in concurrent.futures.as_completed(futures):
                     try:
                         result = future.result()
@@ -654,31 +638,31 @@ class InferenceRunner:
                             pass  # process_item already updated stats
                     except Exception as e:
                         logger.error(
-                            f'An unexpected error occurred in a thread: {e}',
-                            exc_info=True)
+                            f"An unexpected error occurred in a thread: {e}",
+                            exc_info=True,
+                        )
                         with self._stats_lock:
-                            self._stats['failed'] += 1
-                        failed_tasks.append({
-                            'error':
-                            str(e),
-                            'timestamp':
-                            time.strftime('%Y-%m-%d %H:%M:%S')
-                        })
+                            self._stats["failed"] += 1
+                        failed_tasks.append(
+                            {
+                                "error": str(e),
+                                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            }
+                        )
                     finally:
                         pbar.update(1)
 
         if failed_tasks:
-            logger.warning(f'Total failed tasks: {len(failed_tasks)}')
+            logger.warning(f"Total failed tasks: {len(failed_tasks)}")
             # Optionally save failed tasks to a separate file for debugging
-            failed_tasks_file = self.args.output_file.replace(
-                '.jsonl', '_failed.jsonl')
+            failed_tasks_file = self.args.output_file.replace(".jsonl", "_failed.jsonl")
             try:
-                with open(failed_tasks_file, 'w') as f:
+                with open(failed_tasks_file, "w") as f:
                     for task in failed_tasks:
-                        f.write(json.dumps(task) + '\n')
-                logger.info(f'Failed tasks saved to: {failed_tasks_file}')
+                        f.write(json.dumps(task) + "\n")
+                logger.info(f"Failed tasks saved to: {failed_tasks_file}")
             except Exception as e:
-                logger.error(f'Failed to save failed tasks to file: {e}')
+                logger.error(f"Failed to save failed tasks to file: {e}")
 
     def run(self) -> None:
         """Execute the complete inference pipeline with monitoring and reporting.
@@ -702,21 +686,19 @@ class InferenceRunner:
 
         try:
             # Validate configuration
-            if not self.args.input_file or not Path(
-                    self.args.input_file).exists():
-                raise FileNotFoundError(
-                    f'Input file not found: {self.args.input_file}')
+            if not self.args.input_file or not Path(self.args.input_file).exists():
+                raise FileNotFoundError(f"Input file not found: {self.args.input_file}")
             if not self.args.output_file:
-                raise ValueError('Output file path is required')
+                raise ValueError("Output file path is required")
 
             # Initialize execution
-            logger.info('🚀 Initializing inference pipeline')
-            logger.info(f'Configuration: {dataclasses.asdict(self.args)}')
+            logger.info("🚀 Initializing inference pipeline")
+            logger.info(f"Configuration: {dataclasses.asdict(self.args)}")
 
             # Load and prepare data
-            eval_dataset: List[Dict[str, Any]] = self.load_data()
+            eval_dataset: list[dict[str, Any]] = self.load_data()
             if not eval_dataset:
-                logger.info('✅ All samples already processed')
+                logger.info("✅ All samples already processed")
                 return
 
             # Set up output directory
@@ -725,29 +707,28 @@ class InferenceRunner:
 
             # Execute pipeline
             total_samples = len(eval_dataset)
-            logger.info(f'⏳ Processing {total_samples} samples')
+            logger.info(f"⏳ Processing {total_samples} samples")
             self._process_concurrently(eval_dataset)
 
             # Generate final report
             duration = time.time() - start_time
-            success_rate = (self._stats['processed'] /
-                            max(total_samples, 1)) * 100
+            success_rate = (self._stats["processed"] / max(total_samples, 1)) * 100
 
-            logger.info('\n=== Execution Summary ===')
-            logger.info(f'Total samples in dataset: {total_samples}')
-            logger.info(f'Successfully processed: {self._stats['processed']}')
-            logger.info(f'Failed: {self._stats['failed']}')
-            logger.info(f'Skipped: {self._stats['skipped']}')
-            logger.info(f'Success rate: {success_rate:.2f}%')
-            logger.info(f'Total duration: {duration:.2f} seconds')
-            logger.info(f'Output file: {self.args.output_file}')
-            logger.info('✅ Inference pipeline completed successfully\n')
+            logger.info("\n=== Execution Summary ===")
+            logger.info(f"Total samples in dataset: {total_samples}")
+            logger.info(f"Successfully processed: {self._stats['processed']}")
+            logger.info(f"Failed: {self._stats['failed']}")
+            logger.info(f"Skipped: {self._stats['skipped']}")
+            logger.info(f"Success rate: {success_rate:.2f}%")
+            logger.info(f"Total duration: {duration:.2f} seconds")
+            logger.info(f"Output file: {self.args.output_file}")
+            logger.info("✅ Inference pipeline completed successfully\n")
 
         except Exception as e:
-            logger.critical(f'❌ Fatal error: {str(e)}',
-                            exc_info=True,
-                            extra={'stats': self._stats})
-            raise RuntimeError(f'Pipeline execution failed: {str(e)}') from e
+            logger.critical(
+                f"❌ Fatal error: {e!s}", exc_info=True, extra={"stats": self._stats}
+            )
+            raise RuntimeError(f"Pipeline execution failed: {e!s}") from e
 
 
 def main() -> None:
@@ -775,13 +756,13 @@ def main() -> None:
     try:
         # Parse command line arguments into a strongly typed dataclass
         parser = HfArgumentParser(OnlineInferArguments)
-        eval_args, = parser.parse_args_into_dataclasses()
+        (eval_args,) = parser.parse_args_into_dataclasses()
 
         # Log initialization with formatted argument display
         logger.info(
-            'Initializing OnlineInferArguments with parsed command line arguments...'
+            "Initializing OnlineInferArguments with parsed command line arguments..."
         )
-        logger.info('\n--- Parsed Arguments ---')
+        logger.info("\n--- Parsed Arguments ---")
         logger.info(json.dumps(dataclasses.asdict(eval_args), indent=2))
 
         # Initialize and run the inference process
@@ -790,24 +771,23 @@ def main() -> None:
 
         # Log successful completion with execution time
         total_time = time.time() - start_time
-        logger.info(
-            f'✅ Inference completed successfully in {total_time:.2f} seconds')
+        logger.info(f"✅ Inference completed successfully in {total_time:.2f} seconds")
 
     except KeyboardInterrupt:
-        logger.info('Interrupted by user. Exiting gracefully...')
+        logger.info("Interrupted by user. Exiting gracefully...")
         sys.exit(130)  # Standard exit code for SIGINT
     except FileNotFoundError as e:
-        logger.critical(f'File not found error: {e}')
+        logger.critical(f"File not found error: {e}")
         sys.exit(1)
     except ValueError as e:
-        logger.critical(f'Invalid value error: {e}')
+        logger.critical(f"Invalid value error: {e}")
         sys.exit(1)
     except Exception as e:
         logger.critical(
-            f'❌ An unrecoverable error occurred during execution: {e}',
-            exc_info=True)
+            f"❌ An unrecoverable error occurred during execution: {e}", exc_info=True
+        )
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

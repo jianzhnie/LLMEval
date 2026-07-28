@@ -4,16 +4,15 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional, Union
 
 
 def init_logger(
     name: str,
-    level: Union[int, str] = logging.INFO,
-    log_file: Optional[Union[str, Path]] = None,
-    log_format: Optional[str] = None,
+    level: int | str = logging.INFO,
+    log_file: str | Path | None = None,
+    log_format: str | None = None,
     console_output: bool = True,
-    file_mode: str = 'a',
+    file_mode: str = "a",
     max_bytes: int = 10 * 1024 * 1024,  # 10MB
     backup_count: int = 5,
     propagate: bool = False,
@@ -54,7 +53,7 @@ def init_logger(
 
     # Set default format if not provided
     if log_format is None:
-        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
 
     # Create formatter
     formatter = logging.Formatter(log_format)
@@ -73,11 +72,13 @@ def init_logger(
         # Create directory if it doesn't exist
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        file_handler = RotatingFileHandler(log_path,
-                                           mode=file_mode,
-                                           maxBytes=max_bytes,
-                                           backupCount=backup_count,
-                                           encoding='utf-8')
+        file_handler = RotatingFileHandler(
+            log_path,
+            mode=file_mode,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
 
         file_handler.setFormatter(formatter)
         file_handler.setLevel(level)
@@ -98,7 +99,7 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-def set_log_level(logger: logging.Logger, level: Union[int, str]) -> None:
+def set_log_level(logger: logging.Logger, level: int | str) -> None:
     """Set the logging level for a logger and all its handlers.
 
     Args:

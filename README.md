@@ -100,7 +100,7 @@ python setup.py install
 
 ## Quick Start
 
-### Step 1: Start vLLM Server (Online Mode)  
+### Step 1: Start vLLM Server (Online Mode)
 
 First, start the vLLM server with the following command:
 

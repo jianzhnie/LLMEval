@@ -3,6 +3,7 @@
 Focuses on data-loading, resume logic, and thread-safe writing --
 all testable without a live vLLM server.
 """
+
 from __future__ import annotations
 
 import json
@@ -12,8 +13,6 @@ import types
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
-
-import pytest
 
 # ── Mock heavy dependencies ──
 for mod_name in ("openai", "httpx"):
@@ -37,12 +36,9 @@ if "tqdm" not in sys.modules:
     _tqdm.tqdm = MagicMock
     sys.modules["tqdm"] = _tqdm
 
-from llmeval.vllm.online_server import (  # noqa: E402
-    DEFAULT_INPUT_KEY,
-    DEFAULT_RESPONSE_KEY,
+from llmeval.vllm.online_server import (
     InferenceRunner,
 )
-
 
 # ── helpers ───────────────────────────────────────────────────────
 
@@ -72,10 +68,7 @@ def _make_runner(tmp_path: Path, **overrides: Any) -> InferenceRunner:
     if not inp.exists():
         inp.parent.mkdir(parents=True, exist_ok=True)
         with open(inp, "w") as f:
-            f.write(json.dumps({
-                "prompt": "2+2",
-                "answer": "4"
-            }) + "\n")
+            f.write(json.dumps({"prompt": "2+2", "answer": "4"}) + "\n")
 
     # Bypass __init__ entirely; set attributes manually
     runner = InferenceRunner.__new__(InferenceRunner)
@@ -86,11 +79,7 @@ def _make_runner(tmp_path: Path, **overrides: Any) -> InferenceRunner:
     runner.system_prompt = None
     runner._file_lock = threading.Lock()
     runner._stats_lock = threading.Lock()
-    runner._stats = {
-        "processed": 0,
-        "failed": 0,
-        "skipped": 0
-    }
+    runner._stats = {"processed": 0, "failed": 0, "skipped": 0}
     return runner
 
 
@@ -99,22 +88,15 @@ def _make_runner(tmp_path: Path, **overrides: Any) -> InferenceRunner:
 
 class TestCountCompletedSamples:
     def test_no_output_file(self, tmp_path: Path) -> None:
-        runner = _make_runner(
-            tmp_path, output_file=str(tmp_path / "nope.jsonl"))
+        runner = _make_runner(tmp_path, output_file=str(tmp_path / "nope.jsonl"))
         counts = runner.count_completed_samples()
         assert counts == {}
 
     def test_counts_existing_gen_entries(self, tmp_path: Path) -> None:
         out = tmp_path / "output.jsonl"
         with open(out, "w") as f:
-            f.write(json.dumps({
-                "prompt": "q1",
-                "gen": ["a1", "a2"]
-            }) + "\n")
-            f.write(json.dumps({
-                "prompt": "q2",
-                "gen": ["b1"]
-            }) + "\n")
+            f.write(json.dumps({"prompt": "q1", "gen": ["a1", "a2"]}) + "\n")
+            f.write(json.dumps({"prompt": "q2", "gen": ["b1"]}) + "\n")
 
         runner = _make_runner(tmp_path)
         counts = runner.count_completed_samples()
@@ -125,10 +107,7 @@ class TestCountCompletedSamples:
         out = tmp_path / "output.jsonl"
         with open(out, "w") as f:
             f.write("bad json\n")
-            f.write(json.dumps({
-                "prompt": "q1",
-                "gen": ["a1"]
-            }) + "\n")
+            f.write(json.dumps({"prompt": "q1", "gen": ["a1"]}) + "\n")
 
         runner = _make_runner(tmp_path)
         counts = runner.count_completed_samples()
@@ -193,13 +172,10 @@ class TestWriteResult:
     def test_writes_jsonl(self, tmp_path: Path) -> None:
         out = tmp_path / "out.jsonl"
         runner = _make_runner(tmp_path, output_file=str(out))
-        runner._write_result({
-            "prompt": "q",
-            "gen": ["answer"]
-        })
+        runner._write_result({"prompt": "q", "gen": ["answer"]})
 
         lines = out.read_text().strip().split("\n")
-        data = [json.loads(l) for l in lines]
+        data = [json.loads(line) for line in lines]
         assert len(data) == 1
         assert data[0]["gen"] == ["answer"]
 
@@ -210,10 +186,7 @@ class TestWriteResult:
         out = tmp_path / "concurrent.jsonl"
         runner = _make_runner(tmp_path, output_file=str(out))
 
-        items = [{
-            "prompt": f"q{i}",
-            "gen": [f"a{i}"]
-        } for i in range(20)]
+        items = [{"prompt": f"q{i}", "gen": [f"a{i}"]} for i in range(20)]
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
             list(ex.map(runner._write_result, items))
@@ -242,8 +215,7 @@ class TestProcessItem:
         assert result is None
         assert runner._stats["failed"] == 1
 
-    def test_process_item_creates_independent_gen_list(
-            self, tmp_path: Path) -> None:
+    def test_process_item_creates_independent_gen_list(self, tmp_path: Path) -> None:
         """Verify process_item doesn't mutate the input item."""
         runner = _make_runner(tmp_path)
         # Mock the client to return a simple response

@@ -3,20 +3,18 @@
 These tests target _process_item and evaluate_task logic without
 requiring pebble / math-verify to be installed.
 """
+
 from __future__ import annotations
 
-import json
 import sys
 import types
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 # ── Mock heavy dependencies ──
-for mod_name in ("pebble", "math_verify", "math_verify.metric",
-                 "math_verify.parser"):
+for mod_name in ("pebble", "math_verify", "math_verify.metric", "math_verify.parser"):
     if mod_name not in sys.modules:
         sys.modules[mod_name] = types.ModuleType(mod_name)
 
@@ -32,7 +30,7 @@ if "transformers" not in sys.modules:
     _tf.HfArgumentParser = MagicMock
     sys.modules["transformers"] = _tf
 
-from llmeval.tasks.math_eval.eval import _process_item, evaluate_task  # noqa: E402
+from llmeval.tasks.math_eval.eval import _process_item, evaluate_task
 
 
 class TestProcessItem:
@@ -47,9 +45,8 @@ class TestProcessItem:
     def test_custom_keys(self) -> None:
         item = {"input": "q", "label": "a", "output": ["r"]}
         result = _process_item(
-            item, "math_opensource/math500",
-            label_key="label",
-            response_key="output")
+            item, "math_opensource/math500", label_key="label", response_key="output"
+        )
         assert result["task"] == "math_opensource/math500"
 
     def test_missing_label_key_raises(self) -> None:
@@ -77,13 +74,8 @@ class TestEvaluateTask:
         assert evaluate_task([], "task", "a", "g", "/tmp/cache", 4) is None
 
     def test_unsupported_task_returns_none(self, tmp_path: Path) -> None:
-        data = [{
-            "prompt": "q",
-            "answer": "a",
-            "gen": ["r"],
-            "task": "t"
-        }]
+        data = [{"prompt": "q", "answer": "a", "gen": ["r"], "task": "t"}]
         result = evaluate_task(
-            data, "unsupported/task", "answer", "gen",
-            str(tmp_path / "cache"), 4)
+            data, "unsupported/task", "answer", "gen", str(tmp_path / "cache"), 4
+        )
         assert result is None

@@ -15,9 +15,10 @@ import os
 import re
 import sys
 import threading
+from collections.abc import Iterable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Any
 
 from tqdm import tqdm
 from transformers import AutoTokenizer, HfArgumentParser
@@ -29,19 +30,19 @@ from llmeval.utils.logger import init_logger
 from llmeval.utils.verifier_template import VERIFY_PROMPT_FACTORY
 
 # Initialize logger
-logger = init_logger('compass_verifier_infer', logging.INFO)
+logger = init_logger("compass_verifier_infer", logging.INFO)
 
 # Constants
-VALID_JUDGMENTS: FrozenSet[str] = frozenset({'A', 'B', 'C', 'D'})
-DEFAULT_INPUT_KEY: str = 'prompt'
-DEFAULT_LABEL_KEY: str = 'answer'
-DEFAULT_RESPONSE_KEY: str = 'gen'
+VALID_JUDGMENTS: frozenset[str] = frozenset({"A", "B", "C", "D"})
+DEFAULT_INPUT_KEY: str = "prompt"
+DEFAULT_LABEL_KEY: str = "answer"
+DEFAULT_RESPONSE_KEY: str = "gen"
 
 
 def _last_n_strs(text: str, n: int) -> str:
     """Return the last n whitespace-separated tokens as a string."""
     tokens = text.split()
-    return ' '.join(tokens[-n:]) if tokens else ''
+    return " ".join(tokens[-n:]) if tokens else ""
 
 
 def extract_answer(response_string: str, fallback_tokens: int = 200) -> str:
@@ -65,12 +66,12 @@ def extract_answer(response_string: str, fallback_tokens: int = 200) -> str:
         "<last 200 tokens of the string, if any>"
     """
     if not response_string or not isinstance(response_string, str):
-        return ''
+        return ""
 
     # Regular expression patterns for answer extraction
     # (.*?) 是一个非贪婪捕获组，用于匹配并提取标签内的所有内容。
     # re.DOTALL 标志确保 . 也能匹配换行符，以防 answer 内容有多行。
-    pattern: re.Pattern[str] = re.compile(r'<answer>(.*?)</answer>', re.DOTALL)
+    pattern: re.Pattern[str] = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
     match = pattern.search(response_string)
     # 如果找到匹配项，返回第一个捕获组（括号内的内容），并去除首尾空格
     if match:
@@ -79,16 +80,16 @@ def extract_answer(response_string: str, fallback_tokens: int = 200) -> str:
             return content
 
     # Fallback 1: content after </think>
-    think_end_pattern = re.compile(r'</think\s*>', re.IGNORECASE)
+    think_end_pattern = re.compile(r"</think\s*>", re.IGNORECASE)
     match = think_end_pattern.search(response_string)
     if match:
-        tail = response_string[match.end():].strip()
+        tail = response_string[match.end() :].strip()
         if tail:
             return tail
 
     # Fallback 2: last N tokens
     last_n_str = _last_n_strs(response_string, fallback_tokens).strip()
-    return last_n_str if last_n_str else ''
+    return last_n_str if last_n_str else ""
 
 
 def process_judgment(judgment_str: str) -> str:
@@ -115,12 +116,12 @@ def process_judgment(judgment_str: str) -> str:
         ''
     """
     if not judgment_str or not isinstance(judgment_str, str):
-        return ''
+        return ""
 
     judgment_str = judgment_str.strip()
 
     # Strategy 1: Look for \boxed{letter} pattern, prefer the last
-    boxed_pattern: re.Pattern[str] = re.compile(r'\\boxed\{([A-D])\}')
+    boxed_pattern: re.Pattern[str] = re.compile(r"\\boxed\{([A-D])\}")
     boxed_matches = boxed_pattern.findall(judgment_str)
     if boxed_matches:
         return boxed_matches[-1]
@@ -130,28 +131,28 @@ def process_judgment(judgment_str: str) -> str:
         return judgment_str
 
     # Strategy 3: Extract from "Final Judgment:" section
-    if 'Final Judgment:' in judgment_str:
-        final_section = judgment_str.split('Final Judgment:')[-1]
+    if "Final Judgment:" in judgment_str:
+        final_section = judgment_str.split("Final Judgment:")[-1]
 
         # Look for (A), (B), (C), (D) pattern
-        paren_pattern: re.Pattern[str] = re.compile(r'\(([A-D])\)')
+        paren_pattern: re.Pattern[str] = re.compile(r"\(([A-D])\)")
         paren_matches = paren_pattern.findall(final_section)
         if paren_matches:
             return paren_matches[-1]
 
         # Look for any A-D in the final section
-        letter_pattern: re.Pattern[str] = re.compile(r'([A-D])')
+        letter_pattern: re.Pattern[str] = re.compile(r"([A-D])")
         letter_matches = letter_pattern.findall(final_section)
         if letter_matches:
             return letter_matches[-1]
 
     # Strategy 4: Look for any A-D in the entire string
-    letter_pattern: re.Pattern[str] = re.compile(r'([A-D])')
+    letter_pattern: re.Pattern[str] = re.compile(r"([A-D])")
     all_matches = letter_pattern.findall(judgment_str)
     if all_matches:
         return all_matches[-1]
 
-    return ''
+    return ""
 
 
 def process_judgment_cursor(judgment_str: str) -> str:
@@ -179,25 +180,25 @@ def process_judgment_cursor(judgment_str: str) -> str:
         ''
     """
     if not isinstance(judgment_str, str) or not judgment_str:
-        return ''
+        return ""
 
     s = judgment_str.strip()
 
     # Primary: extract the last boxed content, then find a valid letter within it.
     boxed_content_pattern: re.Pattern[str] = re.compile(
-        r'\\boxed\s*\{([^}]*)\}', re.DOTALL | re.IGNORECASE)
+        r"\\boxed\s*\{([^}]*)\}", re.DOTALL | re.IGNORECASE
+    )
     boxed_contents = boxed_content_pattern.findall(s)
     if boxed_contents:
         last_box = boxed_contents[-1]
         # From the boxed content, pick the last A-D letter (case-insensitive)
-        letter_in_box_pattern: re.Pattern[str] = re.compile(
-            r'([A-D])', re.IGNORECASE)
+        letter_in_box_pattern: re.Pattern[str] = re.compile(r"([A-D])", re.IGNORECASE)
         candidates = letter_in_box_pattern.findall(last_box)
         if candidates:
             return candidates[-1].upper()
 
     # Fallback 1: explicit parenthesized letter like (A), (b), etc.
-    paren_pattern: re.Pattern[str] = re.compile(r'\(([A-D])\)', re.IGNORECASE)
+    paren_pattern: re.Pattern[str] = re.compile(r"\(([A-D])\)", re.IGNORECASE)
     paren_matches = paren_pattern.findall(s)
     if paren_matches:
         return paren_matches[-1].upper()
@@ -205,12 +206,13 @@ def process_judgment_cursor(judgment_str: str) -> str:
     # Fallback 2: any standalone A-D letter (avoid letters embedded in words).
     # This is more permissive but helps salvage partially formatted outputs.
     standalone_letter_pattern: re.Pattern[str] = re.compile(
-        r'(?<![A-Za-z])([A-D])(?![A-Za-z])', re.IGNORECASE)
+        r"(?<![A-Za-z])([A-D])(?![A-Za-z])", re.IGNORECASE
+    )
     all_matches = standalone_letter_pattern.findall(s)
     if all_matches:
         return all_matches[-1].upper()
 
-    return ''
+    return ""
 
 
 class VerifierOfflineInferenceRunner:
@@ -241,13 +243,14 @@ class VerifierOfflineInferenceRunner:
         """
         self.args: VerifierInferArguments = args
         self._file_lock: threading.Lock = threading.Lock()
-        self.llm: Optional[LLM] = None
-        self.tokenizer: Optional[AutoTokenizer] = None
-        self.sampling_params: Optional[SamplingParams] = None
-        self.verifier_prompt: Optional[str] = VERIFY_PROMPT_FACTORY.get(
-            args.verifier_prompt_type)
+        self.llm: LLM | None = None
+        self.tokenizer: AutoTokenizer | None = None
+        self.sampling_params: SamplingParams | None = None
+        self.verifier_prompt: str | None = VERIFY_PROMPT_FACTORY.get(
+            args.verifier_prompt_type
+        )
 
-    def setup_vllm_engine(self) -> Tuple[LLM, AutoTokenizer, SamplingParams]:
+    def setup_vllm_engine(self) -> tuple[LLM, AutoTokenizer, SamplingParams]:
         """
         Initialize the vLLM engine, tokenizer, and sampling parameters.
 
@@ -264,34 +267,33 @@ class VerifierOfflineInferenceRunner:
             RuntimeError: If engine initialization fails.
             ImportError: If required dependencies are missing.
         """
-        logger.info('=' * 60)
-        logger.info('🚀 Initializing Verifier vLLM Engine')
-        logger.info(f'Model: {self.args.model_name_or_path}')
-        logger.info(f'Max Model Length: {self.args.max_model_len}')
-        logger.info(f'Max tokens: {self.args.max_tokens}')
-        logger.info(f'RoPE Scaling: {self.args.rope_scaling}')
-        logger.info(f'Tensor Parallel Size: {self.args.tensor_parallel_size}')
-        logger.info(
-            f'Pipeline Parallel Size: {self.args.pipeline_parallel_size}')
-        logger.info(
-            f'GPU Memory Utilization: {self.args.gpu_memory_utilization}')
-        logger.info(f'Batch Size: {self.args.batch_size}')
-        logger.info('=' * 60)
+        logger.info("=" * 60)
+        logger.info("🚀 Initializing Verifier vLLM Engine")
+        logger.info(f"Model: {self.args.model_name_or_path}")
+        logger.info(f"Max Model Length: {self.args.max_model_len}")
+        logger.info(f"Max tokens: {self.args.max_tokens}")
+        logger.info(f"RoPE Scaling: {self.args.rope_scaling}")
+        logger.info(f"Tensor Parallel Size: {self.args.tensor_parallel_size}")
+        logger.info(f"Pipeline Parallel Size: {self.args.pipeline_parallel_size}")
+        logger.info(f"GPU Memory Utilization: {self.args.gpu_memory_utilization}")
+        logger.info(f"Batch Size: {self.args.batch_size}")
+        logger.info("=" * 60)
 
         # Prepare HuggingFace overrides
         hf_overrides = self._prepare_hf_overrides()
 
         try:
             # Initialize tokenizer
-            logger.info('Loading tokenizer...')
+            logger.info("Loading tokenizer...")
             tokenizer = AutoTokenizer.from_pretrained(
                 self.args.model_name_or_path,
                 trust_remote_code=self.args.trust_remote_code,
-                cache_dir=self.args.cache_dir)
-            logger.info('✅ Tokenizer loaded successfully')
+                cache_dir=self.args.cache_dir,
+            )
+            logger.info("✅ Tokenizer loaded successfully")
 
             # Initialize vLLM engine
-            logger.info('Loading vLLM engine...')
+            logger.info("Loading vLLM engine...")
             llm = LLM(
                 model=self.args.model_name_or_path,
                 tensor_parallel_size=self.args.tensor_parallel_size,
@@ -307,12 +309,12 @@ class VerifierOfflineInferenceRunner:
                 trust_remote_code=self.args.trust_remote_code,
                 dtype=self.args.dtype,
             )
-            logger.info('✅ vLLM engine loaded successfully')
+            logger.info("✅ vLLM engine loaded successfully")
 
         except Exception as e:
             # Include traceback for easier debugging
-            logger.exception(f'❌ Failed to initialize vLLM engine: {e}')
-            raise RuntimeError(f'Engine initialization failed: {e}') from e
+            logger.exception(f"❌ Failed to initialize vLLM engine: {e}")
+            raise RuntimeError(f"Engine initialization failed: {e}") from e
 
         # Configure sampling parameters
         sampling_params = SamplingParams(
@@ -323,37 +325,34 @@ class VerifierOfflineInferenceRunner:
             repetition_penalty=self.args.repetition_penalty,
         )
 
-        logger.info('✅ Verifier vLLM engine initialization completed')
+        logger.info("✅ Verifier vLLM engine initialization completed")
         return llm, tokenizer, sampling_params
 
-    def _prepare_hf_overrides(self) -> Dict[str, Any]:
+    def _prepare_hf_overrides(self) -> dict[str, Any]:
         """Prepare HuggingFace model overrides from arguments.
 
         Returns:
             Dictionary of overrides for HuggingFace model loading.
         """
-        hf_overrides: Dict[str, Any] = {}
+        hf_overrides: dict[str, Any] = {}
 
         # Use the parsed rope_scaling_dict instead of the raw string
-        if hasattr(self.args,
-                   'rope_scaling_dict') and self.args.rope_scaling_dict:
-            hf_overrides['rope_scaling'] = self.args.rope_scaling_dict
+        if hasattr(self.args, "rope_scaling_dict") and self.args.rope_scaling_dict:
+            hf_overrides["rope_scaling"] = self.args.rope_scaling_dict
 
         if self.args.max_model_len:
-            hf_overrides['max_model_len'] = self.args.max_model_len
+            hf_overrides["max_model_len"] = self.args.max_model_len
 
         return hf_overrides
 
-    def _effective_keys(self) -> Tuple[str, str, str]:
+    def _effective_keys(self) -> tuple[str, str, str]:
         """Resolve the effective input/label/response keys with fallbacks."""
-        input_key = getattr(self.args, 'input_key', None) or DEFAULT_INPUT_KEY
-        label_key = getattr(self.args, 'label_key', None) or DEFAULT_LABEL_KEY
-        response_key = getattr(self.args, 'response_key',
-                               None) or DEFAULT_RESPONSE_KEY
+        input_key = getattr(self.args, "input_key", None) or DEFAULT_INPUT_KEY
+        label_key = getattr(self.args, "label_key", None) or DEFAULT_LABEL_KEY
+        response_key = getattr(self.args, "response_key", None) or DEFAULT_RESPONSE_KEY
         return input_key, label_key, response_key
 
-    def convert_to_compass_verifier_format(
-            self, item: Dict[str, Any]) -> Optional[str]:
+    def convert_to_compass_verifier_format(self, item: dict[str, Any]) -> str | None:
         """
         Convert input data item to Verifier prompt format.
 
@@ -379,7 +378,7 @@ class VerifierOfflineInferenceRunner:
 
         if missing_keys:
             logger.warning(
-                f'Missing required keys {missing_keys} in item: {list(item.keys())}'
+                f"Missing required keys {missing_keys} in item: {list(item.keys())}"
             )
             return None
 
@@ -396,8 +395,8 @@ class VerifierOfflineInferenceRunner:
         # Validate required fields
         if not prompt or not ground_truth or not llm_response:
             logger.warning(
-                f'Empty required field in item - question: {bool(prompt)}, '
-                f'ground_truth: {bool(ground_truth)}, llm_response: {bool(llm_response)}'
+                f"Empty required field in item - question: {bool(prompt)}, "
+                f"ground_truth: {bool(ground_truth)}, llm_response: {bool(llm_response)}"
             )
             return None
 
@@ -406,21 +405,20 @@ class VerifierOfflineInferenceRunner:
 
         # Ensure we have a verifier prompt template
         if not self.verifier_prompt:
-            logger.error('Verifier prompt template is not configured.')
+            logger.error("Verifier prompt template is not configured.")
             return None
 
         # Format the prompt using Verifier template
         try:
             formatted_prompt = self.verifier_prompt.format(
-                question=prompt,
-                gold_answer=ground_truth,
-                llm_response=llm_response)
+                question=prompt, gold_answer=ground_truth, llm_response=llm_response
+            )
             return formatted_prompt
         except Exception as e:
-            logger.error(f'Error formatting Verifier prompt: {e}')
+            logger.error(f"Error formatting Verifier prompt: {e}")
             return None
 
-    def _extract_llm_response(self, llm_response_raw: Any) -> Optional[str]:
+    def _extract_llm_response(self, llm_response_raw: Any) -> str | None:
         """
         Extract LLM response from various input formats.
 
@@ -435,15 +433,15 @@ class VerifierOfflineInferenceRunner:
         elif isinstance(llm_response_raw, str):
             return llm_response_raw
         elif llm_response_raw is None:
-            logger.warning('Invalid response format: None')
+            logger.warning("Invalid response format: None")
             return None
         else:
-            logger.warning(
-                f'Invalid response format: {type(llm_response_raw)}')
+            logger.warning(f"Invalid response format: {type(llm_response_raw)}")
             return None
 
-    def _write_batch_results(self, original_items: List[Dict[str, Any]],
-                             outputs: List[RequestOutput]) -> None:
+    def _write_batch_results(
+        self, original_items: list[dict[str, Any]], outputs: list[RequestOutput]
+    ) -> None:
         """
         Write batch results to output file with thread-safe operations.
 
@@ -460,30 +458,30 @@ class VerifierOfflineInferenceRunner:
         """
         with self._file_lock:
             try:
-                with open(self.args.output_file, 'a', encoding='utf-8') as f:
-                    for idx, (original_item,
-                              output) in enumerate(zip(original_items,
-                                                       outputs)):
+                with open(self.args.output_file, "a", encoding="utf-8") as f:
+                    for idx, (original_item, output) in enumerate(
+                        zip(original_items, outputs, strict=False)
+                    ):
                         # Extract model response
                         model_response = self._extract_model_response(output)
 
                         # Only write if we got a valid response
                         if model_response and model_response.strip():
                             result = self._prepare_result_item(
-                                original_item, model_response)
+                                original_item, model_response
+                            )
 
                             # Write to file
-                            f.write(
-                                json.dumps(result, ensure_ascii=False) + '\n')
+                            f.write(json.dumps(result, ensure_ascii=False) + "\n")
                             f.flush()
                         else:
                             logger.warning(
-                                f'Empty response for item {idx}, skipping write'
+                                f"Empty response for item {idx}, skipping write"
                             )
 
             except Exception as e:
-                logger.error(f'Error writing batch results: {e}')
-                raise IOError(f'Failed to write batch results: {e}') from e
+                logger.error(f"Error writing batch results: {e}")
+                raise OSError(f"Failed to write batch results: {e}") from e
 
     def _extract_model_response(self, output: RequestOutput) -> str:
         """Extract text response from vLLM output object.
@@ -495,20 +493,21 @@ class VerifierOfflineInferenceRunner:
             Extracted text response, empty string if extraction fails.
         """
         if output is None:
-            return ''
+            return ""
 
         try:
             # vLLM chat returns RequestOutput objects with `.outputs`
             # and each contains `.text`.
             if output.outputs and len(output.outputs) > 0:
                 return output.outputs[0].text
-            return ''
+            return ""
         except (AttributeError, IndexError) as e:
-            logger.warning(f'Failed to extract response from output: {e}')
-            return ''
+            logger.warning(f"Failed to extract response from output: {e}")
+            return ""
 
-    def _prepare_result_item(self, original_item: Dict[str, Any],
-                             model_response: str) -> Dict[str, Any]:
+    def _prepare_result_item(
+        self, original_item: dict[str, Any], model_response: str
+    ) -> dict[str, Any]:
         """
         Prepare result item for writing to output file.
 
@@ -520,7 +519,7 @@ class VerifierOfflineInferenceRunner:
             Processed result item ready for JSON serialization.
         """
         result = original_item.copy()
-        result['Verifier_response'] = model_response
+        result["Verifier_response"] = model_response
 
         # Optionally strip original large fields to reduce output size
         if not self.args.keep_origin_data:
@@ -528,37 +527,34 @@ class VerifierOfflineInferenceRunner:
             # Clear original input/response fields and verbose verifier response
             # to reduce output size; Verifier_judgment is preserved below.
             if input_key in result:
-                result[input_key] = ''
+                result[input_key] = ""
             if response_key in result:
-                result[response_key] = ''
-            result['Verifier_response'] = ''
+                result[response_key] = ""
+            result["Verifier_response"] = ""
 
         # Add judgment
-        if self.args.verifier_prompt_type in [
-                'fdd_prompt_cursor', 'fdd_prompt'
-        ]:
-            result['Verifier_judgment'] = process_judgment_cursor(
-                model_response)
+        if self.args.verifier_prompt_type in ["fdd_prompt_cursor", "fdd_prompt"]:
+            result["Verifier_judgment"] = process_judgment_cursor(model_response)
         elif self.args.verifier_prompt_type in [
-                'compassverify_prompt',
-                'compassverify_cot_prompt',
-                'compassverify_prompt_zh',
-                'compassverify_cot_prompt_zh',
+            "compassverify_prompt",
+            "compassverify_cot_prompt",
+            "compassverify_prompt_zh",
+            "compassverify_cot_prompt_zh",
         ]:
-            result['Verifier_judgment'] = process_judgment(model_response)
+            result["Verifier_judgment"] = process_judgment(model_response)
         elif self.args.verifier_prompt_type in [
-                'fdd_verify_prompt', 'fdd_verify_prompt_zh'
+            "fdd_verify_prompt",
+            "fdd_verify_prompt_zh",
         ]:
-            result['Verifier_judgment'] = process_judgment_cursor(
-                model_response)
+            result["Verifier_judgment"] = process_judgment_cursor(model_response)
         else:
             raise NotImplementedError(
-                f'Unknown verifier_prompt_type: {self.args.verifier_prompt_type}'
+                f"Unknown verifier_prompt_type: {self.args.verifier_prompt_type}"
             )
 
         return result
 
-    def count_completed_samples(self) -> Dict[str, int]:
+    def count_completed_samples(self) -> dict[str, int]:
         """
         Count completed samples for resume functionality.
 
@@ -569,7 +565,7 @@ class VerifierOfflineInferenceRunner:
         Returns:
             Dictionary mapping question content to count of completed samples.
         """
-        completed_counts: Dict[str, int] = collections.defaultdict(int)
+        completed_counts: dict[str, int] = collections.defaultdict(int)
 
         if not os.path.exists(self.args.output_file):
             return completed_counts
@@ -578,27 +574,27 @@ class VerifierOfflineInferenceRunner:
             return completed_counts
 
         try:
-            with open(self.args.output_file, 'r', encoding='utf-8') as f:
+            with open(self.args.output_file, encoding="utf-8") as f:
                 for line_num, line in enumerate(f, 1):
                     try:
                         item = json.loads(line.strip())
-                        prompt_key = item.get(
-                            self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+                        prompt_key = item.get(self.args.input_key) or item.get(
+                            DEFAULT_INPUT_KEY
+                        )
 
                         # Each written line represents a single completed judgment.
                         # Only count entries that contain a non-empty 'Verifier_judgment'.
-                        if prompt_key is not None and item.get(
-                                'Verifier_judgment'):
+                        if prompt_key is not None and item.get("Verifier_judgment"):
                             completed_counts[str(prompt_key)] += 1
                     except json.JSONDecodeError as e:
-                        logger.warning(f'Invalid JSON on line {line_num}: {e}')
+                        logger.warning(f"Invalid JSON on line {line_num}: {e}")
                         continue
         except Exception as e:
-            logger.error(f'Error reading output file for resume check: {e}')
+            logger.error(f"Error reading output file for resume check: {e}")
 
         return completed_counts
 
-    def load_data(self) -> List[Dict[str, Any]]:
+    def load_data(self) -> list[dict[str, Any]]:
         """
         Load and prepare dataset with resume functionality.
 
@@ -615,31 +611,28 @@ class VerifierOfflineInferenceRunner:
             json.JSONDecodeError: If an input line is not valid JSON.
             ValueError: If the dataset is empty or invalid.
         """
-        logger.info(f'Loading data from: {self.args.input_file}')
+        logger.info(f"Loading data from: {self.args.input_file}")
 
         # Load raw data
         raw_data = self._load_raw_data()
-        logger.info(f'Loaded {len(raw_data)} items from input file')
+        logger.info(f"Loaded {len(raw_data)} items from input file")
 
         # Check for completed samples
         completed_counts = self.count_completed_samples()
         total_completed = sum(completed_counts.values())
 
         if total_completed > 0:
-            logger.info(
-                f'Found {total_completed} completed samples from previous run')
+            logger.info(f"Found {total_completed} completed samples from previous run")
 
         # Expand data according to n_samples and resume functionality
-        expanded_data = self._expand_data_with_resume(raw_data,
-                                                      completed_counts)
+        expanded_data = self._expand_data_with_resume(raw_data, completed_counts)
         if not expanded_data:
-            logger.warning('No data to process after expansion')
+            logger.warning("No data to process after expansion")
 
-        logger.info(
-            f'Total remaining samples to process: {len(expanded_data)}')
+        logger.info(f"Total remaining samples to process: {len(expanded_data)}")
         return expanded_data
 
-    def _load_raw_data(self) -> List[Dict[str, Any]]:
+    def _load_raw_data(self) -> list[dict[str, Any]]:
         """Load raw data from input file.
 
         Returns:
@@ -650,21 +643,20 @@ class VerifierOfflineInferenceRunner:
             json.JSONDecodeError: If an input line is not valid JSON.
         """
         try:
-            with open(self.args.input_file, 'r', encoding='utf-8') as f:
+            with open(self.args.input_file, encoding="utf-8") as f:
                 data = [json.loads(line) for line in f if line.strip()]
         except FileNotFoundError as e:
-            logger.critical(
-                f'Input file not found: {self.args.input_file}, {e}')
+            logger.critical(f"Input file not found: {self.args.input_file}, {e}")
             raise
         except json.JSONDecodeError as e:
-            logger.critical(f'Invalid JSON in input file: {e}')
+            logger.critical(f"Invalid JSON in input file: {e}")
             raise
 
         return data
 
     def _expand_data_with_resume(
-            self, raw_data: List[Dict[str, Any]],
-            completed_counts: Dict[str, int]) -> List[Dict[str, Any]]:
+        self, raw_data: list[dict[str, Any]], completed_counts: dict[str, int]
+    ) -> list[dict[str, Any]]:
         """Expand data according to n_samples and resume functionality.
 
         Args:
@@ -674,17 +666,16 @@ class VerifierOfflineInferenceRunner:
         Returns:
             Expanded dataset with remaining samples to process.
         """
-        expanded_data: List[Dict[str, Any]] = []
+        expanded_data: list[dict[str, Any]] = []
         skipped_items = 0
 
         for item in raw_data:
-            prompt_val = item.get(
-                self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
-            prompt = str(prompt_val) if prompt_val is not None else ''
+            prompt_val = item.get(self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+            prompt = str(prompt_val) if prompt_val is not None else ""
 
             if not prompt.strip():
                 logger.warning(
-                    f'No valid prompt found under keys [{self.args.input_key!r}, '
+                    f"No valid prompt found under keys [{self.args.input_key!r}, "
                     f'"{DEFAULT_INPUT_KEY}"] for item with keys: {list(item.keys())}'
                 )
                 skipped_items += 1
@@ -698,13 +689,12 @@ class VerifierOfflineInferenceRunner:
 
         if skipped_items > 0:
             logger.warning(
-                f'Skipped {skipped_items} items due to missing or empty prompt'
+                f"Skipped {skipped_items} items due to missing or empty prompt"
             )
 
         return expanded_data
 
-    def process_and_write_batch(self, batch_data: List[Dict[str,
-                                                            Any]]) -> None:
+    def process_and_write_batch(self, batch_data: list[dict[str, Any]]) -> None:
         """
         Process a single batch of data and write results.
 
@@ -718,16 +708,16 @@ class VerifierOfflineInferenceRunner:
             RuntimeError: If batch processing fails.
         """
         if not batch_data:
-            logger.warning('Empty batch data provided')
+            logger.warning("Empty batch data provided")
             return
 
         if self.llm is None or self.tokenizer is None or self.sampling_params is None:
             raise RuntimeError(
-                'Engine is not initialized. Call setup_vllm_engine() before processing.'
+                "Engine is not initialized. Call setup_vllm_engine() before processing."
             )
 
         original_items = batch_data
-        batch_prompts: List[Optional[str]] = []
+        batch_prompts: list[str | None] = []
 
         # Convert data format and filter invalid items
         for item in batch_data:
@@ -735,48 +725,49 @@ class VerifierOfflineInferenceRunner:
             if prompt is not None:
                 batch_prompts.append(prompt)
             else:
-                logger.warning('Failed to convert item to Verifier format')
-                batch_prompts.append('')
+                logger.warning("Failed to convert item to Verifier format")
+                batch_prompts.append("")
 
         # Filter out empty prompts and corresponding original items
         valid_prompts, valid_original_items = self._filter_valid_prompts(
-            batch_prompts, original_items)
+            batch_prompts, original_items
+        )
 
         if not valid_prompts:
-            logger.warning('No valid prompts in this batch, skipping')
+            logger.warning("No valid prompts in this batch, skipping")
             return
 
         try:
             # Convert prompts to messages format for vLLM
-            batch_messages: List[str] = []
+            batch_messages: list[str] = []
             for prompt in valid_prompts:
-                messages = [{'role': 'user', 'content': prompt}]
+                messages = [{"role": "user", "content": prompt}]
                 model_inputs = self.tokenizer.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=False)
+                    messages, add_generation_prompt=True, tokenize=False
+                )
                 batch_messages.append(model_inputs)
 
             # Use vLLM for inference
-            logger.debug(f'Processing batch of {len(batch_messages)} prompts')
-            outputs: List[RequestOutput] = self.llm.generate(
+            logger.debug(f"Processing batch of {len(batch_messages)} prompts")
+            outputs: list[RequestOutput] = self.llm.generate(
                 batch_messages,
                 self.sampling_params,
-                use_tqdm=False  # Avoid progress bar conflicts
+                use_tqdm=False,  # Avoid progress bar conflicts
             )
 
             # Write results
             self._write_batch_results(valid_original_items, outputs)
             logger.debug(
-                f'Successfully processed batch of {len(valid_original_items)} items'
+                f"Successfully processed batch of {len(valid_original_items)} items"
             )
 
         except Exception as e:
-            logger.error(f'❌ Error during vLLM processing for this batch: {e}')
-            raise RuntimeError(f'Batch processing failed: {e}') from e
+            logger.error(f"❌ Error during vLLM processing for this batch: {e}")
+            raise RuntimeError(f"Batch processing failed: {e}") from e
 
     def _filter_valid_prompts(
-        self, batch_prompts: Iterable[Optional[str]],
-        original_items: List[Dict[str, Any]]
-    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        self, batch_prompts: Iterable[str | None], original_items: list[dict[str, Any]]
+    ) -> tuple[list[str], list[dict[str, Any]]]:
         """
         Filter out empty prompts and corresponding original items.
 
@@ -787,8 +778,8 @@ class VerifierOfflineInferenceRunner:
         Returns:
             Tuple of (valid_prompts, valid_original_items).
         """
-        valid_prompts: List[str] = []
-        valid_original_items: List[Dict[str, Any]] = []
+        valid_prompts: list[str] = []
+        valid_original_items: list[dict[str, Any]] = []
 
         for i, prompt in enumerate(batch_prompts):
             if prompt:  # Only include non-empty prompts
@@ -811,17 +802,16 @@ class VerifierOfflineInferenceRunner:
         """
         # Validate file paths
         if not self.args.input_file or not Path(self.args.input_file).exists():
-            raise FileNotFoundError(
-                f'Input file not found: {self.args.input_file}')
+            raise FileNotFoundError(f"Input file not found: {self.args.input_file}")
         if not self.args.output_file:
-            raise ValueError('Output file path is required')
+            raise ValueError("Output file path is required")
 
         try:
             # Load data (including resume functionality)
             eval_dataset = self.load_data()
             if not eval_dataset:
                 logger.info(
-                    'All samples have already been processed, skipping inference'
+                    "All samples have already been processed, skipping inference"
                 )
                 return
 
@@ -829,39 +819,38 @@ class VerifierOfflineInferenceRunner:
             output_path = Path(self.args.output_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            logger.info(f'⏳ Starting to process {len(eval_dataset)} entries')
+            logger.info(f"⏳ Starting to process {len(eval_dataset)} entries")
 
             # Initialize vLLM engine
-            self.llm, self.tokenizer, self.sampling_params = self.setup_vllm_engine(
-            )
+            self.llm, self.tokenizer, self.sampling_params = self.setup_vllm_engine()
 
             # Process data in batches
             self._process_batches(eval_dataset)
 
             logger.info(
-                f'✨ Final data processing completed. Results saved to {self.args.output_file}'
+                f"✨ Final data processing completed. Results saved to {self.args.output_file}"
             )
 
         except Exception as e:
-            logger.critical(f'❌ Fatal error during inference: {e}')
+            logger.critical(f"❌ Fatal error during inference: {e}")
             raise
 
-    def _process_batches(self, eval_dataset: List[Dict[str, Any]]) -> None:
+    def _process_batches(self, eval_dataset: list[dict[str, Any]]) -> None:
         """Process the evaluation dataset in batches.
 
         Args:
             eval_dataset: Dataset to process.
         """
-        total_batches = (len(eval_dataset) + self.args.batch_size -
-                         1) // self.args.batch_size
+        total_batches = (
+            len(eval_dataset) + self.args.batch_size - 1
+        ) // self.args.batch_size
         logger.info(
-            f'Processing {total_batches} batches with batch size {self.args.batch_size}'
+            f"Processing {total_batches} batches with batch size {self.args.batch_size}"
         )
 
-        with tqdm(total=total_batches, desc='Processing batches',
-                  unit='batch') as pbar:
+        with tqdm(total=total_batches, desc="Processing batches", unit="batch") as pbar:
             for i in range(0, len(eval_dataset), self.args.batch_size):
-                batch = eval_dataset[i:i + self.args.batch_size]
+                batch = eval_dataset[i : i + self.args.batch_size]
                 self.process_and_write_batch(batch)
                 pbar.update(1)
 
@@ -880,35 +869,33 @@ def main(args: VerifierInferArguments) -> None:
         runner = VerifierOfflineInferenceRunner(args)
         runner.run()
     except Exception as e:
-        logger.critical(f'❌ Inference process failed: {e}')
-        raise RuntimeError(f'Inference failed: {e}') from e
+        logger.critical(f"❌ Inference process failed: {e}")
+        raise RuntimeError(f"Inference failed: {e}") from e
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     """Command-line interface for Verifier offline inference."""
     try:
         # Parse command line arguments
         parser = HfArgumentParser(VerifierInferArguments)
-        eval_args, = parser.parse_args_into_dataclasses()
+        (eval_args,) = parser.parse_args_into_dataclasses()
 
         # Log configuration
         logger.info(
-            'Initializing Verifier VerifierInferArguments with parsed command line arguments...'
+            "Initializing Verifier VerifierInferArguments with parsed command line arguments..."
         )
-        logger.info('\n--- Parsed Arguments ---')
+        logger.info("\n--- Parsed Arguments ---")
         logger.info(json.dumps(asdict(eval_args), indent=2, default=str))
 
         # Run main inference process
         main(eval_args)
 
     except ImportError as e:
-        logger.error(
-            f'❌ A required library is missing: {e}. Please install it.')
+        logger.error(f"❌ A required library is missing: {e}. Please install it.")
         sys.exit(1)
     except KeyboardInterrupt:
-        logger.info('Process interrupted by user')
+        logger.info("Process interrupted by user")
         sys.exit(0)
     except Exception as e:
-        logger.critical(
-            f'❌ An unrecoverable error occurred during execution: {e}')
+        logger.critical(f"❌ An unrecoverable error occurred during execution: {e}")
         sys.exit(1)

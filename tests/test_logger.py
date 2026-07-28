@@ -1,8 +1,8 @@
 """Tests for llmeval.utils.logger."""
+
 from __future__ import annotations
 
 import logging
-import tempfile
 from pathlib import Path
 
 from llmeval.utils.logger import get_logger, init_logger, set_log_level
@@ -15,17 +15,13 @@ class TestInitLogger:
 
     def test_console_handler_present_by_default(self) -> None:
         logger = init_logger("test_console")
-        assert any(
-            isinstance(h, logging.StreamHandler) for h in logger.handlers
-        )
+        assert any(isinstance(h, logging.StreamHandler) for h in logger.handlers)
 
     def test_file_handler_created(self, tmp_path: Path) -> None:
         log_file = tmp_path / "test.log"
         logger = init_logger("test_file", log_file=str(log_file))
         assert log_file.exists()
-        assert any(
-            isinstance(h, logging.FileHandler) for h in logger.handlers
-        )
+        assert any(isinstance(h, logging.FileHandler) for h in logger.handlers)
 
     def test_string_level_resolved(self) -> None:
         logger = init_logger("test_level", level="DEBUG")

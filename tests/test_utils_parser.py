@@ -1,4 +1,5 @@
 """Tests for llmeval.tasks.math_eval.utils_parser."""
+
 from __future__ import annotations
 
 import pytest
@@ -20,8 +21,7 @@ class TestParseGroundTruthGeneric:
         assert answer == "204"
 
     def test_custom_label_key(self) -> None:
-        _, answer = parse_ground_truth(
-            {"output": "99"}, "aime24", label_key="output")
+        _, answer = parse_ground_truth({"output": "99"}, "aime24", label_key="output")
         assert answer == "99"
 
     def test_empty_answer_raises(self) -> None:
@@ -39,8 +39,7 @@ class TestParseGroundTruthGeneric:
 
 class TestParseGroundTruthGsm8k:
     def test_standard_format(self) -> None:
-        cot, answer = parse_ground_truth(
-            {"answer": "2+2=4\n#### 4"}, "gsm8k")
+        cot, answer = parse_ground_truth({"answer": "2+2=4\n#### 4"}, "gsm8k")
         assert answer == "4"
         assert "2+2=4" in cot
 
@@ -51,13 +50,11 @@ class TestParseGroundTruthGsm8k:
 
 class TestParseGroundTruthOlympiadbench:
     def test_list_answer(self) -> None:
-        _, answer = parse_ground_truth(
-            {"answer": ["42"]}, "olympiadbench")
+        _, answer = parse_ground_truth({"answer": ["42"]}, "olympiadbench")
         assert answer == "42"
 
     def test_string_answer(self) -> None:
-        _, answer = parse_ground_truth(
-            {"answer": "$x^2$"}, "olympiadbench")
+        _, answer = parse_ground_truth({"answer": "$x^2$"}, "olympiadbench")
         assert answer == "x^2"
 
     def test_empty_list_raises(self) -> None:

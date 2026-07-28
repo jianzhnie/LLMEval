@@ -4,6 +4,7 @@ These tests target the pure-utility functions (extract_answer, process_judgment,
 etc.) that don't require a vLLM engine.  We mock the heavy imports so the module
 can be loaded without vllm/openai installed.
 """
+
 from __future__ import annotations
 
 import sys
@@ -30,13 +31,12 @@ if "transformers" not in sys.modules:
     _tf.HfArgumentParser = MagicMock
     sys.modules["transformers"] = _tf
 
-from llmeval.vllm.verifier_offline_infer import (  # noqa: E402
+from llmeval.vllm.verifier_offline_infer import (
     _last_n_strs,
     extract_answer,
     process_judgment,
     process_judgment_cursor,
 )
-
 
 # ── _last_n_strs ──────────────────────────────────────────────────
 
@@ -60,13 +60,11 @@ class TestExtractAnswer:
         "text, expected",
         [
             ("<answer>42</answer>", "42"),
-            ("reasoning <answer>\\frac{1}{2}</answer> extra",
-             "\\frac{1}{2}"),
+            ("reasoning <answer>\\frac{1}{2}</answer> extra", "\\frac{1}{2}"),
             ("multi\n<answer>\nline\n</answer>", "line"),
         ],
     )
-    def test_answer_tag_extraction(self, text: str,
-                                   expected: str) -> None:
+    def test_answer_tag_extraction(self, text: str, expected: str) -> None:
         assert extract_answer(text) == expected
 
     def test_fallback_after_think_tag(self) -> None:
@@ -116,8 +114,7 @@ class TestProcessJudgment:
             ("B", "B"),
         ],
     )
-    def test_boxed_extraction(self, input_str: str,
-                              expected: str) -> None:
+    def test_boxed_extraction(self, input_str: str, expected: str) -> None:
         assert process_judgment(input_str) == expected
 
     def test_last_boxed_wins(self) -> None:
@@ -153,8 +150,7 @@ class TestProcessJudgmentCursor:
             ("\\boxed{b}", "B"),
         ],
     )
-    def test_boxed_extraction(self, input_str: str,
-                              expected: str) -> None:
+    def test_boxed_extraction(self, input_str: str, expected: str) -> None:
         assert process_judgment_cursor(input_str) == expected
 
     def test_paren_fallback(self) -> None:
@@ -177,5 +173,4 @@ class TestProcessJudgmentCursor:
         assert process_judgment_cursor(None) == ""
 
     def test_last_boxed_wins(self) -> None:
-        assert process_judgment_cursor(
-            "\\boxed{A} \\boxed{C}") == "C"
+        assert process_judgment_cursor("\\boxed{A} \\boxed{C}") == "C"

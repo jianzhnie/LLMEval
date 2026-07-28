@@ -14,7 +14,7 @@ import os
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass
 from statistics import mean
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from pebble import ProcessPool
 from tqdm import tqdm
@@ -23,13 +23,13 @@ from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
 from llmeval.utils.logger import init_logger
 
 # Configure a dedicated logger for the math scoring module
-logger = init_logger('math_score')
+logger = init_logger("math_score")
 
 # Define package requirements for better dependency management
 REQUIRED_PACKAGES = {
-    'math-verify': 'math-verify>=1.0.0',
-    'pebble': 'pebble>=4.6.3',
-    'tqdm': 'tqdm>=4.65.0'
+    "math-verify": "math-verify>=1.0.0",
+    "pebble": "pebble>=4.6.3",
+    "tqdm": "tqdm>=4.65.0",
 }
 # Attempt to import necessary components from math-verify.
 # Provides helpful error messages if dependencies are missing.
@@ -38,22 +38,24 @@ try:
     from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 except ImportError as e:
     logger.error(
-        f'Missing required dependency: {e}\n'
-        f'To use Math-Verify, install required packages:\n'
-        f'pip install {" ".join(REQUIRED_PACKAGES.values())}'
+        f"Missing required dependency: {e}\n"
+        f"To use Math-Verify, install required packages:\n"
+        f"pip install {' '.join(REQUIRED_PACKAGES.values())}"
     )
     import sys
+
     sys.exit(1)
 
 # Type aliases for better code readability
-ProcessResult = Optional[Tuple[int, float, Optional[str], Optional[str]]]
-DataDict = Dict[str, Any]
-EvalDataset = List[DataDict]
+ProcessResult = tuple[int, float, str | None, str | None] | None
+DataDict = dict[str, Any]
+EvalDataset = list[DataDict]
 
 
 @dataclass
 class ProcessingStats:
     """Container for tracking processing statistics."""
+
     total: int = 0
     correct: int = 0
     timeout: int = 0
@@ -75,7 +77,7 @@ class ProcessingStats:
         return (self.error / self.total * 100) if self.total > 0 else 0.0
 
 
-def process_answers(args: Tuple[int, DataDict, str, str]) -> ProcessResult:
+def process_answers(args: tuple[int, DataDict, str, str]) -> ProcessResult:
     """
     Process a single model output by extracting and comparing with ground truth.
 
@@ -107,39 +109,36 @@ def process_answers(args: Tuple[int, DataDict, str, str]) -> ProcessResult:
 
     # Validate and extract task name
     try:
-        data_name = input_data.get('task', '').split('/')[1]
+        data_name = input_data.get("task", "").split("/")[1]
     except (IndexError, AttributeError):
-        logger.warning(f'⚠️ Invalid task format for job {index}')
+        logger.warning(f"⚠️ Invalid task format for job {index}")
         return index, 0.0, None, None
 
     # Parse the ground truth answer from the input data
     # The first return value (cot_answer) is unused for this metric
     try:
         # The first return value (cot_answer) is unused for this metric.
-        _, gold_answer_text = parse_ground_truth(input_data, data_name,
-                                                 label_key)
+        _, gold_answer_text = parse_ground_truth(input_data, data_name, label_key)
     except (ValueError, NotImplementedError, KeyError) as e:
-        logger.error(
-            f'❌ [Error] Parsing gold truth for job {index} failed: {e}')
+        logger.error(f"❌ [Error] Parsing gold truth for job {index} failed: {e}")
         return index, 0.0, None, None
 
     # Get the generated text. Handles cases where response might be missing or empty.
     generated_text = input_data.get(response_key, [])
     if not generated_text:
-        logger.warning(f'⚠️ No generated text found for job {index}')
+        logger.warning(f"⚠️ No generated text found for job {index}")
         return index, 0.0, None, None
-    generated_text = generated_text[0] if isinstance(
-        generated_text, list) else str(generated_text)
+    generated_text = (
+        generated_text[0] if isinstance(generated_text, list) else str(generated_text)
+    )
 
     # Initialize the verification function from math_verify
     verify_func = math_metric(
         # The gold answer can be an expression or LaTeX.
         # We use both parsers to be robust to different formats.
-        gold_extraction_target=(ExprExtractionConfig(),
-                                LatexExtractionConfig()),
+        gold_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
         # The predicted answer can also be an expression or LaTeX.
-        pred_extraction_target=(ExprExtractionConfig(),
-                                LatexExtractionConfig()),
+        pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
         # Use max to select the best score if multiple extractions are successful.
         aggregation_function=max,
         precision=6,
@@ -147,49 +146,49 @@ def process_answers(args: Tuple[int, DataDict, str, str]) -> ProcessResult:
 
     try:
         # Run the verification using math-verify metric
-        grade, extracted_answers = verify_func([gold_answer_text],
-                                               [generated_text])
+        grade, extracted_answers = verify_func([gold_answer_text], [generated_text])
 
         if not extracted_answers:
-            logger.warning(f'⚠️ No answers could be extracted for job {index}')
+            logger.warning(f"⚠️ No answers could be extracted for job {index}")
             return index, 0.0, None, None
 
         # Extract answers with validation
         try:
-            gold_ans = extracted_answers[0] if len(
-                extracted_answers) > 0 else None
-            pred_ans = extracted_answers[1] if len(
-                extracted_answers) > 1 else None
+            gold_ans = extracted_answers[0] if len(extracted_answers) > 0 else None
+            pred_ans = extracted_answers[1] if len(extracted_answers) > 1 else None
         except IndexError:
-            logger.error(
-                f'❌ [Error] Invalid extraction format for job {index}')
+            logger.error(f"❌ [Error] Invalid extraction format for job {index}")
             return index, 0.0, None, None
 
         # Validate grade value
-        if not (isinstance(grade, (int, float)) and 0 <= grade <= 1):
-            logger.error(
-                f'❌ [Error] Invalid grade value {grade} for job {index}')
+        if not (isinstance(grade, int | float) and 0 <= grade <= 1):
+            logger.error(f"❌ [Error] Invalid grade value {grade} for job {index}")
             return index, 0.0, pred_ans, gold_ans
 
         return index, float(grade), pred_ans, gold_ans
 
     except TimeoutError as te:
-        logger.warning(f'⏰ [Timeout] Job {index} timed out after {te} seconds')
-        return index, 0.0, 'Timeout', 'Timeout'
+        logger.warning(f"⏰ [Timeout] Job {index} timed out after {te} seconds")
+        return index, 0.0, "Timeout", "Timeout"
     except ValueError as ve:
-        logger.error(
-            f'❌ [Value Error] Invalid input format for job {index}: {ve}')
-        return index, 0.0, f'Format Error: {ve}', None
+        logger.error(f"❌ [Value Error] Invalid input format for job {index}: {ve}")
+        return index, 0.0, f"Format Error: {ve}", None
     except Exception as e:
         logger.error(
-            f'❌ [Error] An unexpected error occurred for job {index}: {e}',
-            exc_info=True)
-        return index, 0.0, f'Error: {e}', f'Error: {e}'
+            f"❌ [Error] An unexpected error occurred for job {index}: {e}",
+            exc_info=True,
+        )
+        return index, 0.0, f"Error: {e}", f"Error: {e}"
 
 
-def compute_scores(eval_dataset: EvalDataset, label_key: str,
-                   response_key: str, cache_path: str, max_workers: int,
-                   timeout: int) -> float:
+def compute_scores(
+    eval_dataset: EvalDataset,
+    label_key: str,
+    response_key: str,
+    cache_path: str,
+    max_workers: int,
+    timeout: int,
+) -> float:
     """
     Computes accuracy scores for a batch of mathematical evaluation jobs using parallel processing.
 
@@ -227,7 +226,7 @@ def compute_scores(eval_dataset: EvalDataset, label_key: str,
         - Individual job results and extracted answers
     """
     if not eval_dataset:
-        logger.info('No jobs to process. Returning 0.0 accuracy.')
+        logger.info("No jobs to process. Returning 0.0 accuracy.")
         return 0.0
 
     total = len(eval_dataset)
@@ -238,70 +237,73 @@ def compute_scores(eval_dataset: EvalDataset, label_key: str,
     cpu_count = os.cpu_count() or 1
     optimal_workers = min(max_workers, max(1, min(cpu_count - 1, total // 4)))
 
-    with tqdm(total=total, desc='Processing jobs', unit='job') as pbar:
-        with ProcessPool(max_workers=optimal_workers) as pool:
-            # `pool.map` submits jobs and returns a future
-            future = pool.map(process_answers,
-                              [(i, data, label_key, response_key)
-                               for i, data in enumerate(eval_dataset)],
-                              timeout=timeout)
+    with (
+        tqdm(total=total, desc="Processing jobs", unit="job") as pbar,
+        ProcessPool(max_workers=optimal_workers) as pool,
+    ):
+        # `pool.map` submits jobs and returns a future
+        future = pool.map(
+            process_answers,
+            [(i, data, label_key, response_key) for i, data in enumerate(eval_dataset)],
+            timeout=timeout,
+        )
 
-            # Iterate over the results as they become available.
-            iterator = future.result()
-            while True:
-                try:
-                    result = next(iterator)
-                    if result is not None:
-                        idx, is_correct, extracted_answer, extracted_gold = result
+        # Iterate over the results as they become available.
+        iterator = future.result()
+        while True:
+            try:
+                result = next(iterator)
+                if result is not None:
+                    idx, is_correct, extracted_answer, extracted_gold = result
 
-                        # Update results atomically
-                        eval_dataset[idx].update({
-                            'accuracy':
-                            is_correct,
-                            'extracted_gold':
-                            extracted_gold,
-                            'extracted_answer':
-                            extracted_answer
-                        })
-                        processed_indices.add(idx)
+                    # Update results atomically
+                    eval_dataset[idx].update(
+                        {
+                            "accuracy": is_correct,
+                            "extracted_gold": extracted_gold,
+                            "extracted_answer": extracted_answer,
+                        }
+                    )
+                    processed_indices.add(idx)
 
-                        # Update statistics
-                        if is_correct == 1.0:
-                            stats.correct += 1
-                        elif extracted_answer == 'Timeout':
-                            stats.timeout += 1
-                        elif isinstance(
-                                extracted_answer,
-                                str) and extracted_answer.startswith('Error'):
-                            stats.error += 1
-                except StopIteration:
-                    break
-                except TimeoutError:
-                    # Handle global timeout for the entire operation
-                    logger.warning('Global timeout reached for processing')
-                    break
-                except Exception as e:
-                    # Catch exceptions from the iterator, e.g., if a worker fails.
-                    logger.error(
-                        f'❌ An error occurred while retrieving a result: {e}')
-                    # We can't identify the specific job, so we continue.
-                finally:
-                    pbar.update(1)
+                    # Update statistics
+                    if is_correct == 1.0:
+                        stats.correct += 1
+                    elif extracted_answer == "Timeout":
+                        stats.timeout += 1
+                    elif isinstance(
+                        extracted_answer, str
+                    ) and extracted_answer.startswith("Error"):
+                        stats.error += 1
+            except StopIteration:
+                break
+            except TimeoutError:
+                # Handle global timeout for the entire operation
+                logger.warning("Global timeout reached for processing")
+                break
+            except Exception as e:
+                # Catch exceptions from the iterator, e.g., if a worker fails.
+                logger.error(f"❌ An error occurred while retrieving a result: {e}")
+                # We can't identify the specific job, so we continue.
+            finally:
+                pbar.update(1)
 
     # Handle any jobs that were not processed (e.g., due to a process crash or other unforeseen error).
     for idx in range(total):
         if idx not in processed_indices:
-            eval_dataset[idx].update({
-                'accuracy': 0.0,
-                'extracted_gold': 'Error',
-                'extracted_answer': 'Error'
-            })
+            eval_dataset[idx].update(
+                {
+                    "accuracy": 0.0,
+                    "extracted_gold": "Error",
+                    "extracted_answer": "Error",
+                }
+            )
             stats.error += 1
 
-    logger.info(f'Summary: {total} eval_dataset processed.')
+    logger.info(f"Summary: {total} eval_dataset processed.")
 
     # Log performance summary
-    logger.info(f'''
+    logger.info(f"""
     Performance Summary:
     -------------------
     Total Jobs: {stats.total}
@@ -309,25 +311,25 @@ def compute_scores(eval_dataset: EvalDataset, label_key: str,
     Timeouts: {stats.timeout} ({stats.timeout_rate:.1f}%)
     Errors: {stats.error} ({stats.error_rate:.1f}%)
     Workers Used: {optimal_workers}
-    ''')
+    """)
 
     # Add metadata and save results
     metadata = {
-        'total_jobs': stats.total,
-        'correct_count': stats.correct,
-        'timeout_count': stats.timeout,
-        'error_count': stats.error,
-        'workers_used': optimal_workers,
-        'timeout_setting': timeout
+        "total_jobs": stats.total,
+        "correct_count": stats.correct,
+        "timeout_count": stats.timeout,
+        "error_count": stats.error,
+        "workers_used": optimal_workers,
+        "timeout_setting": timeout,
     }
 
-    logger.debug(f'Processing metadata: {metadata}')
+    logger.debug(f"Processing metadata: {metadata}")
     # Save the results to the cache file
     save_cache(eval_dataset, cache_path)
 
     # Calculate and return the average accuracy
-    accuracy = mean(data['accuracy'] for data in eval_dataset)
-    logger.info(f'Final Accuracy: {accuracy:.4f}')
+    accuracy = mean(data["accuracy"] for data in eval_dataset)
+    logger.info(f"Final Accuracy: {accuracy:.4f}")
     return accuracy
 
 
@@ -344,10 +346,10 @@ def save_cache(eval_dataset: EvalDataset, cache_path: str) -> None:
     """
     try:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, 'w', encoding='utf-8') as f:
+        with open(cache_path, "w", encoding="utf-8") as f:
             for dataset in eval_dataset:
-                f.write(json.dumps(dataset, ensure_ascii=False) + '\n')
-        logger.info(f'✅ Results saved to {cache_path}')
-    except IOError as e:
-        logger.error(f'❌ Failed to save cache: {e}')
+                f.write(json.dumps(dataset, ensure_ascii=False) + "\n")
+        logger.info(f"✅ Results saved to {cache_path}")
+    except OSError as e:
+        logger.error(f"❌ Failed to save cache: {e}")
         raise
