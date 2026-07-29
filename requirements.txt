@@ -1,9 +1,0 @@
-datasets
-math-verify
-numpy
-openai>1.0.0
-Pebble
-tokenizers
-torch
-tqdm
-transformers
