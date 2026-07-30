@@ -547,8 +547,8 @@ class MCRunner:
             item: MC item with prompt, choices, and gold index
 
         Returns:
-            Result dict with per-choice logprobs, prediction, and correctness;
-            None when the item has no choices (counted as skipped)
+            Result dict with choices, per-choice logprobs, prediction, and
+            correctness; None when the item has no choices (counted as skipped)
 
         Raises:
             RuntimeError: When every choice scored -inf, i.e. the batched
@@ -572,6 +572,7 @@ class MCRunner:
         is_correct = pred == gold
         return {
             DEFAULT_INPUT_KEY: prompt,
+            "choices": choices,  # mc_score 的 acc_norm 需要选项文本做长度归一
             "gold": gold,
             "logprobs": logprobs,
             "pred": pred,

@@ -513,3 +513,45 @@ class TestMCRunnerEndToEnd:
         failed = tmp_path / "out_failed.jsonl"
         assert failed.exists()
         assert len(failed.read_text().strip().split("\n")) == 2
+
+
+class TestMCScoreEdgeCases:
+    """Regression tests for scorer fixes (2026-07-30)."""
+
+    def test_generate_empty_gold_and_pred_not_correct(self, tmp_path: Path) -> None:
+        """Empty gold + unparseable (empty) pred must NOT count as correct."""
+        from llmeval.tasks.mc_eval.mc_score import score_generate
+
+        items = [
+            {"answer": "", "gen": ["no letter here"]},  # both empty → was 判对
+            {"answer": "B", "gen": ["Answer: B"]},
+        ]
+        acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
+        assert acc == 0.5  # only the second item is correct
+
+    def test_loglikelihood_all_neg_inf_counted_wrong(self, tmp_path: Path) -> None:
+        """All -inf logprobs (failed inference) must not be argmax-scored."""
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+
+        items = [
+            {"gold": 0, "logprobs": [float("-inf")] * 2, "choices": ["a", "b"]},
+            {"gold": 1, "logprobs": [-2.0, -1.0], "choices": ["a", "b"]},
+        ]
+        acc = score_loglikelihood(items, tmp_path / "c.jsonl")
+        assert acc == 0.5
+
+    def test_acc_norm_uses_choices_when_present(self, tmp_path: Path) -> None:
+        """Length normalization flips the argmax when choices differ in length."""
+        from llmeval.tasks.mc_eval.mc_score import _compute_loglikelihood_metrics
+
+        # raw argmax → index 1; normalized: -2.0/4=-0.5 vs -1.0/1=-1.0 → index 0
+        items = [{"gold": 0, "logprobs": [-2.0, -1.0], "choices": ["aaaa", "b"]}]
+        metrics = _compute_loglikelihood_metrics(items)
+        assert metrics.acc == 0.0
+        assert metrics.acc_norm == 1.0
+
+    def test_extract_lowercase_letter(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import _extract_answer
+
+        assert _extract_answer("the answer is b") == "B"
+        assert _extract_answer("选 c") == "C"
