@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
 import openai
 
 from llmeval.utils.logger import init_logger
@@ -73,32 +74,31 @@ class FewShotFormatter:
         self.n_shot = n_shot
         self.few_shot_file = few_shot_file
         self.seed = seed
-        self._few_shot_pool: list[dict] = []
+        self._few_shot_pool: list[dict[str, Any]] = []
         self._all_formatted: list[str] = []
 
-    def load(self, input_file: str) -> str:
-        """Load few-shot examples and return the formatted prefix string."""
+    def load(self, input_file: str) -> None:
+        """Load few-shot examples from dev file.  Call once before get_prefix()."""
         if self.n_shot <= 0:
-            return ""
+            return
 
         source = self.few_shot_file or input_file
         try:
             items = self._load_items(source)
         except Exception:
             logger.warning(f"Failed to load few-shot from {source}")
-            return ""
+            return
 
         if len(items) < self.n_shot:
             logger.warning(f"Only {len(items)} examples available, need {self.n_shot}")
-            return ""
+            return
 
         rng = random.Random(self.seed)
         # Sample n_shot+1: extra for dedup (lm-eval style)
         selected = rng.sample(items, min(self.n_shot + 1, len(items)))
-        self._few_shot_pool = selected  # store for per-item dedup
+        self._few_shot_pool = selected
         self._all_formatted = [self._format_demo(it) for it in selected]
         logger.info(f"Loaded {self.n_shot} few-shot examples (seed={self.seed})")
-        return ""  # prefix built per-item for dedup
 
     def get_prefix(self, test_prompt: str) -> str:
         """Get few-shot prefix, excluding any demo matching test_prompt (lm-eval dedup)."""
@@ -156,7 +156,11 @@ class MCLoglikelihoodClient:
         self.api_key = os.environ.get("OPENAI_API_KEY", "EMPTY")
         if self.api_key == "EMPTY":
             logger.warning("Using default 'EMPTY' API key.")
-        self.client = openai.OpenAI(api_key=self.api_key, base_url=base_url)
+        self.client: openai.OpenAI = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=base_url,
+            timeout=httpx.Timeout(self.timeout),
+        )
         logger.info(
             f"MC Client initialized: model={model_name}, timeout={timeout}, "
             f"max_retries={max_retries}, base_url={base_url}"
@@ -364,7 +368,7 @@ class MCRunner:
             return
 
         logger.info(f"⏳ Processing {len(remaining)} samples (generate mode)")
-        gen_client = openai.OpenAI(
+        gen_client: openai.OpenAI = openai.OpenAI(
             api_key=self.config.api_key,
             base_url=self.config.base_url,
         )
@@ -428,7 +432,9 @@ class MCRunner:
                 gen_text = resp.choices[0].message.content or ""
                 break
             except Exception as e:
-                if attempt == self.config.max_retries:
+                if attempt < self.config.max_retries:
+                    time.sleep(min(2**attempt, 30))
+                else:
                     logger.warning(f"Generate failed after retries: {e}")
 
         return {"prompt": prompt, "answer": gold, "gen": [gen_text]}
@@ -454,6 +460,7 @@ class MCRunner:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with open(output_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                f.flush()
 
     def _log_stats(self) -> None:
         logger.info(
@@ -466,25 +473,14 @@ class MCRunner:
             self._print_loglikelihood_summary()
 
     def _print_loglikelihood_summary(self) -> None:
-        """Print accuracy summary from output file."""
-        try:
-            correct = 0
-            total = 0
-            with open(self.config.output_file, encoding="utf-8") as f:
-                for line in f:
-                    r = json.loads(line.strip())
-                    logprobs = r.get("logprobs", [])
-                    gold = r.get("gold", -1)
-                    if logprobs and gold >= 0:
-                        total += 1
-                        if max(range(len(logprobs)), key=lambda i: logprobs[i]) == gold:
-                            correct += 1
-            if total:
-                logger.info(
-                    f"Accuracy (loglikelihood): {correct}/{total} = {correct / total:.2%}"
-                )
-        except Exception:
-            pass
+        """Print quick accuracy from in-memory stats (no file re-read)."""
+        processed = self._stats["processed"]
+        failed = self._stats["failed"]
+        if processed:
+            logger.info(
+                f"Accuracy (loglikelihood): {processed - failed}/{processed} "
+                f"(failed={failed}, pass@{1}={processed / max(processed + failed, 1):.2%})"
+            )
 
     def run(self) -> None:
         """Main entry point."""
