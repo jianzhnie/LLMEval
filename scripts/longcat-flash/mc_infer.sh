@@ -32,6 +32,8 @@ MAX_TOKENS="${MAX_TOKENS:-2048}"
 TEMPERATURE="${TEMPERATURE:-0.0}"
 SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-empty}"
 TOOL_CHOICE="${TOOL_CHOICE:-none}"
+N_SHOT="${N_SHOT:-0}"                    # 0=zero-shot, 5=five-shot
+FEW_SHOT_FILE="${FEW_SHOT_FILE:-}"        # dev file for few-shot
 OUTPUT_DIR="${OUTPUT_DIR:-./output/${MODEL_NAME}}"
 mkdir -p "$OUTPUT_DIR"
 
@@ -98,9 +100,11 @@ for task in $BENCHMARKS; do
                 --max_tokens "$MAX_TOKENS" \
                 --temperature "$TEMPERATURE" \
                 --system_prompt_type "$SYSTEM_PROMPT_TYPE" \
-                --tool_choice "$TOOL_CHOICE" 2>&1
-        } >> "$log_file"
-        rc=$?; TASK_PIDS+=($!)
+                --tool_choice "$TOOL_CHOICE" \
+                --n_shot "$N_SHOT" \
+                --few_shot_file "$FEW_SHOT_FILE" 2>&1
+        } >> "$log_file" &
+        TASK_PIDS+=($!)
     else
         python llmeval/tasks/mc_eval/mc_infer.py \
             --input_file "$input_file" \
@@ -114,7 +118,9 @@ for task in $BENCHMARKS; do
             --max_tokens "$MAX_TOKENS" \
             --temperature "$TEMPERATURE" \
             --system_prompt_type "$SYSTEM_PROMPT_TYPE" \
-            --tool_choice "$TOOL_CHOICE"
+            --tool_choice "$TOOL_CHOICE" \
+            --n_shot "$N_SHOT" \
+            --few_shot_file "$FEW_SHOT_FILE"
         rc=$?
         if [[ $rc -eq 0 ]]; then echo "[OK] $task"; else echo "[FAIL] $task"; fi
     fi

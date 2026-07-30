@@ -1,13 +1,126 @@
+# LLMEval 支持的 Benchmark
 
-## 数学推理任务测试集
+## 数学推理任务
 
+数学推理是评估大模型高级推理能力的核心维度。业内三大基础评测方向：**数学推理**、**竞赛编程**、**科学知识**。
 
-评估一个新的大模型的逻辑推理能力，业内有三大基础评测，分别是数学、竞赛编程和科学知识。如果得分卡位靠前，相当于一个职场专业人士，拿到某一领域的“职业资格证”。这份成绩既能为企业吸引投资、人才，也能完成对市场的宣传与对普通用户的心智教育。
+AIME（美国数学邀请赛）和 HMMT（哈佛-MIT 数学锦标赛）作为极具挑战性的人类数学考试，已成为评估大模型推理能力的"试金石"。
 
-大模型数学领域的三个高难度测试集分别是AIME2024、AIME2025和HMMT2025。这些测试集以复杂性和挑战性著称，常用于评估大模型的数学推理能力。
+### GSM8K
+小学数学应用题，包含四则运算和简单逻辑推理。标准评测为 1-shot greedy decoding。
 
-其中，AIME全名叫“美国数学邀请赛”，始于1983年，由美国数学协会制定和主办，一般是由30道填空题组成。
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [openai/gsm8k](https://huggingface.co/datasets/openai/gsm8k) |
+| 样本数 | 1,319 (test) |
+| 答案格式 | `#### 数字` |
+| 评分方式 | math-verify |
 
-HMMT全名叫做“哈佛-麻省理工数学锦标赛”，始于1998年，由近50道数学题组成。它是一项面向高中生的、最具挑战性的团队国际数学竞赛之一。HMMT题目难度被认为大于AIME。
+### MATH-500
+竞赛数学精选 500 题，覆盖代数、几何、数论、组合等。
 
-作为两项极具挑战性的人类数学考试，AIME和HMMT旨在从大量数学能力优秀的学生中，精准筛选出极少数的数学顶尖精英。如今用在大模型评测中，也被寄予发挥 “过滤器”和“强化器”的作用，很自然地成为了评估大模型高级推理能力的“试金石”和“标杆”。
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [HuggingFaceH4/MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500) |
+| 样本数 | 500 (test) |
+| 答案格式 | LaTeX 表达式 |
+| 评分方式 | math-verify |
+
+### AIME 2024 / 2025 / 2026
+美国数学邀请赛，每年 30 题，整数答案 0-999。需 pass@N 多次采样降方差。
+
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [math-ai/aime24](https://huggingface.co/datasets/math-ai/aime24) / [aime25](https://huggingface.co/datasets/math-ai/aime25) / [aime26](https://huggingface.co/datasets/math-ai/aime26) |
+| 样本数 | 各 30 (test) |
+| 答案格式 | 整数 0-999 |
+| 评分方式 | math-verify, pass@32 |
+
+### HMMT 2025 (Feb)
+哈佛-MIT 数学竞赛，难度大于 AIME。
+
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [MathArena/hmmt_feb_2025](https://huggingface.co/datasets/MathArena/hmmt_feb_2025) |
+| 样本数 | 30 |
+| 答案格式 | 整数 / LaTeX |
+| 评分方式 | math-verify |
+
+### GPQA Diamond
+Google-Proof Q&A，博士级科学推理（物理/化学/生物），diamond 为最难子集。
+
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [lightonai/gpqa_diamond_multilingual](https://huggingface.co/datasets/lightonai/gpqa_diamond_multilingual) (en 子集) |
+| 样本数 | 198 |
+| 答案格式 | `\boxed{字母}` |
+| 评分方式 | math-verify |
+
+---
+
+## 通用领域 Multiple-Choice
+
+支持两种评测模式：
+- **loglikelihood**（默认）：比较每个选项的对数似然，选最高分。对齐 lm-evaluation-harness。
+- **generate**：生成文本 → 提取答案字母。兼容性好。
+
+### MMLU
+Massive Multitask Language Understanding，57 学科多选题。
+
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [cais/mmlu](https://huggingface.co/datasets/cais/mmlu) |
+| 样本数 | ~14,000 (test, 57 subjects) |
+| 选项 | 4 (A/B/C/D) |
+| 推荐 n-shot | 5 |
+
+### MMLU-Pro
+MMLU 增强版，10 选项，去除了简单题。
+
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [TIGER-Lab/MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro) |
+| 样本数 | ~12,000 (test, 14 subjects) |
+| 选项 | 10 (A-J) |
+| 推荐 n-shot | 5 |
+
+### C-Eval
+中文综合学科评测，52 科目。
+
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [ceval/ceval-exam](https://huggingface.co/datasets/ceval/ceval-exam) |
+| 样本数 | ~5,500 (test, 52 subjects) |
+| 选项 | 4 (A/B/C/D)，中文题干 |
+| 推荐 n-shot | 5 |
+
+---
+
+## 汇总表
+
+| Benchmark | 类型 | 样本数 | 评分 | HF |
+|-----------|------|--------|------|-----|
+| gsm8k | 数学 | 1,319 | math-verify | [openai/gsm8k](https://huggingface.co/datasets/openai/gsm8k) |
+| math500 | 数学 | 500 | math-verify | [HuggingFaceH4/MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500) |
+| aime24 | 数学 | 30 | math-verify pass@32 | [math-ai/aime24](https://huggingface.co/datasets/math-ai/aime24) |
+| aime25 | 数学 | 30 | math-verify pass@32 | [math-ai/aime25](https://huggingface.co/datasets/math-ai/aime25) |
+| aime26 | 数学 | 30 | math-verify pass@32 | [math-ai/aime26](https://huggingface.co/datasets/math-ai/aime26) |
+| hmmt25 | 数学 | 30 | math-verify | [MathArena/hmmt_feb_2025](https://huggingface.co/datasets/MathArena/hmmt_feb_2025) |
+| gpqa_diamond | 科学 | 198 | math-verify | [lightonai/gpqa_diamond_multilingual](https://huggingface.co/datasets/lightonai/gpqa_diamond_multilingual) |
+| mmlu | MC | ~14,000 | loglikelihood | [cais/mmlu](https://huggingface.co/datasets/cais/mmlu) |
+| mmlu_pro | MC | ~12,000 | loglikelihood | [TIGER-Lab/MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro) |
+| ceval | MC | ~5,500 | loglikelihood | [ceval/ceval-exam](https://huggingface.co/datasets/ceval/ceval-exam) |
+
+## 数据准备
+
+```bash
+# 数学 benchmark
+python scripts/data_process/prepare_math_benchmarks.py \
+    --benchmarks gsm8k math500 aime24 aime25 aime26 hmmt25 gpqa_diamond
+
+# MC benchmark
+python scripts/data_process/prepare_math_benchmarks.py \
+    --mc_benchmarks mmlu mmlu_pro ceval
+
+# Few-shot dev 数据放在 data/few_shot/，格式同推理数据
+```
