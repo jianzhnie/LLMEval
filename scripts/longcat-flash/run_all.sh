@@ -69,10 +69,10 @@ if [[ "$STAGE" == "all" || "$STAGE" == "prepare" ]]; then
 
     # 展开预设组获取实际 benchmark 列表
     MISSING=""
-    for bm in $BENCHMARKS; do
-        case "$bm" in gsm8k|math500|hmmt25|gpqa_diamond|aime24|aime25|aime26) ;; *) continue ;; esac
-        if [[ ! -f "./data/${bm}.jsonl" ]]; then
-            MISSING="$MISSING $bm"
+    for task in $BENCHMARKS; do
+        case "$task" in gsm8k|math500|hmmt25|gpqa_diamond|aime24|aime25|aime26) ;; *) continue ;; esac
+        if [[ ! -f "./data/${task}.jsonl" ]]; then
+            MISSING="$MISSING $task"
         fi
     done
 
@@ -121,9 +121,9 @@ if [[ "$STAGE" == "all" || "$STAGE" == "score" ]]; then
     if [[ -d "$EVAL_DIR" ]]; then
         for f in "$EVAL_DIR"/*_score.txt; do
             if [[ -f "$f" ]]; then
-                bm=$(basename "$f" | sed 's/_bz.*//')
+                task=$(basename "$f" | sed 's/_bz.*//')
                 score=$(grep -oE '[0-9]+\.[0-9]+%?' "$f" | tail -1 || echo "N/A")
-                printf "  %-12s  %s\n" "$bm" "$score"
+                printf "  %-12s  %s\n" "$task" "$score"
             fi
         done
     fi

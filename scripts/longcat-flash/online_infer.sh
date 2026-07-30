@@ -108,10 +108,10 @@ echo "[INFO] Model:     $MODEL_NAME"
 echo "[INFO] Output:    $OUTPUT_DIR"
 echo "[INFO] Workers:   $MAX_WORKERS | MaxTokens: $MAX_TOKENS"
 echo "[INFO] Benchmarks:"
-for bm in $BENCHMARKS; do
-    n="${BENCHMARK_SAMPLES[$bm]:-$N_SAMPLES}"
-    t="${BENCHMARK_TEMP[$bm]:-$TEMPERATURE}"
-    printf "        %-14s  n=%-3s  temp=%-4s\n" "$bm" "$n" "$t"
+for task in $BENCHMARKS; do
+    n="${BENCHMARK_SAMPLES[$task]:-$N_SAMPLES}"
+    t="${BENCHMARK_TEMP[$task]:-$TEMPERATURE}"
+    printf "        %-14s  n_sample=%-3s  temp=%-4s\n" "$task" "$n" "$t"
 done
 echo "============================================"
 
@@ -131,7 +131,7 @@ export OPENAI_API_KEY="$API_KEY"
 PARALLEL="${PARALLEL:-1}"
 
 run_infer() {
-    local bm="$1"
+    local task="$1"
     local input_file="$2"
     local output_file="$3"
     local n_samples="$4"
@@ -139,16 +139,16 @@ run_infer() {
     local log_file="$6"  # 可选: 独立日志文件
 
     # 摘要始终输出到主日志, 详细进度输出到独立日志
-    echo "[START] $bm (temp=$temperature, n=$n_samples) → $output_file"
+    echo "[START] $task (temp=$temperature, n=$n_samples) → $output_file"
 
     if [[ -n "$log_file" ]]; then
         # 并行模式: 独立日志
         {
-            echo "[$bm] temp=$temperature n=$n_samples"
+            echo "[$task] temp=$temperature n=$n_samples"
             python llmeval/vllm/online_server.py \
                 --input_file "$input_file" \
                 --input_key "prompt" \
-                --task "$bm" \
+                --task "$task" \
                 --output_file "$output_file" \
                 --base_url "$BASE_URL" \
                 --model_name "$MODEL_NAME" \
@@ -168,7 +168,7 @@ run_infer() {
         python llmeval/vllm/online_server.py \
             --input_file "$input_file" \
             --input_key "prompt" \
-            --task "$bm" \
+            --task "$task" \
             --output_file "$output_file" \
             --base_url "$BASE_URL" \
             --model_name "$MODEL_NAME" \
@@ -185,10 +185,10 @@ run_infer() {
     fi
 
     if [[ $rc -eq 0 ]]; then
-        echo "[OK] $bm 推理完成: $output_file"
+        echo "[OK] $task 推理完成: $output_file"
         return 0
     else
-        echo "[FAIL] $bm 推理失败 (exit=$rc)" >&2
+        echo "[FAIL] $task 推理失败 (exit=$rc)" >&2
         return 1
     fi
 }
@@ -198,26 +198,26 @@ declare -a TASK_NAMES=()
 declare -a TASK_PIDS=()
 declare -A TASK_STATUS=()
 
-for bm in $BENCHMARKS; do
-    input_file="${BENCHMARK_INPUT[$bm]:-}"
+for task in $BENCHMARKS; do
+    input_file="${BENCHMARK_INPUT[$task]:-}"
     if [[ -z "$input_file" ]]; then
-        echo "[ERROR] 未知 benchmark: $bm (可用: ${!BENCHMARK_INPUT[*]})" >&2
+        echo "[ERROR] 未知 benchmark: $task (可用: ${!BENCHMARK_INPUT[*]})" >&2
         continue
     fi
 
-    n_samples="${BENCHMARK_SAMPLES[$bm]:-$N_SAMPLES}"
-    temperature="${BENCHMARK_TEMP[$bm]:-$TEMPERATURE}"
-    output_file="${OUTPUT_DIR}/${bm}_bz${n_samples}.jsonl"
-    TASK_NAMES+=("$bm")
+    n_samples="${BENCHMARK_SAMPLES[$task]:-$N_SAMPLES}"
+    temperature="${BENCHMARK_TEMP[$task]:-$TEMPERATURE}"
+    output_file="${OUTPUT_DIR}/${task}_bz${n_samples}.jsonl"
+    TASK_NAMES+=("$task")
 
     if [[ "$PARALLEL" == "1" ]]; then
         # 并行: 独立日志避免串扰
-        log_file="${OUTPUT_DIR}/${bm}_infer.log"
-        run_infer "$bm" "$input_file" "$output_file" "$n_samples" "$temperature" "$log_file" &
+        log_file="${OUTPUT_DIR}/${task}_infer.log"
+        run_infer "$task" "$input_file" "$output_file" "$n_samples" "$temperature" "$log_file" &
         TASK_PIDS+=($!)
     else
         # 串行: 直接输出
-        run_infer "$bm" "$input_file" "$output_file" "$n_samples" "$temperature" "" || true
+        run_infer "$task" "$input_file" "$output_file" "$n_samples" "$temperature" "" || true
     fi
 done
 
@@ -227,11 +227,11 @@ if [[ "$PARALLEL" == "1" && ${#TASK_PIDS[@]} -gt 0 ]]; then
     echo "[INFO] 等待 ${#TASK_PIDS[@]} 个并行任务完成..."
     for i in "${!TASK_PIDS[@]}"; do
         pid="${TASK_PIDS[$i]}"
-        bm="${TASK_NAMES[$i]}"
+        task="${TASK_NAMES[$i]}"
         if wait "$pid"; then
-            TASK_STATUS[$bm]="OK"
+            TASK_STATUS[$task]="OK"
         else
-            TASK_STATUS[$bm]="FAIL"
+            TASK_STATUS[$task]="FAIL"
         fi
     done
 fi
@@ -242,9 +242,9 @@ fi
 echo ""
 echo "============================================"
 FAILED=()
-for bm in "${TASK_NAMES[@]}"; do
-    if [[ "${TASK_STATUS[$bm]:-}" == "FAIL" ]]; then
-        FAILED+=("$bm")
+for task in "${TASK_NAMES[@]}"; do
+    if [[ "${TASK_STATUS[$task]:-}" == "FAIL" ]]; then
+        FAILED+=("$task")
     fi
 done
 
