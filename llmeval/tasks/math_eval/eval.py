@@ -215,13 +215,22 @@ def evaluate_task(
             logger.error(f"❌ Evaluation failed: {e!s}", exc_info=True)
             return None
     elif dataset_source == "mc_opensource":
-        # Detect mode: loglikelihood items have 'logprobs' field, generate items have 'gen'
         sample = eval_dataset[0] if eval_dataset else {}
         if "logprobs" in sample:
             accuracy = score_loglikelihood(eval_dataset, cache_path)
-            logger.info(
-                f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}"
-            )
+            # Read acc_norm from summary for lm-eval compatible reporting
+            summary_path = cache_path.with_suffix(".summary.json")
+            if summary_path.exists():
+                with open(summary_path, encoding="utf-8") as sf:
+                    s = json.load(sf)
+                logger.info(
+                    f"✅ Task: {task_name} (loglikelihood), "
+                    f"acc={s.get('acc', 0):.2%}, acc_norm={s.get('acc_norm', 0):.2%}"
+                )
+            else:
+                logger.info(
+                    f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}"
+                )
         else:
             accuracy = score_generate(eval_dataset, label_key, response_key, cache_path)
             logger.info(f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}")

@@ -8,6 +8,8 @@ Supported benchmarks: gsm8k, math500, hmmt25, gpqa_diamond, hle_full, aime24, ai
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -139,8 +141,6 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
         for ex in ds:
             all_rows.append(_format_mc_row(name, ex))
 
-    import json
-
     with open(output_file, "w", encoding="utf-8") as f:
         for row in all_rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -254,8 +254,6 @@ def main() -> None:
 
     # Print summary
     print("\n--- Data files ---")
-    import os
-
     for f in sorted(output_dir.glob("*.jsonl")):
         lines = 0
         with open(f) as fh:
