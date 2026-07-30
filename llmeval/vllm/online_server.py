@@ -15,7 +15,6 @@ import dataclasses
 import json
 import logging
 import os
-import random
 import sys
 import threading
 import time
@@ -28,6 +27,12 @@ from openai import APIConnectionError, APIError, RateLimitError
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
+from llmeval.utils.api_retry import (
+    ClientError,
+    is_context_length_error,
+    non_retryable_client_error,
+    retry_backoff,
+)
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
@@ -38,20 +43,6 @@ logger = init_logger("online_vllm_server", logging.INFO)
 DEFAULT_INPUT_KEY: str = "prompt"
 DEFAULT_LABEL_KEY: str = "answer"
 DEFAULT_RESPONSE_KEY: str = "gen"
-
-
-class ClientError(RuntimeError):
-    """Custom exception class for client-related errors."""
-
-    def __init__(self, message: str, original_error: Exception | None = None) -> None:
-        """Initialize ClientError with message and optional original error.
-
-        Args:
-            message: Error message describing the issue
-            original_error: The original exception that caused this error
-        """
-        super().__init__(message)
-        self.original_error = original_error
 
 
 class InferenceClient:
@@ -170,20 +161,6 @@ class InferenceClient:
         except (IndexError, AttributeError):
             return "(invalid completion structure)"
 
-    def _retry_backoff(self, attempt: int, reason: str) -> None:
-        """Sleep with exponential backoff plus jitter before the next retry.
-
-        Args:
-            attempt: Zero-based index of the attempt that just failed
-            reason: Short failure description included in the warning log
-        """
-        sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
-        logger.warning(
-            f"{reason} on attempt {attempt + 1}/{self.max_retries + 1}. "
-            f"Sleeping for {sleep_time:.2f}s."
-        )
-        time.sleep(sleep_time)
-
     def get_content(
         self,
         query: str,
@@ -227,13 +204,115 @@ class InferenceClient:
             errors (connection issues, rate limits) but will raise exceptions
             for non-recoverable errors.
         """
-        # Validate input parameters
+        call_args = self._build_call_args(
+            query,
+            system_prompt,
+            model_name,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            enable_thinking,
+        )
+        completion = self._request_with_retry(call_args)
+        if completion is None:
+            return ""  # context length exceeded (logged in _request_with_retry)
+        # Reasoning models may return content=None (thinking exhausted
+        # max_tokens); normalize to "" so callers can treat it uniformly
+        return completion.choices[0].message.content or ""
+
+    def get_contents(
+        self,
+        query: str,
+        system_prompt: str | None,
+        model_name: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        enable_thinking: bool,
+        n: int,
+    ) -> list[str]:
+        """Fetch n samples for the same prompt in ONE request (API `n` parameter).
+
+        Sending n separate requests would re-run the prefill (system prompt +
+        query) n times; with n>1 the server prefills once and samples n
+        completions, which is significantly cheaper for pass@k-style evals.
+
+        Args:
+            query: User's input query
+            system_prompt: System prompt for the conversation (optional)
+            model_name: The model to use for generation
+            max_tokens: Maximum tokens to generate per sample
+            temperature: The sampling temperature (0.0 to 2.0)
+            top_p: The top-p value for nucleus sampling (0.0 to 1.0)
+            top_k: The top-k value for sampling (positive integer)
+            enable_thinking: Whether to enable the "thinking" feature
+            n: Number of samples to generate for this prompt (must be >= 1)
+
+        Returns:
+            List of generated content strings, one per returned choice
+            (null contents normalized to ""). Empty list when the request
+            could not produce samples (e.g. context length exceeded).
+
+        Raises:
+            ClientError: If there's a non-retryable API issue or max retries exceeded
+            ValueError: If input parameters are invalid or out of range
+        """
+        if n < 1:
+            raise ValueError(f"n must be >= 1, got: {n}")
+        call_args = self._build_call_args(
+            query,
+            system_prompt,
+            model_name,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            enable_thinking,
+            n=n,
+        )
+        completion = self._request_with_retry(call_args)
+        if completion is None:
+            return []  # context length exceeded (logged in _request_with_retry)
+        return [choice.message.content or "" for choice in completion.choices]
+
+    def _build_call_args(
+        self,
+        query: str,
+        system_prompt: str | None,
+        model_name: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        enable_thinking: bool,
+        n: int = 1,
+    ) -> dict[str, Any]:
+        """Validate inputs and assemble chat.completions call arguments.
+
+        Args:
+            query: User's input query (must be non-empty)
+            system_prompt: Optional system prompt
+            model_name: Served model name (must be non-empty)
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            top_p: Nucleus sampling threshold
+            top_k: Top-k sampling parameter (sent via extra_body)
+            enable_thinking: Whether to enable the "thinking" feature
+            n: Number of samples per request; only sent when > 1
+
+        Returns:
+            Keyword arguments dict for client.chat.completions.create.
+
+        Raises:
+            ValueError: If query or model_name is empty
+        """
         if not query or not query.strip():
             raise ValueError("Query cannot be empty")
         if not model_name:
             raise ValueError("Model name cannot be empty")
 
-        # Prepare API call parameters
         messages = self._prepare_messages(query, system_prompt)
         call_args: dict[str, Any] = {
             "model": model_name,
@@ -247,56 +326,75 @@ class InferenceClient:
             },
             "timeout": self.timeout,
         }
+        # n: only sent for multi-sample requests (single-sample default is 1)
+        if n > 1:
+            call_args["n"] = n
         # tool_choice: only send when explicitly configured (vLLM 0.23+ supports it)
         if self.tool_choice:
             call_args["tool_choice"] = self.tool_choice
+        return call_args
 
-        # Make API call with exponential backoff retry logic
+    def _request_with_retry(self, call_args: dict[str, Any]) -> Any | None:
+        """Execute a chat.completions call with classified retry logic.
+
+        Shared by get_content (single sample) and get_contents (n samples).
+
+        Args:
+            call_args: Keyword arguments for client.chat.completions.create
+
+        Returns:
+            The raw completion object, or None when the prompt exceeds the
+            model's maximum context length (callers map this to empty results).
+
+        Raises:
+            ClientError: For non-retryable API issues or exhausted retries
+        """
         last_exception: ClientError | None = None
         for attempt in range(self.max_retries + 1):
             completion = None
             try:
                 completion = self.client.chat.completions.create(**call_args)
-                # Reasoning models may return content=None (thinking exhausted
-                # max_tokens); normalize to "" so callers can treat it uniformly
-                return completion.choices[0].message.content or ""
+                # Probe the structure so malformed responses hit the handler below
+                _ = completion.choices[0].message
+                return completion
             except (IndexError, AttributeError) as e:
                 # Handle missing choices, message attributes in completion response
                 err_msg = self._describe_completion(completion, e)
                 last_exception = ClientError(err_msg, e)
                 if attempt < self.max_retries:
-                    self._retry_backoff(attempt, f"{type(e).__name__}: {err_msg}")
+                    retry_backoff(
+                        attempt, self.max_retries, f"{type(e).__name__}: {err_msg}"
+                    )
                 else:
                     raise ClientError(f"Max retries exceeded: {err_msg}", e) from e
             except (APIConnectionError, RateLimitError) as e:
                 # Handle retryable errors with exponential backoff
                 last_exception = ClientError(str(e), e)
                 if attempt < self.max_retries:
-                    self._retry_backoff(attempt, f"{type(e).__name__}: {e!s}")
+                    retry_backoff(
+                        attempt, self.max_retries, f"{type(e).__name__}: {e!s}"
+                    )
                 else:
                     raise ClientError(f"Max retries exceeded: {e!s}", e) from e
             except APIError as e:
-                # Handle context length and other API errors
-                err_message = getattr(e, "message", None) or str(e)
-                if "maximum context length" in err_message:
-                    logger.warning(f"Max context length exceeded: {err_message}")
-                    return ""
+                # Context length: prompt can never fit, return empty result
+                if is_context_length_error(e):
+                    logger.warning(
+                        "Max context length exceeded, returning empty result"
+                    )
+                    return None
                 # 4xx 客户端错误（除 408/429）重试无意义，直接失败；
                 # 429 已由上面的 RateLimitError 分支处理
-                status_code = getattr(e, "status_code", None)
-                if (
-                    isinstance(status_code, int)
-                    and 400 <= status_code < 500
-                    and status_code != 408
-                ):
-                    raise ClientError(
-                        f"Non-retryable API error (status={status_code}): {err_message}",
-                        e,
-                    ) from e
+                non_retryable = non_retryable_client_error(e)
+                if non_retryable:
+                    raise ClientError(non_retryable, e) from e
+                err_message = getattr(e, "message", None) or str(e)
                 logger.error(f"API error: {err_message}")
                 last_exception = ClientError(err_message, e)
                 if attempt < self.max_retries:
-                    self._retry_backoff(attempt, f"API error: {err_message}")
+                    retry_backoff(
+                        attempt, self.max_retries, f"API error: {err_message}"
+                    )
                 else:
                     raise ClientError(err_message, e) from e
             except Exception as e:
@@ -304,8 +402,10 @@ class InferenceClient:
                 logger.error(f"Unexpected error: {e!s}", exc_info=True)
                 last_exception = ClientError(str(e), e)
                 if attempt < self.max_retries:
-                    self._retry_backoff(
-                        attempt, f"Unexpected {type(e).__name__}: {e!s}"
+                    retry_backoff(
+                        attempt,
+                        self.max_retries,
+                        f"Unexpected {type(e).__name__}: {e!s}",
                     )
                 else:
                     raise ClientError(
@@ -675,15 +775,77 @@ class InferenceRunner:
 
         return result
 
+    def process_item_group(self, items: list[dict[str, Any]]) -> None:
+        """Process all expanded copies of one prompt with a single batched request.
+
+        n_samples>1 expands the dataset into per-sample copies of the same
+        prompt; one request per copy would re-run the prefill every time.
+        This method issues ONE request with the API's n parameter (one
+        prefill, n samples) and writes one result line per copy, keeping the
+        output format identical to per-sample processing.
+
+        Args:
+            items: Expanded copies sharing the same prompt (len >= 1)
+        """
+        if len(items) == 1:
+            self.process_item(items[0])
+            return
+
+        # Step 1: Input Validation (all copies share the same prompt)
+        query = self._extract_query(items[0])
+        if not query:
+            return
+
+        # Step 2: ONE batched API request for all copies
+        responses = self.client.get_contents(
+            query=query,
+            system_prompt=self.system_prompt,
+            model_name=self.args.model_name,
+            max_tokens=self.args.max_tokens,
+            temperature=self.args.temperature,
+            top_p=self.args.top_p,
+            top_k=self.args.top_k,
+            enable_thinking=self.args.enable_thinking,
+            n=len(items),
+        )
+
+        # Steps 3+4: Per-copy result building and persistence
+        if not responses:
+            # e.g. context length exceeded: every copy of this prompt failed
+            with self._stats_lock:
+                self._stats["failed"] += len(items)
+            return
+        for item, response in zip(items, responses, strict=False):
+            result = self._build_result(item, response)
+            if not result:
+                continue  # empty response already counted failed in _build_result
+            try:
+                self._write_result(result)
+                with self._stats_lock:
+                    self._stats["processed"] += 1
+            except OSError as e:
+                logger.error(f"Failed to write result: {e}")
+                with self._stats_lock:
+                    self._stats["failed"] += 1
+        # Fewer choices than requested: count the missing copies as failed
+        missing = len(items) - len(responses)
+        if missing > 0:
+            logger.warning(
+                f"Batched request returned {len(responses)}/{len(items)} samples"
+            )
+            with self._stats_lock:
+                self._stats["failed"] += missing
+
     def _process_concurrently(self, expanded_data: list[dict[str, Any]]) -> None:
         """Process items concurrently using thread pool with error handling and progress tracking.
 
-        This method manages concurrent processing of inference tasks using a thread pool.
-        It includes comprehensive error handling and progress tracking for each task.
+        Expanded copies that share a prompt are grouped and processed with a
+        single batched request (API n parameter, one prefill for n samples);
+        singletons go through the regular per-item path.
 
         Args:
             expanded_data: List of data items to process, where each item is a
-                         dictionary containing the input data and metadata
+                        dictionary containing the input data and metadata
 
         Note:
             - Uses ThreadPoolExecutor for concurrent processing
@@ -694,36 +856,65 @@ class InferenceRunner:
         total_tasks = len(expanded_data)
         failed_tasks: list[dict[str, Any]] = []
 
+        # Group expanded copies by prompt for batched (n-parameter) sampling.
+        # Only non-empty STRING prompts are groupable (hashable and valid as a
+        # query); anything else (non-dict items, empty or non-str prompts) gets
+        # a unique key so each forms a singleton group and is validated/failed
+        # via the regular per-item path instead of crashing the whole run.
+        groups: dict[Any, list[dict[str, Any]]] = {}
+        for idx, item in enumerate(expanded_data):
+            key: Any = None
+            if isinstance(item, dict):
+                candidate = item.get(self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+                if isinstance(candidate, str) and candidate:
+                    key = candidate
+            if key is None:
+                key = ("__invalid__", idx)
+            groups.setdefault(key, []).append(item)
+
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.args.max_workers, thread_name_prefix="inference_worker"
         ) as executor:
-            futures = [
-                executor.submit(self.process_item, item) for item in expanded_data
-            ]
+            futures = {
+                executor.submit(self.process_item_group, group): group
+                for group in groups.values()
+            }
 
             with tqdm(
                 total=total_tasks, desc="Processing samples", unit="sample"
             ) as pbar:
                 for future in concurrent.futures.as_completed(futures):
+                    group = futures[future]
                     try:
-                        result = future.result()
-                        if result is None:
-                            pass  # process_item already updated stats
+                        future.result()
                     except Exception as e:
                         logger.error(
                             f"An unexpected error occurred in a thread: {e}",
                             exc_info=True,
                         )
                         with self._stats_lock:
-                            self._stats["failed"] += 1
+                            self._stats["failed"] += len(group)
+                        sample = group[0]
+                        prompt_val = (
+                            sample.get(self.args.input_key)
+                            or sample.get(DEFAULT_INPUT_KEY)
+                            if isinstance(sample, dict)
+                            else None
+                        )
                         failed_tasks.append(
                             {
+                                "prompt": (
+                                    str(prompt_val)[:200]
+                                    if prompt_val is not None
+                                    else None
+                                ),
+                                "samples": len(group),
                                 "error": str(e),
                                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                             }
                         )
                     finally:
-                        pbar.update(1)
+                        pbar.update(len(group))
 
         if failed_tasks:
             logger.warning(f"Total failed tasks: {len(failed_tasks)}")

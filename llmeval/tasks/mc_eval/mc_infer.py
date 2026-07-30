@@ -2,13 +2,15 @@
 
 This module mirrors llmeval/vllm/online_server.py in structure, naming, and
 documentation style so the two can be reviewed side by side with a file diff:
-- ClientError / MCLoglikelihoodClient  ~  ClientError / InferenceClient
-- MCRunner                             ~  InferenceRunner
-- main() (HfArgumentParser)            ~  main()
+- MCLoglikelihoodClient  ~  InferenceClient
+- MCRunner               ~  InferenceRunner
+- main() (HfArgumentParser) ~  main()
 
+Shared utilities (ClientError, retry classification, backoff) live in
+llmeval/utils/api_retry.py; the configuration dataclass lives in
+llmeval/utils/config.py (MCInferConfig).
 MC-specific pieces (kept deliberately): FewShotFormatter, batched choice
 logprobs via the completions API, and per-mode worker methods.
-The configuration dataclass lives in llmeval/utils/config.py (MCInferConfig).
 """
 
 from __future__ import annotations
@@ -30,6 +32,12 @@ from openai import APIConnectionError, APIError, RateLimitError
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
+from llmeval.utils.api_retry import (
+    error_message,
+    is_context_length_error,
+    non_retryable_client_error,
+    retry_backoff,
+)
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
@@ -40,24 +48,6 @@ logger = init_logger("mc_infer")
 DEFAULT_INPUT_KEY: str = "prompt"
 DEFAULT_LABEL_KEY: str = "answer"
 DEFAULT_RESPONSE_KEY: str = "gen"
-
-
-class ClientError(RuntimeError):
-    """Custom exception class for client-related errors.
-
-    Mirrors ClientError in online_server.py. Kept local so this module does
-    not need to import online_server (which pulls in heavy engine deps).
-    """
-
-    def __init__(self, message: str, original_error: Exception | None = None) -> None:
-        """Initialize ClientError with message and optional original error.
-
-        Args:
-            message: Error message describing the issue
-            original_error: The original exception that caused this error
-        """
-        super().__init__(message)
-        self.original_error = original_error
 
 
 # ===========================================================================
@@ -143,41 +133,15 @@ def _argmax(xs: list[float]) -> int:
     return max(range(len(xs)), key=lambda i: xs[i])
 
 
-def _classify_api_error(e: APIError) -> str | None:
-    """Classify an APIError: return a non-retryable reason, or None if retryable.
+def _api_abort_reason(e: APIError) -> str | None:
+    """Return a non-retryable abort reason for an APIError, None if retryable.
 
-    Mirrors the APIError branch of InferenceClient.get_content in
-    online_server.py. Non-retryable cases (retrying only wastes backoff time):
-    - prompt exceeds the model's maximum context length
-    - other 4xx client errors (408 Request Timeout stays retryable;
-      429 is a RateLimitError subclass and is handled separately)
+    Composes the shared predicates from llmeval.utils.api_retry: prompt
+    exceeding the model's maximum context length, or any non-retryable 4xx.
     """
-    err_message = getattr(e, "message", None) or str(e)
-    if "maximum context length" in err_message:
-        return f"max context length exceeded: {err_message}"
-    status_code = getattr(e, "status_code", None)
-    if isinstance(status_code, int) and 400 <= status_code < 500 and status_code != 408:
-        return f"non-retryable API error (status={status_code}): {err_message}"
-    return None
-
-
-def _retry_backoff(attempt: int, max_retries: int, reason: str) -> None:
-    """Sleep with exponential backoff plus jitter before the next retry.
-
-    Mirrors InferenceClient._retry_backoff in online_server.py; module-level
-    here because both the client and the generate-mode worker retry.
-
-    Args:
-        attempt: Zero-based index of the attempt that just failed
-        max_retries: Configured maximum number of retries (for logging)
-        reason: Short failure description included in the warning log
-    """
-    sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
-    logger.warning(
-        f"{reason} on attempt {attempt + 1}/{max_retries + 1}. "
-        f"Sleeping for {sleep_time:.2f}s."
-    )
-    time.sleep(sleep_time)
+    if is_context_length_error(e):
+        return f"max context length exceeded: {error_message(e)}"
+    return non_retryable_client_error(e)
 
 
 # ===========================================================================
@@ -286,21 +250,21 @@ class MCLoglikelihoodClient:
                 # Retryable: transient network / rate-limit errors
                 last_error = e
                 if attempt < self.max_retries:
-                    _retry_backoff(
+                    retry_backoff(
                         attempt, self.max_retries, f"{type(e).__name__}: {e!s}"
                     )
             except APIError as e:
                 last_error = e
-                non_retryable = _classify_api_error(e)
+                non_retryable = _api_abort_reason(e)
                 if non_retryable:
                     logger.warning(f"Logprob request aborted: {non_retryable}")
                     break
                 if attempt < self.max_retries:
-                    _retry_backoff(attempt, self.max_retries, f"API error: {e!s}")
+                    retry_backoff(attempt, self.max_retries, f"API error: {e!s}")
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    _retry_backoff(
+                    retry_backoff(
                         attempt,
                         self.max_retries,
                         f"Unexpected {type(e).__name__}: {e!s}",
@@ -563,13 +527,12 @@ class MCRunner:
     # Loglikelihood mode
     # ------------------------------------------------------------------
 
-    def run_loglikelihood(self) -> None:
-        """Run the loglikelihood pipeline: load → resume-filter → process."""
-        remaining = self.load_data()
-        if not remaining:
-            logger.info("✅ All items already processed")
-            return
+    def run_loglikelihood(self, remaining: list[dict[str, Any]]) -> None:
+        """Run the loglikelihood pipeline over the remaining items.
 
+        Args:
+            remaining: Items left after resume filtering (see load_data)
+        """
         logger.info(
             f"⏳ Processing {len(remaining)} items "
             f"({len(remaining)} batched loglikelihood requests)"
@@ -619,13 +582,12 @@ class MCRunner:
     # Generate mode
     # ------------------------------------------------------------------
 
-    def run_generate(self) -> None:
-        """Run the generate pipeline: load → resume-filter → process."""
-        remaining = self.load_data()
-        if not remaining:
-            logger.info("✅ All items already processed")
-            return
+    def run_generate(self, remaining: list[dict[str, Any]]) -> None:
+        """Run the generate pipeline over the remaining items.
 
+        Args:
+            remaining: Items left after resume filtering (see load_data)
+        """
         logger.info(f"⏳ Processing {len(remaining)} samples (generate mode)")
         gen_client: openai.OpenAI = openai.OpenAI(
             api_key=self.config.api_key,
@@ -659,6 +621,14 @@ class MCRunner:
             Result dict with the generated text in the gen list. The 'correct'
             key is intentionally absent — generate mode extracts answers at
             scoring time; only loglikelihood mode computes correctness inline.
+
+        Raises:
+            RuntimeError: When generation produced no usable text (retries
+                exhausted, non-retryable 4xx, or null/empty content). An empty
+                gen must NOT be written: it would be scored as a wrong answer
+                AND mark the prompt as completed so resume never retries it.
+                Raising keeps it consistent with the loglikelihood mode's
+                all-"-inf" guard (failed, dumped, retried on next run).
         """
         prompt = self.build_prompt(item)
         gold = item.get(DEFAULT_LABEL_KEY, "")
@@ -687,29 +657,27 @@ class MCRunner:
                 # Retryable: transient network / rate-limit errors
                 last_error = e
                 if attempt < self.config.max_retries:
-                    _retry_backoff(
+                    retry_backoff(
                         attempt, self.config.max_retries, f"{type(e).__name__}: {e!s}"
                     )
             except APIError as e:
                 last_error = e
-                non_retryable = _classify_api_error(e)
+                non_retryable = _api_abort_reason(e)
                 if non_retryable:
                     logger.warning(f"Generate aborted: {non_retryable}")
                     break
                 if attempt < self.config.max_retries:
-                    _retry_backoff(
-                        attempt, self.config.max_retries, f"API error: {e!s}"
-                    )
+                    retry_backoff(attempt, self.config.max_retries, f"API error: {e!s}")
             except Exception as e:
                 last_error = e
                 if attempt < self.config.max_retries:
-                    _retry_backoff(
+                    retry_backoff(
                         attempt,
                         self.config.max_retries,
                         f"Unexpected {type(e).__name__}: {e!s}",
                     )
-        if not gen_text and last_error:
-            logger.warning(f"Generate failed after retries: {last_error}")
+        if not gen_text:
+            raise RuntimeError(f"Generate produced no usable text: {last_error}")
 
         return {
             DEFAULT_INPUT_KEY: prompt,
@@ -774,11 +742,17 @@ class MCRunner:
             output_path = Path(self.config.output_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # Load and prepare data (resume filtering inside load_data)
+            remaining = self.load_data()
+            if not remaining:
+                logger.info("✅ All items already processed")
+                return
+
             # Execute pipeline (mode dispatch)
             if self.config.mode == "loglikelihood":
-                self.run_loglikelihood()
+                self.run_loglikelihood(remaining)
             elif self.config.mode == "generate":
-                self.run_generate()
+                self.run_generate(remaining)
             else:
                 raise ValueError(f"Unknown mode: {self.config.mode}")
 
