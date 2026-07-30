@@ -64,7 +64,7 @@ declare -A TASK_NAME=(
 )
 # 每个 benchmark 的采样数 (从文件名推导: {bm}_bz{N}.jsonl)
 # 默认用 N_SAMPLES，gsm8k/math500 等通常只跑 1 次
-declare -A BM_SAMPLES=(
+declare -A BENCHMARK_SAMPLES=(
     [gsm8k]="1"
     [math500]="1"
     [hmmt25]="$N_SAMPLES"
@@ -135,7 +135,7 @@ for bm in $BENCHMARKS; do
         continue
     fi
 
-    n_samples="${BM_SAMPLES[$bm]:-$N_SAMPLES}"
+    n_samples="${BENCHMARK_SAMPLES[$bm]:-$N_SAMPLES}"
     input_file="${INPUT_DIR}/${bm}_bz${n_samples}.jsonl"
     cache_file="${EVAL_DIR}/${bm}_bz${n_samples}.jsonl"
     result_file="${EVAL_DIR}/${bm}_bz${n_samples}_score.txt"
@@ -180,7 +180,7 @@ for bm in "${TASK_NAMES[@]}"; do
     if [[ "${TASK_STATUS[$bm]:-}" == "FAIL" ]]; then
         FAILED+=("$bm")
     else
-        n_samples="${BM_SAMPLES[$bm]:-$N_SAMPLES}"
+        n_samples="${BENCHMARK_SAMPLES[$bm]:-$N_SAMPLES}"
         result_file="${EVAL_DIR}/${bm}_bz${n_samples}_score.txt"
         if [[ -f "$result_file" ]]; then
             score=$(grep -oE '[0-9]+\.[0-9]+%?' "$result_file" | tail -1 || echo "N/A")

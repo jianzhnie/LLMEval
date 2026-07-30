@@ -46,6 +46,7 @@ MAX_TOKENS="${MAX_TOKENS:-32768}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-60000}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
 SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-empty}"
+TOOL_CHOICE="${TOOL_CHOICE:-none}"          # none=禁用工具调用, auto=自动
 
 # =============================================================================
 # 输出目录 (按模型名隔离)
@@ -72,7 +73,7 @@ case "$BENCHMARKS" in
     QUICK) BENCHMARKS="gsm8k math500" ;;
 esac
 
-declare -A BM_INPUT=(
+declare -A BENCHMARK_INPUT=(
     [gsm8k]="./data/gsm8k.jsonl"
     [math500]="./data/math500.jsonl"
     [hmmt25]="./data/hmmt25.jsonl"
@@ -83,7 +84,7 @@ declare -A BM_INPUT=(
 )
 # 每 benchmark 采样数 + 温度 (空 = 用全局默认)
 # pass@1: temp=0 (贪婪解码, 确定性); pass@N: temp=0.6 (多样性采样)
-declare -A BM_SAMPLES=(
+declare -A BENCHMARK_SAMPLES=(
     [gsm8k]="1"
     [math500]="1"
     [hmmt25]="$N_SAMPLES"
@@ -92,7 +93,7 @@ declare -A BM_SAMPLES=(
     [aime25]="$N_SAMPLES"
     [aime26]="$N_SAMPLES"
 )
-declare -A BM_TEMP=(
+declare -A BENCHMARK_TEMP=(
     [gsm8k]="0"
     [math500]="0"
 )
@@ -102,14 +103,16 @@ declare -A BM_TEMP=(
 # =============================================================================
 echo "============================================"
 echo "[INFO] LongCat-Flash-Chat — Online Inference"
-echo "[INFO] Server:   $BASE_URL"
-echo "[INFO] Model:    $MODEL_NAME"
-echo "[INFO] Benchmarks: $BENCHMARKS"
-echo "[INFO] N_SAMPLES:  $N_SAMPLES"
-echo "[INFO] MAX_WORKERS: $MAX_WORKERS"
-echo "[INFO] TEMPERATURE: $TEMPERATURE"
-echo "[INFO] MAX_TOKENS:  $MAX_TOKENS"
-echo "[INFO] Output:   $OUTPUT_DIR"
+echo "[INFO] Server:    $BASE_URL"
+echo "[INFO] Model:     $MODEL_NAME"
+echo "[INFO] Output:    $OUTPUT_DIR"
+echo "[INFO] Workers:   $MAX_WORKERS | MaxTokens: $MAX_TOKENS"
+echo "[INFO] Benchmarks:"
+for bm in $BENCHMARKS; do
+    n="${BENCHMARK_SAMPLES[$bm]:-$N_SAMPLES}"
+    t="${BENCHMARK_TEMP[$bm]:-$TEMPERATURE}"
+    printf "        %-14s  n=%-3s  temp=%-4s\n" "$bm" "$n" "$t"
+done
 echo "============================================"
 
 # =============================================================================
@@ -133,32 +136,59 @@ run_infer() {
     local output_file="$3"
     local n_samples="$4"
     local temperature="$5"
+    local log_file="$6"  # 可选: 独立日志文件
 
-    echo ""
-    echo "----------------------------------------"
-    echo "[INFO] 开始推理: $bm (temp=$temperature, n=$n_samples)"
-    echo "[INFO] 输入:   $input_file"
-    echo "[INFO] 输出:   $output_file"
-    echo "----------------------------------------"
+    # 摘要始终输出到主日志, 详细进度输出到独立日志
+    echo "[START] $bm (temp=$temperature, n=$n_samples) → $output_file"
 
-    if python llmeval/vllm/online_server.py \
-        --input_file "$input_file" \
-        --input_key "prompt" \
-        --output_file "$output_file" \
-        --base_url "$BASE_URL" \
-        --model_name "$MODEL_NAME" \
-        --n_samples "$n_samples" \
-        --temperature "$temperature" \
-        --top_p "$TOP_P" \
-        --max_tokens "$MAX_TOKENS" \
-        --max_workers "$MAX_WORKERS" \
-        --max_retries "$MAX_RETRIES" \
-        --request_timeout "$REQUEST_TIMEOUT" \
-        --system_prompt_type "$SYSTEM_PROMPT_TYPE"; then
+    if [[ -n "$log_file" ]]; then
+        # 并行模式: 独立日志
+        {
+            echo "[$bm] temp=$temperature n=$n_samples"
+            python llmeval/vllm/online_server.py \
+                --input_file "$input_file" \
+                --input_key "prompt" \
+                --task "$bm" \
+                --output_file "$output_file" \
+                --base_url "$BASE_URL" \
+                --model_name "$MODEL_NAME" \
+                --n_samples "$n_samples" \
+                --temperature "$temperature" \
+                --top_p "$TOP_P" \
+                --max_tokens "$MAX_TOKENS" \
+                --max_workers "$MAX_WORKERS" \
+                --max_retries "$MAX_RETRIES" \
+                --request_timeout "$REQUEST_TIMEOUT" \
+                --system_prompt_type "$SYSTEM_PROMPT_TYPE" \
+                --tool_choice "$TOOL_CHOICE" 2>&1
+        } >> "$log_file"
+        local rc=$?
+    else
+        # 串行模式: 直接输出
+        python llmeval/vllm/online_server.py \
+            --input_file "$input_file" \
+            --input_key "prompt" \
+            --task "$bm" \
+            --output_file "$output_file" \
+            --base_url "$BASE_URL" \
+            --model_name "$MODEL_NAME" \
+            --n_samples "$n_samples" \
+            --temperature "$temperature" \
+            --top_p "$TOP_P" \
+            --max_tokens "$MAX_TOKENS" \
+            --max_workers "$MAX_WORKERS" \
+            --max_retries "$MAX_RETRIES" \
+            --request_timeout "$REQUEST_TIMEOUT" \
+            --system_prompt_type "$SYSTEM_PROMPT_TYPE" \
+            --tool_choice "$TOOL_CHOICE"
+        local rc=$?
+    fi
+
+    if [[ $rc -eq 0 ]]; then
         echo "[OK] $bm 推理完成: $output_file"
         return 0
     else
-        echo "[FAIL] $bm 推理失败 (exit=$?)" >&2
+        echo "[FAIL] $bm 推理失败 (exit=$rc)" >&2
         return 1
     fi
 }
@@ -169,24 +199,25 @@ declare -a TASK_PIDS=()
 declare -A TASK_STATUS=()
 
 for bm in $BENCHMARKS; do
-    input_file="${BM_INPUT[$bm]:-}"
+    input_file="${BENCHMARK_INPUT[$bm]:-}"
     if [[ -z "$input_file" ]]; then
-        echo "[ERROR] 未知 benchmark: $bm (可用: ${!BM_INPUT[*]})" >&2
+        echo "[ERROR] 未知 benchmark: $bm (可用: ${!BENCHMARK_INPUT[*]})" >&2
         continue
     fi
 
-    n_samples="${BM_SAMPLES[$bm]:-$N_SAMPLES}"
-    temperature="${BM_TEMP[$bm]:-$TEMPERATURE}"
+    n_samples="${BENCHMARK_SAMPLES[$bm]:-$N_SAMPLES}"
+    temperature="${BENCHMARK_TEMP[$bm]:-$TEMPERATURE}"
     output_file="${OUTPUT_DIR}/${bm}_bz${n_samples}.jsonl"
     TASK_NAMES+=("$bm")
 
     if [[ "$PARALLEL" == "1" ]]; then
-        # 并行: 所有 benchmark 同时启动，共享服务端并发
-        run_infer "$bm" "$input_file" "$output_file" "$n_samples" "$temperature" &
+        # 并行: 独立日志避免串扰
+        log_file="${OUTPUT_DIR}/${bm}_infer.log"
+        run_infer "$bm" "$input_file" "$output_file" "$n_samples" "$temperature" "$log_file" &
         TASK_PIDS+=($!)
     else
-        # 串行: 顺序执行
-        run_infer "$bm" "$input_file" "$output_file" "$n_samples" "$temperature" || true
+        # 串行: 直接输出
+        run_infer "$bm" "$input_file" "$output_file" "$n_samples" "$temperature" "" || true
     fi
 done
 

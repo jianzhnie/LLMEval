@@ -68,7 +68,7 @@ class InferenceClient:
         base_url (str): Base URL for the OpenAI-compatible API
     """
 
-    def __init__(self, base_url: str, timeout: int, max_retries: int = 3) -> None:
+    def __init__(self, base_url: str, timeout: int, max_retries: int = 3, tool_choice: str = "none") -> None:
         """Initialize the inference client with API configuration and validation.
 
         Creates a new OpenAI client instance configured with the provided base URL
@@ -79,6 +79,7 @@ class InferenceClient:
             base_url: Base URL for the OpenAI-compatible API endpoint
             timeout: Request timeout in seconds (must be positive)
             max_retries: Maximum number of retries for requests to VLLM server (must be non-negative)
+            tool_choice: Tool calling mode: 'none' (default, disables tools), 'auto', or tool name.
 
         Raises:
             ValueError: If timeout is invalid (<=0) or base_url is empty
@@ -87,6 +88,7 @@ class InferenceClient:
         self.base_url: str = base_url  # Store for potential reconnection
         self.timeout: int = timeout
         self.max_retries: int = max_retries
+        self.tool_choice: str = tool_choice
         self.api_key: str = os.environ.get("OPENAI_API_KEY", "EMPTY")
 
         # Warn if using default EMPTY key
@@ -189,7 +191,7 @@ class InferenceClient:
 
         # Prepare API call parameters
         messages = self._prepare_messages(query, system_prompt)
-        call_args = {
+        call_args: dict[str, Any] = {
             "model": model_name,
             "messages": messages,
             "max_tokens": max_tokens,
@@ -201,6 +203,9 @@ class InferenceClient:
             },
             "timeout": self.timeout,
         }
+        # tool_choice: only send when explicitly configured (vLLM 0.23+ supports it)
+        if self.tool_choice:
+            call_args["tool_choice"] = self.tool_choice
 
         # Make API call with exponential backoff retry logic
         last_exception = None
@@ -331,6 +336,7 @@ class InferenceRunner:
                 base_url=args.base_url,
                 timeout=args.request_timeout,
                 max_retries=args.max_retries,
+                tool_choice=args.tool_choice,
             )
         except (OSError, ValueError) as e:
             raise RuntimeError(f"Failed to initialize inference client: {e}") from e

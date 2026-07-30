@@ -457,6 +457,10 @@ class ServerArguments:
     organization: str | None = field(
         default=None, metadata={"help": "Organization ID for API usage."}
     )
+    tool_choice: str = field(
+        default="none",
+        metadata={"help": "Tool choice mode: 'none', 'auto', or a specific tool name."},
+    )
 
     def __post_init__(self) -> None:
         """
