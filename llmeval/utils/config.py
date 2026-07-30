@@ -25,7 +25,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from transformers import HfArgumentParser
 
@@ -37,6 +37,7 @@ __all__ = [
     "DataArguments",
     "EvalTaskArguments",
     "GenerationArguments",
+    "MCInferConfig",
     "OfflineInferArguments",
     "OnlineInferArguments",
     "PromptArguments",
@@ -602,6 +603,134 @@ class VerifierInferArguments(
             "If you want to customize the verifier prompt, please modify the "
             "VERIFY_PROMPT_FACTORY in llmeval/utils/verifier_template.py"
         )
+
+
+@dataclass
+class MCInferConfig:
+    """
+    Configuration for MC (multiple-choice) inference.
+
+    Used by llmeval/tasks/mc_eval/mc_infer.py and parsed from the command
+    line by HfArgumentParser; field names map 1:1 to CLI flags
+    (e.g. --input_file, --max_workers).
+
+    Attributes:
+        input_file (str): Path to the input JSONL file (MC items).
+        output_file (str): Path to the output JSONL file (results appended).
+        base_url (str): Base URL of the OpenAI-compatible API endpoint.
+        model_name (str): Served model name used in requests.
+        mode (str): Inference mode: "loglikelihood" or "generate".
+        max_workers (int): Number of concurrent worker threads.
+        request_timeout (int): Per-request timeout in seconds.
+        max_retries (int): Maximum number of retries for transient failures.
+        max_tokens (int): Maximum number of tokens to generate (generate mode).
+        temperature (float): Sampling temperature (0.0 = deterministic).
+        system_prompt_type (str): System prompt template key ("empty" disables).
+        tool_choice (str): Tool calling mode: "none", "auto", or a tool name.
+        n_shot (int): Few-shot example count (0 = zero-shot).
+        few_shot_file (str): Dev file for few-shot examples
+            (falls back to input_file when empty).
+        api_key (str): API key; defaults to the OPENAI_API_KEY env var.
+
+    Raises:
+        ValueError: If any parameter is outside its valid range.
+    """
+
+    VALID_MODES: ClassVar[tuple[str, ...]] = ("loglikelihood", "generate")
+
+    input_file: str = field(
+        default="", metadata={"help": "Path to the input JSONL file (MC items)."}
+    )
+    output_file: str = field(
+        default="", metadata={"help": "Path to the output JSONL file."}
+    )
+    base_url: str = field(
+        default="http://127.0.0.1:8200/v1",
+        metadata={"help": "Base URL of the OpenAI-compatible API endpoint."},
+    )
+    model_name: str = field(
+        default="longcat-flash",
+        metadata={"help": "Served model name used in requests."},
+    )
+    mode: str = field(
+        default="loglikelihood",
+        metadata={"help": "Inference mode: 'loglikelihood' or 'generate'."},
+    )
+    max_workers: int = field(
+        default=32, metadata={"help": "Number of concurrent worker threads."}
+    )
+    request_timeout: int = field(
+        default=300, metadata={"help": "Per-request timeout in seconds."}
+    )
+    max_retries: int = field(
+        default=3,
+        metadata={"help": "Maximum number of retries for transient failures."},
+    )
+    max_tokens: int = field(
+        default=2048,
+        metadata={"help": "Maximum number of tokens to generate (generate mode)."},
+    )
+    temperature: float = field(
+        default=0.0, metadata={"help": "Sampling temperature (0.0 = deterministic)."}
+    )
+    system_prompt_type: str = field(
+        default="empty",
+        metadata={"help": "System prompt template key ('empty' disables it)."},
+    )
+    tool_choice: str = field(
+        default="none",
+        metadata={"help": "Tool calling mode: 'none', 'auto', or a tool name."},
+    )
+    n_shot: int = field(
+        default=0,
+        metadata={"help": "Few-shot example count (0 = zero-shot)."},
+    )
+    few_shot_file: str = field(
+        default="",
+        metadata={"help": "Dev file for few-shot examples (falls back to input_file)."},
+    )
+    api_key: str = field(
+        default_factory=lambda: os.environ.get("OPENAI_API_KEY", "EMPTY"),
+        metadata={"help": "API key (default: OPENAI_API_KEY env var)."},
+    )
+
+    def __post_init__(self) -> None:
+        """
+        Validate MC inference arguments after initialization.
+
+        Note: input_file/output_file emptiness and existence are validated at
+        pipeline start (MCRunner.run), not here, so a default-constructed
+        config stays usable for inspection and testing.
+
+        Raises:
+            ValueError: If any parameter is outside its valid range.
+        """
+        if self.mode not in self.VALID_MODES:
+            raise ValueError(
+                f"mode must be one of {self.VALID_MODES}, got: {self.mode!r}"
+            )
+        if not self.base_url.strip():
+            raise ValueError("base_url cannot be empty")
+        if not self.model_name.strip():
+            raise ValueError("model_name cannot be empty")
+        if self.max_workers <= 0:
+            raise ValueError(f"max_workers must be positive, got: {self.max_workers}")
+        if self.request_timeout <= 0:
+            raise ValueError(
+                f"request_timeout must be positive, got: {self.request_timeout}"
+            )
+        if self.max_retries < 0:
+            raise ValueError(
+                f"max_retries must be non-negative, got: {self.max_retries}"
+            )
+        if self.max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got: {self.max_tokens}")
+        if not (0.0 <= self.temperature <= 2.0):
+            raise ValueError(
+                f"Temperature must be between 0.0 and 2.0, got: {self.temperature}"
+            )
+        if self.n_shot < 0:
+            raise ValueError(f"n_shot must be non-negative, got: {self.n_shot}")
 
 
 @dataclass

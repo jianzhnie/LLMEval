@@ -20,6 +20,19 @@ for _exc in ("APIConnectionError", "APIError", "RateLimitError"):
     if not hasattr(_openai_mod, _exc):
         setattr(_openai_mod, _exc, type(_exc, (Exception,), {}))
 
+# mc_infer imports HfArgumentParser/tqdm at module level; stub if absent
+from unittest.mock import MagicMock
+
+if "transformers" not in sys.modules:
+    _tf = types.ModuleType("transformers")
+    _tf.HfArgumentParser = MagicMock
+    sys.modules["transformers"] = _tf
+
+if "tqdm" not in sys.modules:
+    _tqdm = types.ModuleType("tqdm")
+    _tqdm.tqdm = MagicMock
+    sys.modules["tqdm"] = _tqdm
+
 
 # ===========================================================================
 # mc_score tests
