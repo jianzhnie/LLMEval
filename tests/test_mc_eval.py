@@ -555,3 +555,22 @@ class TestMCScoreEdgeCases:
 
         assert _extract_answer("the answer is b") == "B"
         assert _extract_answer("选 c") == "C"
+
+    def test_non_numeric_gold_treated_invalid(self, tmp_path: Path) -> None:
+        """A non-numeric gold must not crash scoring; item counts as wrong."""
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+
+        items = [
+            {"gold": "B", "logprobs": [-2.0, -1.0], "choices": ["a", "b"]},
+            {"gold": 1, "logprobs": [-2.0, -1.0], "choices": ["a", "b"]},
+        ]
+        acc = score_loglikelihood(items, tmp_path / "c.jsonl")
+        assert acc == 0.5
+
+    def test_generate_bare_string_gen_tolerated(self, tmp_path: Path) -> None:
+        """A plain-string gen field (schema expects list) is scored as text."""
+        from llmeval.tasks.mc_eval.mc_score import score_generate
+
+        items = [{"answer": "B", "gen": "Answer: B"}]
+        acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
+        assert acc == 1.0
