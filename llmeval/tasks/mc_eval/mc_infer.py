@@ -5,11 +5,13 @@ Architecture mirrors llmeval/vllm/online_server.py:
 - MCGenerateClient: chat completions client for generate mode
 - MCRunner: orchestrates inference with resume, threading, stats
 """
+
 from __future__ import annotations
 
 import concurrent.futures
 import json
 import os
+import random
 import sys
 import threading
 import time
@@ -29,9 +31,11 @@ logger = init_logger("mc_infer")
 # Configuration
 # ===========================================================================
 
+
 @dataclass
 class MCInferConfig:
     """Configuration for MC inference."""
+
     input_file: str = ""
     output_file: str = ""
     base_url: str = "http://127.0.0.1:8200/v1"
@@ -44,14 +48,19 @@ class MCInferConfig:
     temperature: float = 0.0
     system_prompt_type: str = "empty"
     tool_choice: str = "none"
-    n_shot: int = 0                    # few-shot examples count (0 = zero-shot)
-    few_shot_file: str = ""            # separate dev file for few-shot (uses input_file first N if empty)
-    api_key: str = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY", "EMPTY"))
+    n_shot: int = 0  # few-shot examples count (0 = zero-shot)
+    few_shot_file: str = (
+        ""  # separate dev file for few-shot (uses input_file first N if empty)
+    )
+    api_key: str = field(
+        default_factory=lambda: os.environ.get("OPENAI_API_KEY", "EMPTY")
+    )
 
 
 # ===========================================================================
 # Few-shot formatter
 # ===========================================================================
+
 
 class FewShotFormatter:
     """Load and format few-shot examples for MC prompts.
@@ -82,7 +91,6 @@ class FewShotFormatter:
             logger.warning(f"Only {len(items)} examples available, need {self.n_shot}")
             return ""
 
-        import random
         rng = random.Random(self.seed)
         selected = rng.sample(items, self.n_shot)
         # lm-eval format: "\n\n".join(doc_to_text+doc_to_target for each demo)
@@ -114,14 +122,16 @@ class FewShotFormatter:
 # Loglikelihood Client
 # ===========================================================================
 
+
 class MCLoglikelihoodClient:
     """Client for computing choice log-probabilities via completions API.
 
     Mirrors InferenceClient in online_server.py.
     """
 
-    def __init__(self, base_url: str, model_name: str, timeout: int = 300,
-                 max_retries: int = 3) -> None:
+    def __init__(
+        self, base_url: str, model_name: str, timeout: int = 300, max_retries: int = 3
+    ) -> None:
         self.model_name = model_name
         self.timeout = timeout
         self.max_retries = max_retries
@@ -148,29 +158,36 @@ class MCLoglikelihoodClient:
                 resp = self.client.completions.create(
                     model=self.model_name,
                     prompt=full_text,
-                    max_tokens=1,
-                    temperature=0,
-                    logprobs=1,
-                    echo=True,
+                    max_tokens=1,      # minimal: only need logprobs, not generation
+                    temperature=0,      # deterministic for logprob computation
+                    logprobs=1,         # only need top-1 token logprob per position
+                    echo=True,          # return logprobs for all prompt tokens
                     timeout=self.timeout,
                 )
                 logprob_data = resp.choices[0].logprobs
                 if logprob_data and logprob_data.token_logprobs:
-                    return sum(lp for lp in logprob_data.token_logprobs if lp is not None)
+                    return sum(
+                        lp for lp in logprob_data.token_logprobs if lp is not None
+                    )
                 return float("-inf")
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    delay = min(2 ** attempt, 30)
-                    logger.debug(f"Retry {attempt+1}/{self.max_retries} in {delay}s: {e}")
+                    delay = min(2**attempt, 30)
+                    logger.debug(
+                        f"Retry {attempt + 1}/{self.max_retries} in {delay}s: {e}"
+                    )
                     time.sleep(delay)
-        logger.warning(f"Logprob request failed after {self.max_retries+1} attempts: {last_error}")
+        logger.warning(
+            f"Logprob request failed after {self.max_retries + 1} attempts: {last_error}"
+        )
         return float("-inf")
 
 
 # ===========================================================================
 # Runner
 # ===========================================================================
+
 
 class MCRunner:
     """Orchestrates MC inference with resume, threading, and stats.
@@ -199,7 +216,9 @@ class MCRunner:
         if config.system_prompt_type and config.system_prompt_type != "empty":
             self.system_prompt = SYSTEM_PROMPT_FACTORY.get(config.system_prompt_type)
             if not self.system_prompt:
-                logger.warning(f"Unknown system_prompt_type: {config.system_prompt_type}")
+                logger.warning(
+                    f"Unknown system_prompt_type: {config.system_prompt_type}"
+                )
 
         # Few-shot prefix
         self._few_shot_prefix = ""
@@ -245,14 +264,20 @@ class MCRunner:
 
         # Resume: skip items whose prompt already exists in output
         completed_prompts = self._get_completed_prompts()
-        remaining = [it for it in items if it.get("prompt", "") not in completed_prompts]
+        remaining = [
+            it for it in items if it.get("prompt", "") not in completed_prompts
+        ]
         if completed_prompts:
-            logger.info(f"Found {len(completed_prompts)} completed items, {len(remaining)} remaining")
+            logger.info(
+                f"Found {len(completed_prompts)} completed items, {len(remaining)} remaining"
+            )
         if not remaining:
             logger.info("✅ All items already processed")
             return
 
-        logger.info(f"⏳ Processing {len(remaining)} items (~{len(remaining)*4} loglikelihood requests)")
+        logger.info(
+            f"⏳ Processing {len(remaining)} items (~{len(remaining) * 4} loglikelihood requests)"
+        )
 
         # Process with thread pool
         with concurrent.futures.ThreadPoolExecutor(
@@ -276,7 +301,9 @@ class MCRunner:
 
         self._log_stats()
 
-    def _process_loglikelihood_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
+    def _process_loglikelihood_item(
+        self, item: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Process a single MC item via loglikelihood comparison."""
         prompt = self._few_shot_prefix + item.get("prompt", "")
         choices = item.get("choices", [])
@@ -302,9 +329,13 @@ class MCRunner:
             return
 
         completed_prompts = self._get_completed_prompts()
-        remaining = [it for it in items if it.get("prompt", "") not in completed_prompts]
+        remaining = [
+            it for it in items if it.get("prompt", "") not in completed_prompts
+        ]
         if completed_prompts:
-            logger.info(f"Found {len(completed_prompts)} completed items, {len(remaining)} remaining")
+            logger.info(
+                f"Found {len(completed_prompts)} completed items, {len(remaining)} remaining"
+            )
         if not remaining:
             logger.info("✅ All items already processed")
             return
@@ -343,13 +374,15 @@ class MCRunner:
         self._log_stats()
 
     def _process_generate_item(
-        self, item: dict[str, Any], client: openai.OpenAI,
+        self,
+        item: dict[str, Any],
+        client: openai.OpenAI,
         base_messages: list[dict[str, str]],
     ) -> dict[str, Any] | None:
         """Process a single MC item via text generation."""
         prompt = self._few_shot_prefix + item.get("prompt", "")
         gold = item.get("answer", "")
-        messages = base_messages + [{"role": "user", "content": prompt}]
+        messages = [*base_messages, {"role": "user", "content": prompt}]
 
         gen_text = ""
         for attempt in range(self.config.max_retries + 1):
@@ -419,7 +452,9 @@ class MCRunner:
                         if max(range(len(logprobs)), key=lambda i: logprobs[i]) == gold:
                             correct += 1
             if total:
-                logger.info(f"Accuracy (loglikelihood): {correct}/{total} = {correct/total:.2%}")
+                logger.info(
+                    f"Accuracy (loglikelihood): {correct}/{total} = {correct / total:.2%}"
+                )
         except Exception:
             pass
 
@@ -427,7 +462,9 @@ class MCRunner:
         """Main entry point."""
         start_time = time.perf_counter()
 
-        logger.info("Initializing MCInferArguments with parsed command line arguments...")
+        logger.info(
+            "Initializing MCInferArguments with parsed command line arguments..."
+        )
         logger.info("\n--- Parsed Arguments ---")
         log_data = {
             "input_file": self.config.input_file,
@@ -457,21 +494,29 @@ class MCRunner:
             sys.exit(1)
 
         elapsed = time.perf_counter() - start_time
-        logger.info(f"✅ MC inference completed in {elapsed:.2f} seconds. Results: {self.config.output_file}")
+        logger.info(
+            f"✅ MC inference completed in {elapsed:.2f} seconds. Results: {self.config.output_file}"
+        )
 
 
 # ===========================================================================
 # CLI
 # ===========================================================================
 
+
 def main() -> None:
     import argparse
-    parser = argparse.ArgumentParser(description="MC inference (loglikelihood or generate)")
+
+    parser = argparse.ArgumentParser(
+        description="MC inference (loglikelihood or generate)"
+    )
     parser.add_argument("--input_file", required=True)
     parser.add_argument("--output_file", required=True)
     parser.add_argument("--base_url", default="http://127.0.0.1:8200/v1")
     parser.add_argument("--model_name", default="longcat-flash")
-    parser.add_argument("--mode", default="loglikelihood", choices=["loglikelihood", "generate"])
+    parser.add_argument(
+        "--mode", default="loglikelihood", choices=["loglikelihood", "generate"]
+    )
     parser.add_argument("--max_workers", type=int, default=32)
     parser.add_argument("--request_timeout", type=int, default=300)
     parser.add_argument("--max_retries", type=int, default=3)
@@ -479,18 +524,31 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--system_prompt_type", default="empty")
     parser.add_argument("--tool_choice", default="none")
-    parser.add_argument("--n_shot", type=int, default=0, help="Few-shot examples count (0=zero-shot)")
-    parser.add_argument("--few_shot_file", default="", help="Dev file for few-shot (uses input_file first N if empty)")
+    parser.add_argument(
+        "--n_shot", type=int, default=0, help="Few-shot examples count (0=zero-shot)"
+    )
+    parser.add_argument(
+        "--few_shot_file",
+        default="",
+        help="Dev file for few-shot (uses input_file first N if empty)",
+    )
     args = parser.parse_args()
 
     config = MCInferConfig(
-        input_file=args.input_file, output_file=args.output_file,
-        base_url=args.base_url, model_name=args.model_name,
-        mode=args.mode, max_workers=args.max_workers,
-        request_timeout=args.request_timeout, max_retries=args.max_retries,
-        max_tokens=args.max_tokens, temperature=args.temperature,
-        system_prompt_type=args.system_prompt_type, tool_choice=args.tool_choice,
-        n_shot=args.n_shot, few_shot_file=args.few_shot_file,
+        input_file=args.input_file,
+        output_file=args.output_file,
+        base_url=args.base_url,
+        model_name=args.model_name,
+        mode=args.mode,
+        max_workers=args.max_workers,
+        request_timeout=args.request_timeout,
+        max_retries=args.max_retries,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        system_prompt_type=args.system_prompt_type,
+        tool_choice=args.tool_choice,
+        n_shot=args.n_shot,
+        few_shot_file=args.few_shot_file,
     )
     runner = MCRunner(config)
     runner.run()
