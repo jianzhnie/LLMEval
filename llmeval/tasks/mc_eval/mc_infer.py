@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import httpx
 import openai
 
 from llmeval.utils.logger import init_logger
@@ -127,13 +126,18 @@ class FewShotFormatter:
 
     @staticmethod
     def _load_items(filepath: str) -> list[dict[str, Any]]:
-        items = []
+        items: list[dict[str, Any]] = []
         with open(filepath, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     items.append(json.loads(line))
         return items
+
+
+def _argmax(xs: list[float]) -> int:
+    """Return index of maximum value."""
+    return max(range(len(xs)), key=lambda i: xs[i])
 
 
 # ===========================================================================
@@ -159,7 +163,6 @@ class MCLoglikelihoodClient:
         self.client: openai.OpenAI = openai.OpenAI(
             api_key=self.api_key,
             base_url=base_url,
-            timeout=httpx.Timeout(self.timeout),
         )
         logger.info(
             f"MC Client initialized: model={model_name}, timeout={timeout}, "
@@ -220,7 +223,12 @@ class MCRunner:
     def __init__(self, config: MCInferConfig) -> None:
         self.config = config
         self._file_lock = threading.Lock()
-        self._stats: dict[str, int] = {"processed": 0, "failed": 0, "skipped": 0}
+        self._stats: dict[str, int] = {
+            "processed": 0,
+            "failed": 0,
+            "correct": 0,
+            "skipped": 0,
+        }
         self._stats_lock = threading.Lock()
 
         if config.mode == "loglikelihood":
@@ -252,7 +260,7 @@ class MCRunner:
     # Resume
     # ------------------------------------------------------------------
 
-    def _get_completed_prompts(self) -> set[str]:
+    def get_completed_prompts(self) -> set[str]:
         """Get set of completed prompts from existing output (for resume)."""
         output_path = Path(self.config.output_file)
         if not output_path.exists() or output_path.stat().st_size == 0:
@@ -285,7 +293,7 @@ class MCRunner:
             return
 
         # Resume: skip items whose prompt already exists in output
-        completed_prompts = self._get_completed_prompts()
+        completed_prompts = self.get_completed_prompts()
         remaining = [
             it for it in items if it.get("prompt", "") not in completed_prompts
         ]
@@ -316,6 +324,8 @@ class MCRunner:
                         self._write_result(result)
                         with self._stats_lock:
                             self._stats["processed"] += 1
+                            if result.get("correct"):
+                                self._stats["correct"] += 1
                 except Exception as e:
                     with self._stats_lock:
                         self._stats["failed"] += 1
@@ -323,9 +333,7 @@ class MCRunner:
 
         self._log_stats()
 
-    def _process_loglikelihood_item(
-        self, item: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    def process_loglikelihood_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
         """Process a single MC item via loglikelihood comparison."""
         fs_prefix = (
             self._few_shot_fmt.get_prefix(item.get("prompt", ""))
@@ -344,18 +352,26 @@ class MCRunner:
             lp = self.client.get_choice_logprob(prompt, choice_text)
             logprobs.append(lp)
 
-        return {"prompt": prompt, "gold": gold, "logprobs": logprobs}
+        pred = _argmax(logprobs) if logprobs else -1
+        is_correct = pred == gold
+        return {
+            "prompt": prompt,
+            "gold": gold,
+            "logprobs": logprobs,
+            "pred": pred,
+            "correct": is_correct,
+        }
 
     # ------------------------------------------------------------------
     # Generate mode
     # ------------------------------------------------------------------
 
-    def _run_generate(self) -> None:
+    def run_generate(self) -> None:
         items = self._load_items()
         if not items:
             return
 
-        completed_prompts = self._get_completed_prompts()
+        completed_prompts = self.get_completed_prompts()
         remaining = [
             it for it in items if it.get("prompt", "") not in completed_prompts
         ]
@@ -393,6 +409,8 @@ class MCRunner:
                         self._write_result(result)
                         with self._stats_lock:
                             self._stats["processed"] += 1
+                            if result.get("correct"):
+                                self._stats["correct"] += 1
                 except Exception as e:
                     with self._stats_lock:
                         self._stats["failed"] += 1
@@ -400,7 +418,7 @@ class MCRunner:
 
         self._log_stats()
 
-    def _process_generate_item(
+    def process_generate_item(
         self,
         item: dict[str, Any],
         client: openai.OpenAI,
@@ -443,7 +461,7 @@ class MCRunner:
     # Shared helpers
     # ------------------------------------------------------------------
 
-    def _load_items(self) -> list[dict[str, Any]]:
+    def load_items(self) -> list[dict[str, Any]]:
         items = []
         with open(self.config.input_file, encoding="utf-8") as f:
             for line in f:
@@ -453,7 +471,7 @@ class MCRunner:
         logger.info(f"Loaded {len(items)} items from {self.config.input_file}")
         return items
 
-    def _write_result(self, result: dict[str, Any]) -> None:
+    def write_result(self, result: dict[str, Any]) -> None:
         """Thread-safe write to output file."""
         with self._file_lock:
             output_path = Path(self.config.output_file)
@@ -462,7 +480,7 @@ class MCRunner:
                 f.write(json.dumps(result, ensure_ascii=False) + "\n")
                 f.flush()
 
-    def _log_stats(self) -> None:
+    def log_stats(self) -> None:
         logger.info(
             f"Stats: {self._stats['processed']} processed, "
             f"{self._stats['failed']} failed, "
@@ -470,16 +488,17 @@ class MCRunner:
         )
         # Quick accuracy summary for loglikelihood mode
         if self.config.mode == "loglikelihood":
-            self._print_loglikelihood_summary()
+            self.print_loglikelihood_summary()
 
-    def _print_loglikelihood_summary(self) -> None:
-        """Print quick accuracy from in-memory stats (no file re-read)."""
+    def print_loglikelihood_summary(self) -> None:
+        """Print quick accuracy from in-memory stats."""
         processed = self._stats["processed"]
+        correct = self._stats.get("correct", 0)
         failed = self._stats["failed"]
         if processed:
             logger.info(
-                f"Accuracy (loglikelihood): {processed - failed}/{processed} "
-                f"(failed={failed}, pass@{1}={processed / max(processed + failed, 1):.2%})"
+                f"Accuracy (loglikelihood): {correct}/{processed} = {correct / processed:.2%} "
+                f"(failed={failed})"
             )
 
     def run(self) -> None:
@@ -510,9 +529,9 @@ class MCRunner:
         logger.info(f"🚀 Initializing MC inference pipeline ({self.config.mode} mode)")
 
         if self.config.mode == "loglikelihood":
-            self._run_loglikelihood()
+            self.run_loglikelihood()
         elif self.config.mode == "generate":
-            self._run_generate()
+            self.run_generate()
         else:
             logger.error(f"Unknown mode: {self.config.mode}")
             sys.exit(1)
