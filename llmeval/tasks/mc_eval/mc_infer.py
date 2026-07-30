@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import openai
+from openai import APIConnectionError, APIError, RateLimitError
+from tqdm import tqdm
 
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
@@ -140,6 +142,23 @@ def _argmax(xs: list[float]) -> int:
     return max(range(len(xs)), key=lambda i: xs[i])
 
 
+def _classify_api_error(e: APIError) -> str | None:
+    """Classify an APIError: return a non-retryable reason, or None if retryable.
+
+    Non-retryable cases (retrying only wastes backoff time):
+    - prompt exceeds the model's maximum context length
+    - other 4xx client errors (408 Request Timeout stays retryable;
+      429 is a RateLimitError subclass and is handled separately)
+    """
+    err_message = getattr(e, "message", None) or str(e)
+    if "maximum context length" in err_message:
+        return f"max context length exceeded: {err_message}"
+    status_code = getattr(e, "status_code", None)
+    if isinstance(status_code, int) and 400 <= status_code < 500 and status_code != 408:
+        return f"non-retryable API error (status={status_code}): {err_message}"
+    return None
+
+
 # ===========================================================================
 # Loglikelihood Client
 # ===========================================================================
@@ -216,14 +235,23 @@ class MCLoglikelihoodClient:
                     else:
                         results.append(float("-inf"))
                 return results
+            except (APIConnectionError, RateLimitError) as e:
+                # Retryable: transient network / rate-limit errors
+                last_error = e
+            except APIError as e:
+                last_error = e
+                non_retryable = _classify_api_error(e)
+                if non_retryable:
+                    logger.warning(f"Logprob request aborted: {non_retryable}")
+                    break
             except Exception as e:
                 last_error = e
-                if attempt < self.max_retries:
-                    delay = min(2**attempt, 30)
-                    logger.debug(
-                        f"Retry {attempt + 1}/{self.max_retries} in {delay}s: {e}"
-                    )
-                    time.sleep(delay)
+            if attempt < self.max_retries:
+                delay = min(2**attempt, 30)
+                logger.debug(
+                    f"Retry {attempt + 1}/{self.max_retries} in {delay}s: {last_error}"
+                )
+                time.sleep(delay)
         logger.warning(
             f"Logprob request failed after {self.max_retries + 1} attempts: {last_error}"
         )
@@ -322,6 +350,59 @@ class MCRunner:
         )
         return fs_prefix + item.get("prompt", "")
 
+    def _collect_results(
+        self, remaining: list[dict[str, Any]], worker: Any, desc: str
+    ) -> None:
+        """Run worker over remaining items with a thread pool + progress bar.
+
+        Shared driver for both modes: writes successful results, updates stats,
+        and collects failed items for later inspection.
+        """
+        failed_items: list[dict[str, Any]] = []
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.config.max_workers
+        ) as executor:
+            futures = {executor.submit(worker, item): item for item in remaining}
+            with tqdm(total=len(remaining), desc=desc, unit="item") as pbar:
+                for future in concurrent.futures.as_completed(futures):
+                    item = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        with self._stats_lock:
+                            self._stats["failed"] += 1
+                        failed_items.append({"item": item, "error": str(e)})
+                        logger.warning(f"Item failed: {e}")
+                    else:
+                        if result is None:
+                            with self._stats_lock:
+                                self._stats["skipped"] += 1
+                        else:
+                            self.write_result(result)
+                            with self._stats_lock:
+                                self._stats["processed"] += 1
+                                if result.get("correct"):
+                                    self._stats["correct"] += 1
+                    pbar.update(1)
+        self._dump_failed(failed_items)
+
+    def _dump_failed(self, failed_items: list[dict[str, Any]]) -> None:
+        """Persist failed items next to the output file for later inspection.
+
+        Uses splitext instead of str.replace so a non-.jsonl output name never
+        collapses onto the output file itself (which "w" mode would truncate).
+        """
+        if not failed_items:
+            return
+        failed_file = os.path.splitext(self.config.output_file)[0] + "_failed.jsonl"
+        try:
+            with open(failed_file, "w", encoding="utf-8") as f:
+                for entry in failed_items:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            logger.warning(f"{len(failed_items)} failed items saved to {failed_file}")
+        except OSError as e:
+            logger.error(f"Failed to save failed items: {e}")
+
     def run_loglikelihood(self) -> None:
         items = self.load_items()
         if not items:
@@ -344,29 +425,9 @@ class MCRunner:
             f"⏳ Processing {len(remaining)} items "
             f"({len(remaining)} batched loglikelihood requests)"
         )
-
-        # Process with thread pool
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.config.max_workers
-        ) as executor:
-            futures = {
-                executor.submit(self.process_loglikelihood_item, item): i
-                for i, item in enumerate(remaining)
-            }
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result = future.result()
-                    if result:
-                        self.write_result(result)
-                        with self._stats_lock:
-                            self._stats["processed"] += 1
-                            if result.get("correct"):
-                                self._stats["correct"] += 1
-                except Exception as e:
-                    with self._stats_lock:
-                        self._stats["failed"] += 1
-                    logger.warning(f"Item failed: {e}")
-
+        self._collect_results(
+            remaining, self.process_loglikelihood_item, "Loglikelihood"
+        )
         self.log_stats()
 
     def process_loglikelihood_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
@@ -379,6 +440,12 @@ class MCRunner:
             return None
 
         logprobs = self.client.get_choices_logprobs(prompt, choices)
+        # All -inf means the request failed (retries exhausted or 4xx). It must
+        # NOT be scored as a normal result — argmax would silently degrade to
+        # always picking choice 0. Raise so the item is counted failed, dumped
+        # to *_failed.jsonl, and retried on the next resume run.
+        if all(lp == float("-inf") for lp in logprobs):
+            raise RuntimeError("Logprob request failed for all choices")
 
         pred = _argmax(logprobs) if logprobs else -1
         is_correct = pred == gold
@@ -421,29 +488,11 @@ class MCRunner:
         if self.system_prompt:
             base_messages.append({"role": "system", "content": self.system_prompt})
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.config.max_workers
-        ) as executor:
-            futures = {
-                executor.submit(
-                    self.process_generate_item, item, gen_client, base_messages
-                ): i
-                for i, item in enumerate(remaining)
-            }
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result = future.result()
-                    if result:
-                        self.write_result(result)
-                        with self._stats_lock:
-                            self._stats["processed"] += 1
-                            if result.get("correct"):
-                                self._stats["correct"] += 1
-                except Exception as e:
-                    with self._stats_lock:
-                        self._stats["failed"] += 1
-                    logger.warning(f"Item failed: {e}")
-
+        self._collect_results(
+            remaining,
+            lambda item: self.process_generate_item(item, gen_client, base_messages),
+            "Generate",
+        )
         self.log_stats()
 
     def process_generate_item(
@@ -458,6 +507,7 @@ class MCRunner:
         messages = [*base_messages, {"role": "user", "content": prompt}]
 
         gen_text = ""
+        last_error = None
         for attempt in range(self.config.max_retries + 1):
             try:
                 kwargs: dict[str, Any] = {
@@ -470,17 +520,29 @@ class MCRunner:
                 if self.config.tool_choice:
                     kwargs["tool_choice"] = self.config.tool_choice
                 resp = client.chat.completions.create(**kwargs)
+                # Reasoning models may return content=None (thinking exhausted
+                # max_tokens); normalize to "" — the empty result is a failure
                 gen_text = resp.choices[0].message.content or ""
                 break
+            except (APIConnectionError, RateLimitError) as e:
+                # Retryable: transient network / rate-limit errors
+                last_error = e
+            except APIError as e:
+                last_error = e
+                non_retryable = _classify_api_error(e)
+                if non_retryable:
+                    logger.warning(f"Generate aborted: {non_retryable}")
+                    break
             except Exception as e:
-                if attempt < self.config.max_retries:
-                    delay = min(2**attempt, 30)
-                    logger.debug(
-                        f"Retry {attempt + 1}/{self.config.max_retries} in {delay}s: {e}"
-                    )
-                    time.sleep(delay)
-                else:
-                    logger.warning(f"Generate failed after retries: {e}")
+                last_error = e
+            if attempt < self.config.max_retries:
+                delay = min(2**attempt, 30)
+                logger.debug(
+                    f"Retry {attempt + 1}/{self.config.max_retries} in {delay}s: {last_error}"
+                )
+                time.sleep(delay)
+        if not gen_text and last_error:
+            logger.warning(f"Generate failed after retries: {last_error}")
 
         # Note: 'correct' not set here — generate mode needs answer extraction
         # during scoring.  Only loglikelihood mode computes correctness inline.
@@ -491,6 +553,9 @@ class MCRunner:
     # ------------------------------------------------------------------
 
     def load_items(self) -> list[dict[str, Any]]:
+        """Load JSONL input items, with a clear error when the file is missing."""
+        if not os.path.exists(self.config.input_file):
+            raise FileNotFoundError(f"Input file not found: {self.config.input_file}")
         items: list[dict[str, Any]] = []
         with open(self.config.input_file, encoding="utf-8") as f:
             for line in f:

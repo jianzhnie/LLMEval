@@ -14,6 +14,12 @@ for mod_name in ("openai", "httpx"):
     if mod_name not in sys.modules:
         sys.modules[mod_name] = types.ModuleType(mod_name)
 
+# Provide stubs for openai exceptions used at module level in mc_infer
+_openai_mod = sys.modules["openai"]
+for _exc in ("APIConnectionError", "APIError", "RateLimitError"):
+    if not hasattr(_openai_mod, _exc):
+        setattr(_openai_mod, _exc, type(_exc, (Exception,), {}))
+
 
 # ===========================================================================
 # mc_score tests
