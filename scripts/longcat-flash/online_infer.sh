@@ -54,20 +54,42 @@ OUTPUT_DIR="${OUTPUT_DIR:-./output/${MODEL_NAME}}"
 mkdir -p "$OUTPUT_DIR"
 
 # =============================================================================
-# Benchmarks: "name|input_file|n_samples"
-# name:      数据集标识 (用于输出文件名和 task 参数)
-# input_file: JSONL 数据路径
-# n_samples: 每题采样数 (空 = 用全局 N_SAMPLES)
+# Benchmarks 注册
 # =============================================================================
-BENCHMARKS="${BENCHMARKS:-aime25 aime24}"
+# 可用 benchmark: gsm8k math500 hmmt25 gpqa_diamond aime24 aime25 aime26
+# 预设组:
+#   ALL     = 全部 7 个数据集
+#   HARD    = aime24 aime25 aime26 hmmt25 gpqa_diamond (高难度)
+#   QUICK   = gsm8k math500 (快速验证, 样本少)
+# 自定义: BENCHMARKS="gsm8k gpqa_diamond" bash scripts/longcat-flash/online_infer.sh
+# =============================================================================
+BENCHMARKS="${BENCHMARKS:-ALL}"
+
+# 预设组展开
+case "$BENCHMARKS" in
+    ALL)   BENCHMARKS="gsm8k math500 hmmt25 gpqa_diamond aime24 aime25 aime26" ;;
+    HARD)  BENCHMARKS="aime24 aime25 aime26 hmmt25 gpqa_diamond" ;;
+    QUICK) BENCHMARKS="gsm8k math500" ;;
+esac
 
 declare -A BM_INPUT=(
-    [aime25]="./data/aime25.jsonl"
+    [gsm8k]="./data/gsm8k.jsonl"
+    [math500]="./data/math500.jsonl"
+    [hmmt25]="./data/hmmt25.jsonl"
+    [gpqa_diamond]="./data/gpqa_diamond.jsonl"
     [aime24]="./data/aime24.jsonl"
+    [aime25]="./data/aime25.jsonl"
+    [aime26]="./data/aime26.jsonl"
 )
+# 每 benchmark 采样数 (空 = 用全局 N_SAMPLES)
 declare -A BM_SAMPLES=(
-    [aime25]="$N_SAMPLES"
+    [gsm8k]="1"
+    [math500]="1"
+    [hmmt25]="$N_SAMPLES"
+    [gpqa_diamond]="$N_SAMPLES"
     [aime24]="$N_SAMPLES"
+    [aime25]="$N_SAMPLES"
+    [aime26]="$N_SAMPLES"
 )
 
 # =============================================================================

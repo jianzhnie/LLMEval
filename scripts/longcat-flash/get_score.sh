@@ -41,14 +41,37 @@ EVAL_DIR="${EVAL_DIR:-${INPUT_DIR}/eval_score}"
 mkdir -p "$EVAL_DIR"
 
 # =============================================================================
-# Benchmarks 注册
+# Benchmarks 注册 (与 online_infer.sh 保持一致)
 # =============================================================================
-BENCHMARKS="${BENCHMARKS:-aime25 aime24}"
+BENCHMARKS="${BENCHMARKS:-ALL}"
 PARALLEL="${PARALLEL:-1}"           # 默认并行评分
 
+case "$BENCHMARKS" in
+    ALL)   BENCHMARKS="gsm8k math500 hmmt25 gpqa_diamond aime24 aime25 aime26" ;;
+    HARD)  BENCHMARKS="aime24 aime25 aime26 hmmt25 gpqa_diamond" ;;
+    QUICK) BENCHMARKS="gsm8k math500" ;;
+esac
+
+# math-verify task_name 映射
 declare -A TASK_NAME=(
-    [aime25]="math_opensource/aime25"
+    [gsm8k]="math_opensource/gsm8k"
+    [math500]="math_opensource/math500"
+    [hmmt25]="math_opensource/hmmt25"
+    [gpqa_diamond]="math_opensource/gpqa_diamond"
     [aime24]="math_opensource/aime24"
+    [aime25]="math_opensource/aime25"
+    [aime26]="math_opensource/aime26"
+)
+# 每个 benchmark 的采样数 (从文件名推导: {bm}_bz{N}.jsonl)
+# 默认用 N_SAMPLES，gsm8k/math500 等通常只跑 1 次
+declare -A BM_SAMPLES=(
+    [gsm8k]="1"
+    [math500]="1"
+    [hmmt25]="$N_SAMPLES"
+    [gpqa_diamond]="$N_SAMPLES"
+    [aime24]="$N_SAMPLES"
+    [aime25]="$N_SAMPLES"
+    [aime26]="$N_SAMPLES"
 )
 
 # =============================================================================
@@ -112,9 +135,10 @@ for bm in $BENCHMARKS; do
         continue
     fi
 
-    input_file="${INPUT_DIR}/${bm}_bz${N_SAMPLES}.jsonl"
-    cache_file="${EVAL_DIR}/${bm}_bz${N_SAMPLES}.jsonl"
-    result_file="${EVAL_DIR}/${bm}_bz${N_SAMPLES}_score.txt"
+    n_samples="${BM_SAMPLES[$bm]:-$N_SAMPLES}"
+    input_file="${INPUT_DIR}/${bm}_bz${n_samples}.jsonl"
+    cache_file="${EVAL_DIR}/${bm}_bz${n_samples}.jsonl"
+    result_file="${EVAL_DIR}/${bm}_bz${n_samples}_score.txt"
 
     if [[ ! -f "$input_file" ]]; then
         echo "[ERROR] 输入文件不存在: $input_file" >&2
@@ -156,7 +180,8 @@ for bm in "${TASK_NAMES[@]}"; do
     if [[ "${TASK_STATUS[$bm]:-}" == "FAIL" ]]; then
         FAILED+=("$bm")
     else
-        result_file="${EVAL_DIR}/${bm}_bz${N_SAMPLES}_score.txt"
+        n_samples="${BM_SAMPLES[$bm]:-$N_SAMPLES}"
+        result_file="${EVAL_DIR}/${bm}_bz${n_samples}_score.txt"
         if [[ -f "$result_file" ]]; then
             score=$(grep -oE '[0-9]+\.[0-9]+%?' "$result_file" | tail -1 || echo "N/A")
             echo "[RESULT] $bm: $score"

@@ -14,7 +14,7 @@ LLMEval 是一个用于评测大型语言模型（LLM）数学推理能力的综
 
 - **多推理后端**：支持 vLLM（GPU/NPU）和 SGLang（数据并行）
 - **灵活评测模式**：在线服务器模式和离线本地推理
-- **丰富基准测试**：AIME 2024/2025、MATH-500、GSM8K 等
+- **丰富基准测试**：AIME 2024/2025/2026、MATH-500、GSM8K、GPQA-Diamond、HMMT-25 等
 - **断点续评**：自动恢复中断的评测任务
 - **答案验证**：内置答案提取和正确性验证
 
@@ -134,7 +134,34 @@ python -m sglang_router.launch_server \
     --port 30000
 ```
 
-### 2. 运行推理
+### 2. 一键评测（推荐）
+
+使用统一脚本进行端到端评测：
+
+```bash
+# 数据准备 → 推理 → 评分, 一键完成
+bash scripts/longcat-flash/run_all.sh
+
+# 快速验证 (gsm8k + math500, 每题 1 次采样)
+BENCHMARKS=QUICK bash scripts/longcat-flash/run_all.sh
+
+# 高难度赛道
+BENCHMARKS=HARD bash scripts/longcat-flash/run_all.sh
+
+# 自定义 benchmark
+BENCHMARKS="gpqa_diamond aime26" N_SAMPLES=64 bash scripts/longcat-flash/run_all.sh
+```
+
+或分步执行：
+```bash
+# 1. 推理
+bash scripts/longcat-flash/online_infer.sh
+
+# 2. 评分
+bash scripts/longcat-flash/get_score.sh
+```
+
+### 3. 手动推理（CLI 模式）
 
 在线模式：
 ```bash
@@ -157,7 +184,7 @@ python llmeval/vllm/offline_infer.py \
     --n_samples 64
 ```
 
-### 3. 评分
+### 4. 手动评分
 
 ```bash
 python ./llmeval/tasks/math_eval/eval.py \
@@ -202,9 +229,11 @@ python ./llmeval/tasks/math_eval/eval.py \
 
 - `math_opensource/aime24`
 - `math_opensource/aime25`
+- `math_opensource/aime26`
+- `math_opensource/gsm8k`
 - `math_opensource/math500`
 - `math_opensource/hmmt25`
-- `math_opensource/gsm8k`
+- `math_opensource/gpqa_diamond`
 
 ### 断点续评
 
@@ -252,8 +281,14 @@ LLMEval/
 │       ├── logger.py
 │       ├── template.py
 │       └── verifier_template.py
-├── scripts/               # 脚本示例
-└── data/                  # 评测数据集
+├── scripts/
+│   ├── longcat-flash/     # LongCat-Flash 一键评测
+│   │   ├── run_all.sh     #   全流程脚本
+│   │   ├── online_infer.sh #  推理脚本
+│   │   └── get_score.sh   #  评分脚本
+│   └── data_process/      # 数据准备
+│       └── prepare_math_benchmarks.py
+└── data/                  # 评测数据集 (7 个 benchmark, 2137 道题)
 ```
 
 ## 许可证

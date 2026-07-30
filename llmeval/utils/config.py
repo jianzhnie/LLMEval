@@ -708,7 +708,10 @@ class EvalTaskArguments:
             "math_opensource/gsm8k",
             "math_opensource/aime24",
             "math_opensource/aime25",
+            "math_opensource/aime26",
             "math_opensource/hmmt25",
+            "math_opensource/gpqa_diamond",
+            "math_opensource/hle_full",
             "livecodebench",
             "ifeval",
         ]

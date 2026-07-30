@@ -14,7 +14,7 @@ LLMEval is a comprehensive evaluation system for assessing Large Language Models
 
 - **Multiple Inference Backends**: Support for vLLM (GPU/NPU) and SGLang with data parallelism
 - **Flexible Evaluation Modes**: Online server mode and offline local inference
-- **Benchmark Coverage**: AIME 2024/2025, MATH-500, GSM8K, and more
+- **Benchmark Coverage**: AIME 2024/2025/2026, MATH-500, GSM8K, GPQA-Diamond, HMMT-25
 - **Resume Capability**: Automatically resume interrupted evaluations
 - **Verification Support**: Built-in answer extraction and correctness verification
 
@@ -171,41 +171,49 @@ python ./llmeval/vllm/online_server.py \
     --max_workers 8
 ```
 
-Please refer to the [script](./scripts/QwQ/online_infer.sh) for more details.
+Please refer to the [script](./scripts/longcat-flash/online_infer.sh) for more details.
 
 **Note:** We apply repeated sampling to reduce evaluation variance, but it may take a long time to complete (more than 8 hours depending on your device).
 
-### Step 3: Scoring
+### One-Click Pipeline (Recommended)
 
-After completing the inference, use the following commands for scoring:
+Use the unified script for end-to-end evaluation:
 
 ```bash
-output_dir="./output/Qwen/QwQ-32B"
-n_samples=64  # Default sample size for aime24 and aime25
+# Prepare data → inference → scoring, all in one
+bash scripts/longcat-flash/run_all.sh
 
-# Evaluation output directory
-reval_dir="${output_dir}/eval_score"
-# Create evaluation directory if it doesn't exist
-mkdir -p "${reval_dir}"
+# Quick test (gsm8k + math500, 1 sample each)
+BENCHMARKS=QUICK bash scripts/longcat-flash/run_all.sh
 
-# --- Evaluate Each Task ---
-# Evaluate aime24
-python ./llmeval/tasks/math_eval/eval.py \
-    --input_path "${output_dir}/aime24_bz${n_samples}.jsonl" \
-    --cache_path "${reval_dir}/aime24_bz${n_samples}.jsonl" \
-    --task_name "math_opensource/aime24" \
-    --max_workers 16 \
-    > "${reval_dir}/aime24_bz${n_samples}_res_result.txt"
+# Hard problems only
+BENCHMARKS=HARD bash scripts/longcat-flash/run_all.sh
 
-# Evaluate aime25
-python ./llmeval/tasks/math_eval/eval.py \
-    --input_path "${output_dir}/aime25_bz${n_samples}.jsonl" \
-    --cache_path "${reval_dir}/aime25_bz${n_samples}.jsonl" \
-    --task_name "math_opensource/aime25" \
-    --max_workers 16 \
-    > "${reval_dir}/aime25_bz${n_samples}_res_result.txt"
+# Custom benchmarks
+BENCHMARKS="gpqa_diamond aime26" N_SAMPLES=64 bash scripts/longcat-flash/run_all.sh
 ```
-Please refer to the [script](./scripts/get_scores.sh) for more details.
+
+Or run each step separately:
+
+```bash
+# Step 1: Inference
+bash scripts/longcat-flash/online_infer.sh
+
+# Step 2: Scoring
+bash scripts/longcat-flash/get_score.sh
+```
+
+### Step 3: Scoring (CLI)
+
+Alternatively, use the CLI directly:
+
+```bash
+python ./llmeval/tasks/math_eval/eval.py \
+    --input_path "./output/longcat-flash/aime24_bz32.jsonl" \
+    --cache_path "./output/longcat-flash/eval_score/aime24_bz32.jsonl" \
+    --task_name "math_opensource/aime24" \
+    --max_workers 16
+```
 
 ## Detailed Usage
 
@@ -242,9 +250,11 @@ Offline mode specific:
 
 - `math_opensource/aime24`
 - `math_opensource/aime25`
+- `math_opensource/aime26`
+- `math_opensource/gsm8k`
 - `math_opensource/math500`
 - `math_opensource/hmmt25`
-- `math_opensource/gsm8k`
+- `math_opensource/gpqa_diamond`
 
 ### Resume Interrupted Evaluation
 
@@ -292,8 +302,14 @@ LLMEval/
 │       ├── logger.py
 │       ├── template.py
 │       └── verifier_template.py
-├── scripts/               # Shell script examples
-└── data/                  # Benchmark datasets
+├── scripts/
+│   ├── longcat-flash/     # One-click eval for LongCat-Flash
+│   │   ├── run_all.sh     #   Full pipeline
+│   │   ├── online_infer.sh #   Inference
+│   │   └── get_score.sh   #   Scoring
+│   └── data_process/      # Data preparation
+│       └── prepare_math_benchmarks.py
+└── data/                  # Benchmark datasets (7 benchmarks, 2137 problems)
 ```
 
 ## License
