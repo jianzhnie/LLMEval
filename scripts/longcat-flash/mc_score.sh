@@ -1,0 +1,93 @@
+#!/bin/bash
+# =============================================================================
+# LongCat-Flash-Chat — Multiple-Choice Scoring (MMLU, C-Eval, etc.)
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "$PROJECT_ROOT"
+source set_env.sh 2>/dev/null || true
+
+INPUT_DIR="${INPUT_DIR:-./output/longcat-flash}"
+EVAL_DIR="${EVAL_DIR:-${INPUT_DIR}/eval_score}"
+mkdir -p "$EVAL_DIR"
+
+BENCHMARKS="${BENCHMARKS:-ALL}"
+MAX_WORKERS="${MAX_WORKERS:-32}"
+TIMEOUT="${TIMEOUT:-10}"
+
+case "$BENCHMARKS" in
+    ALL)  BENCHMARKS="mmlu mmlu_pro ceval" ;;
+esac
+
+declare -A TASK_NAME=(
+    [mmlu]="mc_opensource/mmlu"
+    [mmlu_pro]="mc_opensource/mmlu_pro"
+    [ceval]="mc_opensource/ceval"
+)
+
+echo "============================================"
+echo "[INFO] MC Scoring — Benchmarks: $BENCHMARKS"
+echo "============================================"
+
+PARALLEL="${PARALLEL:-1}"
+declare -a TASK_NAMES=()
+declare -a TASK_PIDS=()
+declare -A TASK_STATUS=()
+
+for task in $BENCHMARKS; do
+    task_name="${TASK_NAME[$task]:-}"
+    if [[ -z "$task_name" ]]; then
+        echo "[ERROR] 未知: $task" >&2; continue
+    fi
+
+    input_file="${INPUT_DIR}/${task}_bz1.jsonl"
+    cache_file="${EVAL_DIR}/${task}_bz1.jsonl"
+    result_file="${EVAL_DIR}/${task}_bz1_score.txt"
+
+    if [[ ! -f "$input_file" ]]; then
+        echo "[ERROR] 输入文件不存在: $input_file" >&2; continue
+    fi
+
+    TASK_NAMES+=("$task")
+    echo "[START] $task ($task_name)"
+
+    if [[ "$PARALLEL" == "1" ]]; then
+        {
+            python llmeval/tasks/math_eval/eval.py \
+                --input_path "$input_file" \
+                --cache_path "$cache_file" \
+                --task_name "$task_name" \
+                --max_workers "$MAX_WORKERS" \
+                --timeout "$TIMEOUT" > "$result_file" 2>&1
+        } &
+        TASK_PIDS+=($!)
+    else
+        python llmeval/tasks/math_eval/eval.py \
+            --input_path "$input_file" \
+            --cache_path "$cache_file" \
+            --task_name "$task_name" \
+            --max_workers "$MAX_WORKERS" \
+            --timeout "$TIMEOUT" > "$result_file" 2>&1 || true
+    fi
+done
+
+if [[ "$PARALLEL" == "1" && ${#TASK_PIDS[@]} -gt 0 ]]; then
+    for i in "${!TASK_PIDS[@]}"; do
+        if wait "${TASK_PIDS[$i]}"; then TASK_STATUS[${TASK_NAMES[$i]}]="OK"
+        else TASK_STATUS[${TASK_NAMES[$i]}]="FAIL"; fi
+    done
+fi
+
+# 结果汇总
+echo ""
+echo "============================================"
+for task in "${TASK_NAMES[@]}"; do
+    rf="${EVAL_DIR}/${task}_bz1_score.txt"
+    if [[ -f "$rf" ]]; then
+        score=$(grep -oE '[0-9]+\.[0-9]+%?' "$rf" | tail -1 || echo "N/A")
+        printf "  %-12s  %s\n" "$task" "$score"
+    fi
+done
+echo "🎯 MC 评分完成!"

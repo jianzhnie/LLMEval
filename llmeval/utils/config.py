@@ -675,6 +675,7 @@ class EvalTaskArguments:
         if self.timeout <= 0:
             raise ValueError(f"timeout must be positive, got {self.timeout}")
         valid_tasks = [
+            # Math (math-verify scoring)
             "math_opensource/math500",
             "math_opensource/math",
             "math_opensource/gsm8k",
@@ -684,6 +685,10 @@ class EvalTaskArguments:
             "math_opensource/hmmt25",
             "math_opensource/gpqa_diamond",
             "math_opensource/hle_full",
+            # Multiple-choice (simple accuracy)
+            "mc_opensource/mmlu",
+            "mc_opensource/mmlu_pro",
+            "mc_opensource/ceval",
             "livecodebench",
             "ifeval",
         ]

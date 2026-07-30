@@ -32,6 +32,7 @@ from typing import Any
 from transformers import HfArgumentParser
 
 from llmeval.tasks.math_eval.math_score import compute_scores
+from llmeval.tasks.mc_eval.mc_score import score_generate, score_loglikelihood
 from llmeval.utils.config import EvalTaskArguments
 from llmeval.utils.logger import init_logger
 
@@ -210,6 +211,16 @@ def evaluate_task(
         except Exception as e:
             logger.error(f"❌ Evaluation failed: {e!s}", exc_info=True)
             return None
+    elif dataset_source == "mc_opensource":
+        # Detect mode: loglikelihood items have 'logprobs' field, generate items have 'gen'
+        sample = eval_dataset[0] if eval_dataset else {}
+        if "logprobs" in sample:
+            accuracy = score_loglikelihood(eval_dataset, cache_path)
+            logger.info(f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}")
+        else:
+            accuracy = score_generate(eval_dataset, label_key, response_key, cache_path)
+            logger.info(f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}")
+        return accuracy
     else:
         logger.error(f"🤷‍♂️ Unsupported task type: '{task_name}'")
         return None
@@ -260,11 +271,16 @@ def main() -> int:
             return 1
 
         # Process data items and handle potential errors
+        # For loglikelihood MC items (have 'logprobs'), skip label/response key validation
+        is_loglikelihood = data and "logprobs" in data[0]
         try:
-            processed_data = [
-                _process_item(item, args.task_name, args.label_key, args.response_key)
-                for item in data
-            ]
+            if is_loglikelihood:
+                processed_data = [{**item, "task": args.task_name} for item in data]
+            else:
+                processed_data = [
+                    _process_item(item, args.task_name, args.label_key, args.response_key)
+                    for item in data
+                ]
         except (ValueError, TypeError) as e:
             logger.error(f"❌ Error processing data: {e!s}")
             return 1
