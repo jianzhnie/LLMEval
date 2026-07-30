@@ -117,7 +117,7 @@ class FewShotFormatter:
         return "\n\n".join(demos) + "\n\n" if demos else ""
 
     @staticmethod
-    def _format_demo(item: dict) -> str:
+    def _format_demo(item: dict[str, Any]) -> str:
         """Format one few-shot demonstration."""
         prompt = item.get("prompt", "")
         answer = item.get("answer", "")
@@ -152,12 +152,17 @@ class MCLoglikelihoodClient:
     """
 
     def __init__(
-        self, base_url: str, model_name: str, timeout: int = 300, max_retries: int = 3
+        self,
+        base_url: str,
+        model_name: str,
+        timeout: int = 300,
+        max_retries: int = 3,
+        api_key: str = "",
     ) -> None:
         self.model_name = model_name
         self.timeout = timeout
         self.max_retries = max_retries
-        self.api_key = os.environ.get("OPENAI_API_KEY", "EMPTY")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
         if self.api_key == "EMPTY":
             logger.warning("Using default 'EMPTY' API key.")
         self.client: openai.OpenAI = openai.OpenAI(
@@ -169,32 +174,48 @@ class MCLoglikelihoodClient:
             f"max_retries={max_retries}, base_url={base_url}"
         )
 
-    def get_choice_logprob(self, prompt: str, choice_text: str) -> float:
-        """Compute log-probability of choice given prompt.
+    def get_choices_logprobs(self, prompt: str, choice_texts: list[str]) -> list[float]:
+        """Compute log-probabilities of all choices in ONE batched request.
 
-        Uses completions API with echo=True. Sums all token logprobs.
-        Since prompt is identical across choices, logprob(prompt) cancels
-        out in comparison: argmax Σ logprob(prompt+choice_i) = argmax logprob(choice_i|prompt).
+        Completions API accepts a list of prompts; choices are returned in the
+        same order. With echo=True each response carries logprobs for prompt
+        tokens plus the max_tokens=1 generated token — the trailing generated
+        token is NOT part of the choice and must be sliced off, otherwise it
+        adds choice-dependent noise to the comparison.
+        Since the prompt is identical across choices, logprob(prompt) cancels
+        out: argmax Σ logprob(prompt+choice_i) = argmax logprob(choice_i|prompt).
         """
-        full_text = f"{prompt} {choice_text}"
+        full_texts = [f"{prompt} {choice}" for choice in choice_texts]
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
                 resp = self.client.completions.create(
                     model=self.model_name,
-                    prompt=full_text,
+                    prompt=full_texts,
                     max_tokens=1,  # minimal: only need logprobs, not generation
                     temperature=0,  # deterministic for logprob computation
                     logprobs=1,  # only need top-1 token logprob per position
                     echo=True,  # return logprobs for all prompt tokens
                     timeout=self.timeout,
                 )
-                logprob_data = resp.choices[0].logprobs
-                if logprob_data and logprob_data.token_logprobs:
-                    return sum(
-                        lp for lp in logprob_data.token_logprobs if lp is not None
+                if len(resp.choices) != len(choice_texts):
+                    raise ValueError(
+                        f"Expected {len(choice_texts)} choices, got {len(resp.choices)}"
                     )
-                return float("-inf")
+                results = []
+                for choice in resp.choices:
+                    logprob_data = choice.logprobs
+                    if logprob_data and logprob_data.token_logprobs:
+                        # Drop trailing generated token from max_tokens=1.
+                        # With echo=True the response includes all prompt tokens + 1
+                        # generated token. We slice it off so only prompt+choice
+                        # tokens contribute to the logprob sum.
+                        all_lps = logprob_data.token_logprobs
+                        token_lps = all_lps[:-1] if len(all_lps) > 1 else all_lps
+                        results.append(sum(lp for lp in token_lps if lp is not None))
+                    else:
+                        results.append(float("-inf"))
+                return results
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
@@ -206,7 +227,7 @@ class MCLoglikelihoodClient:
         logger.warning(
             f"Logprob request failed after {self.max_retries + 1} attempts: {last_error}"
         )
-        return float("-inf")
+        return [float("-inf")] * len(choice_texts)
 
 
 # ===========================================================================
@@ -237,6 +258,7 @@ class MCRunner:
                 model_name=config.model_name,
                 timeout=config.request_timeout,
                 max_retries=config.max_retries,
+                api_key=config.api_key,
             )
         else:
             self.client = None  # generate mode uses direct API calls
@@ -287,15 +309,28 @@ class MCRunner:
     # Loglikelihood mode
     # ------------------------------------------------------------------
 
-    def _run_loglikelihood(self) -> None:
-        items = self._load_items()
+    def build_prompt(self, item: dict[str, Any]) -> str:
+        """Assemble the full prompt (few-shot prefix + raw prompt).
+
+        Used both for resume filtering and inference so the two always agree,
+        even when n_shot > 0 changes the prompt that gets written to output.
+        """
+        fs_prefix = (
+            self._few_shot_fmt.get_prefix(item.get("prompt", ""))
+            if self._few_shot_fmt
+            else ""
+        )
+        return fs_prefix + item.get("prompt", "")
+
+    def run_loglikelihood(self) -> None:
+        items = self.load_items()
         if not items:
             return
 
-        # Resume: skip items whose prompt already exists in output
+        # Resume: skip items whose (prefixed) prompt already exists in output
         completed_prompts = self.get_completed_prompts()
         remaining = [
-            it for it in items if it.get("prompt", "") not in completed_prompts
+            it for it in items if self.build_prompt(it) not in completed_prompts
         ]
         if completed_prompts:
             logger.info(
@@ -306,7 +341,8 @@ class MCRunner:
             return
 
         logger.info(
-            f"⏳ Processing {len(remaining)} items (~{len(remaining) * 4} loglikelihood requests)"
+            f"⏳ Processing {len(remaining)} items "
+            f"({len(remaining)} batched loglikelihood requests)"
         )
 
         # Process with thread pool
@@ -314,14 +350,14 @@ class MCRunner:
             max_workers=self.config.max_workers
         ) as executor:
             futures = {
-                executor.submit(self._process_loglikelihood_item, item): i
+                executor.submit(self.process_loglikelihood_item, item): i
                 for i, item in enumerate(remaining)
             }
             for future in concurrent.futures.as_completed(futures):
                 try:
                     result = future.result()
                     if result:
-                        self._write_result(result)
+                        self.write_result(result)
                         with self._stats_lock:
                             self._stats["processed"] += 1
                             if result.get("correct"):
@@ -331,26 +367,18 @@ class MCRunner:
                         self._stats["failed"] += 1
                     logger.warning(f"Item failed: {e}")
 
-        self._log_stats()
+        self.log_stats()
 
     def process_loglikelihood_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
         """Process a single MC item via loglikelihood comparison."""
-        fs_prefix = (
-            self._few_shot_fmt.get_prefix(item.get("prompt", ""))
-            if self._few_shot_fmt
-            else ""
-        )
-        prompt = fs_prefix + item.get("prompt", "")
+        prompt = self.build_prompt(item)
         choices = item.get("choices", [])
         gold = item.get("gold", -1)
 
         if not choices:
             return None
 
-        logprobs = []
-        for choice_text in choices:
-            lp = self.client.get_choice_logprob(prompt, choice_text)
-            logprobs.append(lp)
+        logprobs = self.client.get_choices_logprobs(prompt, choices)
 
         pred = _argmax(logprobs) if logprobs else -1
         is_correct = pred == gold
@@ -367,13 +395,13 @@ class MCRunner:
     # ------------------------------------------------------------------
 
     def run_generate(self) -> None:
-        items = self._load_items()
+        items = self.load_items()
         if not items:
             return
 
         completed_prompts = self.get_completed_prompts()
         remaining = [
-            it for it in items if it.get("prompt", "") not in completed_prompts
+            it for it in items if self.build_prompt(it) not in completed_prompts
         ]
         if completed_prompts:
             logger.info(
@@ -398,7 +426,7 @@ class MCRunner:
         ) as executor:
             futures = {
                 executor.submit(
-                    self._process_generate_item, item, gen_client, base_messages
+                    self.process_generate_item, item, gen_client, base_messages
                 ): i
                 for i, item in enumerate(remaining)
             }
@@ -406,7 +434,7 @@ class MCRunner:
                 try:
                     result = future.result()
                     if result:
-                        self._write_result(result)
+                        self.write_result(result)
                         with self._stats_lock:
                             self._stats["processed"] += 1
                             if result.get("correct"):
@@ -416,7 +444,7 @@ class MCRunner:
                         self._stats["failed"] += 1
                     logger.warning(f"Item failed: {e}")
 
-        self._log_stats()
+        self.log_stats()
 
     def process_generate_item(
         self,
@@ -425,12 +453,7 @@ class MCRunner:
         base_messages: list[dict[str, str]],
     ) -> dict[str, Any] | None:
         """Process a single MC item via text generation."""
-        fs_prefix = (
-            self._few_shot_fmt.get_prefix(item.get("prompt", ""))
-            if self._few_shot_fmt
-            else ""
-        )
-        prompt = fs_prefix + item.get("prompt", "")
+        prompt = self.build_prompt(item)
         gold = item.get("answer", "")
         messages = [*base_messages, {"role": "user", "content": prompt}]
 
@@ -451,10 +474,16 @@ class MCRunner:
                 break
             except Exception as e:
                 if attempt < self.config.max_retries:
-                    time.sleep(min(2**attempt, 30))
+                    delay = min(2**attempt, 30)
+                    logger.debug(
+                        f"Retry {attempt + 1}/{self.config.max_retries} in {delay}s: {e}"
+                    )
+                    time.sleep(delay)
                 else:
                     logger.warning(f"Generate failed after retries: {e}")
 
+        # Note: 'correct' not set here — generate mode needs answer extraction
+        # during scoring.  Only loglikelihood mode computes correctness inline.
         return {"prompt": prompt, "answer": gold, "gen": [gen_text]}
 
     # ------------------------------------------------------------------
@@ -462,7 +491,7 @@ class MCRunner:
     # ------------------------------------------------------------------
 
     def load_items(self) -> list[dict[str, Any]]:
-        items = []
+        items: list[dict[str, Any]] = []
         with open(self.config.input_file, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()

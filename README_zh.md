@@ -8,15 +8,16 @@
 
 ## 概述
 
-LLMEval 是一个用于评测大型语言模型（LLM）数学推理能力的综合评估系统。支持在线（API 模式）和离线（本地推理）两种模式，内置答案提取和正确性验证功能。
+LLMEval 是一个用于评测大型语言模型（LLM）的综合评估系统，覆盖数学推理和通用知识 benchmark。支持在线（API）、离线（本地推理）和 MC（loglikelihood/generate）三种模式。
 
 ### 主要特性
 
-- **多推理后端**：支持 vLLM（GPU/NPU）和 SGLang（数据并行）
-- **灵活评测模式**：在线服务器模式和离线本地推理
-- **丰富基准测试**：AIME 2024/2025/2026、MATH-500、GSM8K、GPQA-Diamond、HMMT-25 等
+- **多推理后端**：vLLM (GPU/NPU)、SGLang、OpenAI API
+- **三种评测模式**：在线生成、离线本地推理、MC loglikelihood 对比
+- **10 个 Benchmark**：AIME 2024/2025/2026、MATH-500、GSM8K、GPQA-Diamond、HMMT-25、MMLU、MMLU-Pro、C-Eval
+- **lm-eval 对齐**：acc/acc_norm/exact_match、few-shot 去重
+- **一键评测**：Shell 脚本端到端推理 → 评分
 - **断点续评**：自动恢复中断的评测任务
-- **答案验证**：内置答案提取和正确性验证
 
 ## 评测结果
 
@@ -136,29 +137,25 @@ python -m sglang_router.launch_server \
 
 ### 2. 一键评测（推荐）
 
-使用统一脚本进行端到端评测：
+**数学 benchmark** — 生成式推理 + math-verify 评分：
 
 ```bash
-# 数据准备 → 推理 → 评分, 一键完成
-bash scripts/longcat-flash/run_all.sh
+bash scripts/longcat-flash/run_all.sh           # 全流程
+BENCHMARKS=QUICK bash scripts/longcat-flash/run_all.sh   # 快速验证
+BENCHMARKS=HARD bash scripts/longcat-flash/run_all.sh    # 高难度
+```
 
-# 快速验证 (gsm8k + math500, 每题 1 次采样)
-BENCHMARKS=QUICK bash scripts/longcat-flash/run_all.sh
+**MC benchmark** — loglikelihood 选项对比 + acc/acc_norm 评分：
 
-# 高难度赛道
-BENCHMARKS=HARD bash scripts/longcat-flash/run_all.sh
-
-# 自定义 benchmark
-BENCHMARKS="gpqa_diamond aime26" N_SAMPLES=64 bash scripts/longcat-flash/run_all.sh
+```bash
+N_SHOT=5 bash scripts/longcat-flash/mc_infer.sh   # 5-shot 推理
+bash scripts/longcat-flash/mc_score.sh              # 评分
 ```
 
 或分步执行：
 ```bash
-# 1. 推理
-bash scripts/longcat-flash/online_infer.sh
-
-# 2. 评分
-bash scripts/longcat-flash/get_score.sh
+bash scripts/longcat-flash/online_infer.sh   # 数学推理
+bash scripts/longcat-flash/get_score.sh      # 数学评分
 ```
 
 ### 3. 手动推理（CLI 模式）
@@ -227,13 +224,13 @@ python ./llmeval/tasks/math_eval/eval.py \
 
 ### 支持的评测任务
 
-- `math_opensource/aime24`
-- `math_opensource/aime25`
-- `math_opensource/aime26`
-- `math_opensource/gsm8k`
-- `math_opensource/math500`
-- `math_opensource/hmmt25`
-- `math_opensource/gpqa_diamond`
+| 类别 | 任务名 | 评分方式 |
+|------|--------|----------|
+| 数学 | `math_opensource/aime24` `aime25` `aime26` `gsm8k` `math500` `hmmt25` | math-verify |
+| 科学 | `math_opensource/gpqa_diamond` | math-verify |
+| MC | `mc_opensource/mmlu` `mmlu_pro` `ceval` | loglikelihood |
+
+详见 [docs/benchmark.md](docs/benchmark.md)。
 
 ### 断点续评
 
@@ -268,27 +265,21 @@ python -m sglang.launch_server \
 LLMEval/
 ├── llmeval/
 │   ├── vllm/              # 推理引擎
-│   │   ├── online_server.py
-│   │   ├── offline_infer.py
-│   │   └── verifier_offline_infer.py
-│   ├── tasks/             # 评测任务
-│   │   └── math_eval/
-│   │       ├── eval.py
-│   │       ├── math_score.py
-│   │       └── utils_parser.py
+│   ├── tasks/
+│   │   ├── math_eval/     # 数学评分 (math-verify)
+│   │   └── mc_eval/       # MC 评分 (loglikelihood/generate)
 │   └── utils/             # 工具函数
-│       ├── config.py
-│       ├── logger.py
-│       ├── template.py
-│       └── verifier_template.py
 ├── scripts/
-│   ├── longcat-flash/     # LongCat-Flash 一键评测
-│   │   ├── run_all.sh     #   全流程脚本
-│   │   ├── online_infer.sh #  推理脚本
-│   │   └── get_score.sh   #  评分脚本
+│   ├── longcat-flash/     # 一键评测脚本
+│   │   ├── run_all.sh     #   数学全流程
+│   │   ├── online_infer.sh #  数学推理
+│   │   ├── get_score.sh   #  数学评分
+│   │   ├── mc_infer.sh    #   MC 推理
+│   │   └── mc_score.sh    #   MC 评分
 │   └── data_process/      # 数据准备
-│       └── prepare_math_benchmarks.py
-└── data/                  # 评测数据集 (7 个 benchmark, 2137 道题)
+├── tests/                 # 130 测试用例
+├── data/                  # 10 个 benchmark, 7000+ 题目
+└── docs/benchmark.md      # Benchmark 参考文档
 ```
 
 ## 许可证

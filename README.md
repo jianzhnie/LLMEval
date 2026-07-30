@@ -8,13 +8,15 @@
 
 ## Overview
 
-LLMEval is a comprehensive evaluation system for assessing Large Language Models (LLMs) on mathematical reasoning benchmarks. It supports both online (API-based) and offline (local inference) modes with built-in answer verification.
+LLMEval is a comprehensive evaluation system for assessing Large Language Models (LLMs) on mathematical reasoning and general knowledge benchmarks. It supports both online (API-based) and offline (local inference) modes with built-in answer verification and multiple-choice evaluation.
 
 ### Key Features
 
-- **Multiple Inference Backends**: Support for vLLM (GPU/NPU) and SGLang with data parallelism
-- **Flexible Evaluation Modes**: Online server mode and offline local inference
-- **Benchmark Coverage**: AIME 2024/2025/2026, MATH-500, GSM8K, GPQA-Diamond, HMMT-25
+- **Multiple Inference Backends**: Support for vLLM (GPU/NPU) and SGLang
+- **Flexible Evaluation Modes**: Online (API), offline (local), and MC (loglikelihood/generate)
+- **Rich Benchmark Coverage**: 10 benchmarks — AIME 2024/2025/2026, MATH-500, GSM8K, GPQA-Diamond, HMMT-25, MMLU, MMLU-Pro, C-Eval
+- **lm-eval Aligned**: Loglikelihood MC scoring with acc/acc_norm/exact_match, few-shot dedup
+- **One-Click Pipeline**: Shell scripts for end-to-end inference → scoring
 - **Resume Capability**: Automatically resume interrupted evaluations
 - **Verification Support**: Built-in answer extraction and correctness verification
 
@@ -177,30 +179,35 @@ Please refer to the [script](./scripts/longcat-flash/online_infer.sh) for more d
 
 ### One-Click Pipeline (Recommended)
 
-Use the unified script for end-to-end evaluation:
+**Math benchmarks** — generation with math-verify scoring:
 
 ```bash
-# Prepare data → inference → scoring, all in one
+# Full pipeline (data → inference → scoring)
 bash scripts/longcat-flash/run_all.sh
 
-# Quick test (gsm8k + math500, 1 sample each)
+# Quick test
 BENCHMARKS=QUICK bash scripts/longcat-flash/run_all.sh
 
-# Hard problems only
+# Hard problems
 BENCHMARKS=HARD bash scripts/longcat-flash/run_all.sh
-
-# Custom benchmarks
-BENCHMARKS="gpqa_diamond aime26" N_SAMPLES=64 bash scripts/longcat-flash/run_all.sh
 ```
 
-Or run each step separately:
+**Multiple-choice benchmarks** — loglikelihood comparison with acc/acc_norm:
 
 ```bash
-# Step 1: Inference
-bash scripts/longcat-flash/online_infer.sh
+# 5-shot MMLU / C-Eval
+N_SHOT=5 bash scripts/longcat-flash/mc_infer.sh
+bash scripts/longcat-flash/mc_score.sh
 
-# Step 2: Scoring
-bash scripts/longcat-flash/get_score.sh
+# Generate mode (alternative)
+MC_MODE=generate bash scripts/longcat-flash/mc_infer.sh
+```
+
+Or run each math step separately:
+
+```bash
+bash scripts/longcat-flash/online_infer.sh   # inference
+bash scripts/longcat-flash/get_score.sh      # scoring
 ```
 
 ### Step 3: Scoring (CLI)
@@ -248,13 +255,14 @@ Offline mode specific:
 
 ### Supported Tasks
 
-- `math_opensource/aime24`
-- `math_opensource/aime25`
-- `math_opensource/aime26`
-- `math_opensource/gsm8k`
-- `math_opensource/math500`
-- `math_opensource/hmmt25`
-- `math_opensource/gpqa_diamond`
+| Category | Task Name | Scoring |
+|----------|-----------|---------|
+| Math | `math_opensource/aime24` `math_opensource/aime25` `math_opensource/aime26` | math-verify |
+| Math | `math_opensource/gsm8k` `math_opensource/math500` `math_opensource/hmmt25` | math-verify |
+| Science | `math_opensource/gpqa_diamond` | math-verify |
+| MC | `mc_opensource/mmlu` `mc_opensource/mmlu_pro` `mc_opensource/ceval` | loglikelihood |
+
+See [docs/benchmark.md](docs/benchmark.md) for dataset details and HuggingFace links.
 
 ### Resume Interrupted Evaluation
 
@@ -292,24 +300,31 @@ LLMEval/
 │   │   ├── online_server.py
 │   │   ├── offline_infer.py
 │   │   └── verifier_offline_infer.py
-│   ├── tasks/             # Evaluation tasks
-│   │   └── math_eval/
-│   │       ├── eval.py
-│   │       ├── math_score.py
-│   │       └── utils_parser.py
+│   ├── tasks/
+│   │   ├── math_eval/     # Math scoring (math-verify)
+│   │   │   ├── eval.py
+│   │   │   ├── math_score.py
+│   │   │   └── utils_parser.py
+│   │   └── mc_eval/       # MC scoring (loglikelihood/generate)
+│   │       ├── mc_infer.py
+│   │       └── mc_score.py
 │   └── utils/             # Utilities
 │       ├── config.py
 │       ├── logger.py
 │       ├── template.py
 │       └── verifier_template.py
 ├── scripts/
-│   ├── longcat-flash/     # One-click eval for LongCat-Flash
-│   │   ├── run_all.sh     #   Full pipeline
-│   │   ├── online_infer.sh #   Inference
-│   │   └── get_score.sh   #   Scoring
+│   ├── longcat-flash/     # One-click eval
+│   │   ├── run_all.sh     #   Math full pipeline
+│   │   ├── online_infer.sh #   Math inference
+│   │   ├── get_score.sh   #   Math scoring
+│   │   ├── mc_infer.sh    #   MC inference
+│   │   └── mc_score.sh    #   MC scoring
 │   └── data_process/      # Data preparation
 │       └── prepare_math_benchmarks.py
-└── data/                  # Benchmark datasets (7 benchmarks, 2137 problems)
+├── tests/                 # 130 tests
+├── data/                  # 10 benchmarks, 7000+ problems
+└── docs/benchmark.md      # Benchmark reference
 ```
 
 ## License

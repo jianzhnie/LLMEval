@@ -107,8 +107,9 @@ class InferenceClient:
             base_url=base_url,
             timeout=httpx.Timeout(self.timeout),
         )
+        masked_key = f"{self.api_key[:4]}***" if len(self.api_key) > 4 else "***"
         logger.info(
-            f"Using API Key: {self.api_key}, Timeout: {self.timeout}, Max Retries: {self.max_retries}, base_url: {self.base_url}"
+            f"Using API Key: {masked_key}, Timeout: {self.timeout}, Max Retries: {self.max_retries}, base_url: {self.base_url}"
         )
 
     def _prepare_messages(
@@ -149,6 +150,40 @@ class InferenceClient:
         messages.append({"role": "user", "content": query})
         return messages
 
+    @staticmethod
+    def _describe_completion(completion: Any, error: Exception) -> str:
+        """Extract a diagnostic message from a malformed completion response.
+
+        Args:
+            completion: The completion object that failed to parse (may be None)
+            error: The original parsing exception, used as fallback description
+
+        Returns:
+            A human-readable description of what the response contained.
+        """
+        if completion is None:
+            return str(error)
+        try:
+            if not completion.choices:
+                return "(empty choices)"
+            return completion.choices[0].message.content or "(null content)"
+        except (IndexError, AttributeError):
+            return "(invalid completion structure)"
+
+    def _retry_backoff(self, attempt: int, reason: str) -> None:
+        """Sleep with exponential backoff plus jitter before the next retry.
+
+        Args:
+            attempt: Zero-based index of the attempt that just failed
+            reason: Short failure description included in the warning log
+        """
+        sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
+        logger.warning(
+            f"{reason} on attempt {attempt + 1}/{self.max_retries + 1}. "
+            f"Sleeping for {sleep_time:.2f}s."
+        )
+        time.sleep(sleep_time)
+
     def get_content(
         self,
         query: str,
@@ -159,7 +194,7 @@ class InferenceClient:
         top_p: float,
         top_k: int,
         enable_thinking: bool,
-    ) -> str | dict[str, str]:
+    ) -> str:
         """Fetch content from the OpenAI API with comprehensive retry logic.
 
         This method handles the core interaction with the OpenAI API, including
@@ -178,7 +213,10 @@ class InferenceClient:
             enable_thinking: Whether to enable the "thinking" feature
 
         Returns:
-            Union[str, Dict[str, str]]: Either the generated content string or an error dictionary
+            The generated content string. May be empty ("") when the model
+            produced no usable content (e.g. context length exceeded, or a
+            reasoning model exhausted max_tokens during the thinking phase);
+            callers treat an empty string as a failed sample.
 
         Raises:
             ClientError: If there's a non-retryable API issue or max retries exceeded
@@ -214,72 +252,61 @@ class InferenceClient:
             call_args["tool_choice"] = self.tool_choice
 
         # Make API call with exponential backoff retry logic
-        last_exception = None
+        last_exception: ClientError | None = None
         for attempt in range(self.max_retries + 1):
             completion = None
             try:
                 completion = self.client.chat.completions.create(**call_args)
-                result = completion.choices[0].message.content
-                return result
+                # Reasoning models may return content=None (thinking exhausted
+                # max_tokens); normalize to "" so callers can treat it uniformly
+                return completion.choices[0].message.content or ""
             except (IndexError, AttributeError) as e:
                 # Handle missing choices, message attributes in completion response
-                err_msg = ""
-                if completion is not None:
-                    try:
-                        err_msg = (
-                            completion.choices[0].message.content
-                            if completion.choices
-                            else "(empty choices)"
-                        )
-                    except (IndexError, AttributeError):
-                        err_msg = "(invalid completion structure)"
+                err_msg = self._describe_completion(completion, e)
+                last_exception = ClientError(err_msg, e)
                 if attempt < self.max_retries:
-                    sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
-                    logger.warning(
-                        f"{type(e).__name__} on attempt {attempt + 1}/{self.max_retries + 1}. "
-                        f"Sleeping for {sleep_time:.2f}s. Message: {err_msg}"
-                    )
-                    time.sleep(sleep_time)
-                    last_exception = ClientError(err_msg or str(e), e)
+                    self._retry_backoff(attempt, f"{type(e).__name__}: {err_msg}")
                 else:
-                    raise ClientError(
-                        f"Max retries exceeded: {err_msg or str(e)}", e
-                    ) from e
+                    raise ClientError(f"Max retries exceeded: {err_msg}", e) from e
             except (APIConnectionError, RateLimitError) as e:
                 # Handle retryable errors with exponential backoff
+                last_exception = ClientError(str(e), e)
                 if attempt < self.max_retries:
-                    sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
-                    logger.warning(
-                        f"{type(e).__name__} on attempt {attempt + 1}/{self.max_retries + 1}. "
-                        f"Sleeping for {sleep_time:.2f}s. Error: {e!s}"
-                    )
-                    time.sleep(sleep_time)
-                    last_exception = ClientError(str(e), e)
+                    self._retry_backoff(attempt, f"{type(e).__name__}: {e!s}")
                 else:
                     raise ClientError(f"Max retries exceeded: {e!s}", e) from e
             except APIError as e:
                 # Handle context length and other API errors
-                if "maximum context length" in e.message:
-                    logger.warning(f"Max context length exceeded: {e.message}")
+                err_message = getattr(e, "message", None) or str(e)
+                if "maximum context length" in err_message:
+                    logger.warning(f"Max context length exceeded: {err_message}")
                     return ""
-                logger.error(f"API error: {e.message}")
+                # 4xx 客户端错误（除 408/429）重试无意义，直接失败；
+                # 429 已由上面的 RateLimitError 分支处理
+                status_code = getattr(e, "status_code", None)
+                if (
+                    isinstance(status_code, int)
+                    and 400 <= status_code < 500
+                    and status_code != 408
+                ):
+                    raise ClientError(
+                        f"Non-retryable API error (status={status_code}): {err_message}",
+                        e,
+                    ) from e
+                logger.error(f"API error: {err_message}")
+                last_exception = ClientError(err_message, e)
                 if attempt < self.max_retries:
-                    sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
-                    time.sleep(sleep_time)
-                    last_exception = ClientError(e.message, e)
+                    self._retry_backoff(attempt, f"API error: {err_message}")
                 else:
-                    raise ClientError(e.message, e) from e
+                    raise ClientError(err_message, e) from e
             except Exception as e:
                 # Handle any other unexpected exceptions
                 logger.error(f"Unexpected error: {e!s}", exc_info=True)
+                last_exception = ClientError(str(e), e)
                 if attempt < self.max_retries:
-                    sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
-                    logger.warning(
-                        f"Unexpected error on attempt {attempt + 1}/{self.max_retries + 1}. "
-                        f"Sleeping for {sleep_time:.2f}s. Error: {e!s}"
+                    self._retry_backoff(
+                        attempt, f"Unexpected {type(e).__name__}: {e!s}"
                     )
-                    time.sleep(sleep_time)
-                    last_exception = ClientError(str(e), e)
                 else:
                     raise ClientError(
                         f"Max retries exceeded with unexpected error: {e!s}", e
@@ -538,6 +565,59 @@ class InferenceRunner:
                 logger.error(f"Error writing batch results: {e}")
                 raise OSError(f"Failed to write batch results: {e}") from e
 
+    def _extract_query(self, item: dict[str, Any]) -> str | None:
+        """Validate the item structure and extract the query text.
+
+        Updates failure/skip statistics when the item is unusable.
+
+        Args:
+            item: Raw data item (must be a dict with a prompt field)
+
+        Returns:
+            The query string, or None if the item is invalid (stats updated).
+        """
+        if not isinstance(item, dict):
+            logger.error(f"Invalid item type: {type(item)}, expected dict")
+            with self._stats_lock:
+                self._stats["failed"] += 1
+            return None
+
+        query = item.get(self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+        if not query:
+            logger.warning(f"Missing required query field in item: {item}")
+            with self._stats_lock:
+                self._stats["skipped"] += 1
+            return None
+        return query
+
+    def _build_result(
+        self, item: dict[str, Any], response: str
+    ) -> dict[str, Any] | None:
+        """Validate the API response and append it to the item's gen list.
+
+        Updates failure statistics when the response is unusable. The input
+        item is never mutated; a shallow copy with a fresh gen list is returned.
+
+        Args:
+            item: The source data item
+            response: Generated content; empty string means failure
+                (get_content normalizes null content from reasoning models to "")
+
+        Returns:
+            The result dict, or None if the response is empty (stats updated).
+        """
+        if not response.strip():
+            logger.warning("Empty response received")
+            with self._stats_lock:
+                self._stats["failed"] += 1
+            return None
+
+        result = item.copy()
+        gen_list = list(result.get(DEFAULT_RESPONSE_KEY, []))
+        gen_list.append(response)
+        result[DEFAULT_RESPONSE_KEY] = gen_list
+        return result
+
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
         """Process a single item through the complete inference pipeline.
 
@@ -560,39 +640,8 @@ class InferenceRunner:
             - Automatic retry logic for transient failures
             - Progress tracking and statistics collection
         """
-
-        def validate_input() -> str | None:
-            """Validate input and extract query."""
-            if not isinstance(item, dict):
-                logger.error(f"Invalid item type: {type(item)}, expected dict")
-                with self._stats_lock:
-                    self._stats["failed"] += 1
-                return None
-
-            query = item.get(self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
-            if not query:
-                logger.warning(f"Missing required query field in item: {item}")
-                with self._stats_lock:
-                    self._stats["skipped"] += 1
-                return None
-            return query
-
-        def process_response(response: str | dict[str, str]) -> dict[str, Any] | None:
-            """Process and validate API response."""
-            if isinstance(response, str) and not response.strip():
-                logger.warning("Empty response received")
-                with self._stats_lock:
-                    self._stats["failed"] += 1
-                return None
-
-            result = item.copy()
-            gen_list = list(result.get(DEFAULT_RESPONSE_KEY, []))
-            gen_list.append(response)
-            result[DEFAULT_RESPONSE_KEY] = gen_list
-            return result
-
         # Step 1: Input Validation
-        query = validate_input()
+        query = self._extract_query(item)
         if not query:
             return None
 
@@ -609,7 +658,7 @@ class InferenceRunner:
         )
 
         # Step 3: Response Processing
-        result = process_response(response)
+        result = self._build_result(item, response)
         if not result:
             return None
 
@@ -679,7 +728,11 @@ class InferenceRunner:
         if failed_tasks:
             logger.warning(f"Total failed tasks: {len(failed_tasks)}")
             # Optionally save failed tasks to a separate file for debugging
-            failed_tasks_file = self.args.output_file.replace(".jsonl", "_failed.jsonl")
+            # 注意不能用 output_file.replace(".jsonl", ...)：输出文件不带 .jsonl
+            # 后缀时 replace 为空操作，会以 "w" 模式截断结果文件
+            failed_tasks_file = (
+                os.path.splitext(self.args.output_file)[0] + "_failed.jsonl"
+            )
             try:
                 with open(failed_tasks_file, "w") as f:
                     for task in failed_tasks:
@@ -706,7 +759,7 @@ class InferenceRunner:
             ValueError: If configuration is invalid
             RuntimeError: For unrecoverable execution errors
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
 
         try:
             # Validate configuration
@@ -735,7 +788,7 @@ class InferenceRunner:
             self._process_concurrently(eval_dataset)
 
             # Generate final report
-            duration = time.time() - start_time
+            duration = time.perf_counter() - start_time
             success_rate = (self._stats["processed"] / max(total_samples, 1)) * 100
 
             logger.info("\n=== Execution Summary ===")
@@ -776,7 +829,7 @@ def main() -> None:
         SystemExit: If initialization fails or command line arguments are invalid
         Exception: For any unhandled errors during execution
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
     try:
         # Parse command line arguments into a strongly typed dataclass
         parser = HfArgumentParser(OnlineInferArguments)
@@ -794,7 +847,7 @@ def main() -> None:
         runner.run()
 
         # Log successful completion with execution time
-        total_time = time.time() - start_time
+        total_time = time.perf_counter() - start_time
         logger.info(f"✅ Inference completed successfully in {total_time:.2f} seconds")
 
     except KeyboardInterrupt:
