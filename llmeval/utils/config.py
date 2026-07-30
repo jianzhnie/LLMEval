@@ -257,9 +257,9 @@ class GenerationArguments:
             raise ValueError(
                 f"Repetition penalty must be non-negative, got: {self.repetition_penalty}"
             )
-        # Log generation mode for clarity
         if self.temperature <= 0.0:
-            logger.info("Generation mode: Greedy decoding (temperature=0)")
+            self.do_sample = False
+            logger.info("Greedy decoding: temperature=0 → do_sample=False")
 
 
 @dataclass
@@ -498,27 +498,16 @@ class OnlineInferArguments(
 
     This class combines all necessary arguments for online inference,
     inheriting from DataArguments, PromptArguments, GenerationArguments,
-    and ServerArguments. It includes special handling for greedy decoding
-    when temperature is set to 0.
+    and ServerArguments.
     """
 
     def __post_init__(self) -> None:
-        """
-        Validate all inherited arguments and handle greedy decoding.
-
-        When temperature is 0, automatically sets do_sample=False for greedy decoding behavior.
-        """
+        """Validate all inherited arguments."""
         # Only validate what online mode needs; no vLLM engine args
         DataArguments.__post_init__(self)
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)
         ServerArguments.__post_init__(self)
-
-        if self.temperature <= 0.0:
-            self.do_sample = False
-            logger.warning(
-                "Temperature is 0, setting do_sample=False for greedy decoding."
-            )
 
 
 @dataclass
@@ -530,26 +519,15 @@ class OfflineInferArguments(
 
     This class combines all necessary arguments for offline inference,
     inheriting from DataArguments, PromptArguments, GenerationArguments,
-    and VLLMEngineArguments. It includes special handling for greedy decoding
-    when temperature is set to 0.
+    and VLLMEngineArguments.
     """
 
     def __post_init__(self) -> None:
-        """
-        Validate all inherited arguments and handle greedy decoding.
-
-        When temperature is 0, automatically sets do_sample=False for greedy decoding behavior.
-        """
+        """Validate all inherited arguments."""
         DataArguments.__post_init__(self)
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)
         VLLMEngineArguments.__post_init__(self)
-
-        if self.temperature <= 0.0:
-            self.do_sample = False
-            logger.warning(
-                "Temperature is 0, setting do_sample=False for greedy decoding."
-            )
 
 
 @dataclass
@@ -594,9 +572,6 @@ class VerifierInferArguments(
         """
         Validate all inherited arguments and resolve verifier prompt.
 
-        When temperature is 0, automatically sets do_sample=False and top_p=1.0
-        for greedy decoding behavior.
-
         Raises:
             ValueError: If verifier_prompt_type is not found in VERIFY_PROMPT_FACTORY.
         """
@@ -604,12 +579,6 @@ class VerifierInferArguments(
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)
         VLLMEngineArguments.__post_init__(self)
-
-        if self.temperature <= 0.0:
-            self.do_sample = False
-            logger.warning(
-                "Temperature is 0, setting do_sample=False for greedy decoding."
-            )
 
         # Validate and resolve verifier prompt
         if (
@@ -642,8 +611,7 @@ class EvalTaskArguments:
     Attributes:
         input_path (str): Path to the input JSONL file containing evaluation data.
         task_name (str): Name of the evaluation task to run.
-            Must be one of: ['math_opensource/aime24', 'math_opensource/aime25',
-                           'livecodebench', 'ifeval']
+            See valid_tasks list for all supported task names.
         input_key (str): Key for input text in dataset.
         label_key (str): Key for target/label text in dataset.
         response_key (str): Key for model generated text.
@@ -660,7 +628,7 @@ class EvalTaskArguments:
     task_name: str = field(
         default="math_opensource/aime24",
         metadata={
-            "help": "Task must be in [math_opensource/aime24, math_opensource/aime25, livecodebench, ifeval]."
+            "help": "Evaluation task name (e.g. math_opensource/aime24). See code for full list."
         },
     )
     input_key: str = field(

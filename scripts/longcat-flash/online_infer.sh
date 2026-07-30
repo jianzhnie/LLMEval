@@ -36,14 +36,14 @@ MODEL_NAME="${MODEL_NAME:-longcat-flash}"
 API_KEY="${API_KEY:-EMPTY}"
 
 # =============================================================================
-# 推理参数
+# 推理参数 (全局默认值, 可被 benchmark 级覆盖)
 # =============================================================================
-N_SAMPLES="${N_SAMPLES:-32}"            # 每题重复采样数 (aime pass@N 需要大样本)
-MAX_WORKERS="${MAX_WORKERS:-32}"         # 客户端并发数
-TEMPERATURE="${TEMPERATURE:-0.6}"
+N_SAMPLES="${N_SAMPLES:-32}"              # pass@N 默认采样数
+MAX_WORKERS="${MAX_WORKERS:-32}"
+TEMPERATURE="${TEMPERATURE:-0.6}"          # pass@N 默认温度
 TOP_P="${TOP_P:-0.95}"
-MAX_TOKENS="${MAX_TOKENS:-32768}"        # 长上下文推理上限 (给 chain-of-thought 留足空间)
-REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-60000}" # 单请求超时 (秒), 长 CoT 可能很久
+MAX_TOKENS="${MAX_TOKENS:-32768}"
+REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-60000}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
 SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-empty}"
 
@@ -81,7 +81,8 @@ declare -A BM_INPUT=(
     [aime25]="./data/aime25.jsonl"
     [aime26]="./data/aime26.jsonl"
 )
-# 每 benchmark 采样数 (空 = 用全局 N_SAMPLES)
+# 每 benchmark 采样数 + 温度 (空 = 用全局默认)
+# pass@1: temp=0 (贪婪解码, 确定性); pass@N: temp=0.6 (多样性采样)
 declare -A BM_SAMPLES=(
     [gsm8k]="1"
     [math500]="1"
@@ -90,6 +91,10 @@ declare -A BM_SAMPLES=(
     [aime24]="$N_SAMPLES"
     [aime25]="$N_SAMPLES"
     [aime26]="$N_SAMPLES"
+)
+declare -A BM_TEMP=(
+    [gsm8k]="0"
+    [math500]="0"
 )
 
 # =============================================================================
@@ -127,13 +132,13 @@ run_infer() {
     local input_file="$2"
     local output_file="$3"
     local n_samples="$4"
+    local temperature="$5"
 
     echo ""
     echo "----------------------------------------"
-    echo "[INFO] 开始推理: $bm"
+    echo "[INFO] 开始推理: $bm (temp=$temperature, n=$n_samples)"
     echo "[INFO] 输入:   $input_file"
     echo "[INFO] 输出:   $output_file"
-    echo "[INFO] 采样数: $n_samples"
     echo "----------------------------------------"
 
     if python llmeval/vllm/online_server.py \
@@ -143,7 +148,7 @@ run_infer() {
         --base_url "$BASE_URL" \
         --model_name "$MODEL_NAME" \
         --n_samples "$n_samples" \
-        --temperature "$TEMPERATURE" \
+        --temperature "$temperature" \
         --top_p "$TOP_P" \
         --max_tokens "$MAX_TOKENS" \
         --max_workers "$MAX_WORKERS" \
@@ -171,16 +176,17 @@ for bm in $BENCHMARKS; do
     fi
 
     n_samples="${BM_SAMPLES[$bm]:-$N_SAMPLES}"
+    temperature="${BM_TEMP[$bm]:-$TEMPERATURE}"
     output_file="${OUTPUT_DIR}/${bm}_bz${n_samples}.jsonl"
     TASK_NAMES+=("$bm")
 
     if [[ "$PARALLEL" == "1" ]]; then
         # 并行: 所有 benchmark 同时启动，共享服务端并发
-        run_infer "$bm" "$input_file" "$output_file" "$n_samples" &
+        run_infer "$bm" "$input_file" "$output_file" "$n_samples" "$temperature" &
         TASK_PIDS+=($!)
     else
         # 串行: 顺序执行
-        run_infer "$bm" "$input_file" "$output_file" "$n_samples" || true
+        run_infer "$bm" "$input_file" "$output_file" "$n_samples" "$temperature" || true
     fi
 done
 

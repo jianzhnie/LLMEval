@@ -69,8 +69,12 @@ class TestGenerationArguments:
 
     def test_zero_temperature_sets_greedy(self) -> None:
         args = GenerationArguments(temperature=0.0)
-        assert args.do_sample is True  # GenerationArguments doesn't override
-        # Only the combined classes (Online/Offline) override do_sample
+        assert args.do_sample is False  # temperature=0 → greedy decoding
+        assert args.temperature == 0.0
+
+    def test_positive_temperature_keeps_sampling(self) -> None:
+        args = GenerationArguments(temperature=0.6)
+        assert args.do_sample is True  # temperature>0 → sampling
 
 
 class TestVLLMEngineArguments:
