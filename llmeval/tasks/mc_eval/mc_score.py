@@ -12,6 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from llmeval.utils.logger import init_logger
+
+logger = init_logger("mc_score")
+
 
 @dataclass
 class MCScoreResult:
@@ -53,6 +57,7 @@ def _compute_loglikelihood_metrics(
     correct_norm = 0
     total = 0
     per_item: list[dict] = []
+    warned_no_choices = False
 
     for item in eval_dataset:
         total += 1
@@ -60,7 +65,8 @@ def _compute_loglikelihood_metrics(
         logprobs = item.get("logprobs", [])
         choices = item.get("choices", []) or item.get("choice_texts", [])
 
-        if not logprobs or gold < 0:
+        # 全 -inf 是推理失败的产物（不应出现于此，防御性按错误处理）
+        if not logprobs or gold < 0 or all(lp == float("-inf") for lp in logprobs):
             per_item.append(
                 {"gold": gold, "pred": -1, "correct": False, "correct_norm": False}
             )
@@ -79,6 +85,12 @@ def _compute_loglikelihood_metrics(
             pred_norm = _argmax(norm_lp)
             is_correct_norm = pred_norm == gold
         else:
+            if not choices and not warned_no_choices:
+                logger.warning(
+                    "Items have no 'choices' field; acc_norm falls back to acc. "
+                    "(mc_infer >= 2026-07-30 writes choices into results)"
+                )
+                warned_no_choices = True
             is_correct_norm = is_correct
         if is_correct_norm:
             correct_norm += 1
@@ -127,7 +139,8 @@ def score_generate(
         pred_text = str(gen_list[0]) if gen_list else ""
 
         pred = _extract_answer(pred_text)
-        is_correct = pred == gold
+        # 空 gold 或空 pred 不能判对：两者皆空时 == 成立会虚增准确率
+        is_correct = bool(gold) and bool(pred) and pred == gold
         if is_correct:
             correct += 1
 

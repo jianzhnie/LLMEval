@@ -10,6 +10,7 @@ from llmeval.utils.config import (
     DataArguments,
     EvalTaskArguments,
     GenerationArguments,
+    MCInferConfig,
     PromptArguments,
     ServerArguments,
     VLLMEngineArguments,
@@ -112,6 +113,43 @@ class TestServerArguments:
             ServerArguments(max_workers=0)
 
 
+class TestMCInferConfig:
+    def test_defaults_valid(self) -> None:
+        args = MCInferConfig()
+        assert args.mode == "loglikelihood"
+        assert args.max_workers > 0
+        assert args.n_shot == 0
+
+    def test_api_key_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-mc-test")
+        assert MCInferConfig().api_key == "sk-mc-test"
+
+    def test_api_key_default_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        assert MCInferConfig().api_key == "EMPTY"
+
+    def test_invalid_mode_raises(self) -> None:
+        with pytest.raises(ValueError, match="mode"):
+            MCInferConfig(mode="bogus")
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"max_workers": 0},
+            {"request_timeout": -1},
+            {"max_retries": -1},
+            {"max_tokens": 0},
+            {"temperature": 2.1},
+            {"n_shot": -1},
+            {"base_url": "  "},
+            {"model_name": ""},
+        ],
+    )
+    def test_invalid_values_raise(self, kwargs: dict) -> None:
+        with pytest.raises(ValueError):
+            MCInferConfig(**kwargs)
+
+
 class TestEvalTaskArguments:
     def test_valid_task_names(self, tmp_path: Path) -> None:
         input_f = tmp_path / "data.jsonl"
@@ -133,6 +171,3 @@ class TestEvalTaskArguments:
     def test_missing_input_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="does not exist"):
             EvalTaskArguments(input_path=str(tmp_path / "nope.jsonl"))
-
-
-import pytest

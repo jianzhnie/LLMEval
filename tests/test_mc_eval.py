@@ -7,7 +7,9 @@ import sys
 import tempfile
 import types
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 # ── Mock heavy dependencies ──
 for mod_name in ("openai", "httpx"):
@@ -21,7 +23,6 @@ for _exc in ("APIConnectionError", "APIError", "RateLimitError"):
         setattr(_openai_mod, _exc, type(_exc, (Exception,), {}))
 
 # mc_infer imports HfArgumentParser/tqdm at module level; stub if absent
-from unittest.mock import MagicMock
 
 if "transformers" not in sys.modules:
     _tf = types.ModuleType("transformers")
@@ -292,3 +293,223 @@ class TestArgmax:
         assert _argmax([1.0, 3.0, 2.0]) == 1
         assert _argmax([5.0]) == 0
         assert _argmax([-1.0, -0.5, -2.0]) == 1
+
+
+# ===========================================================================
+# mc_infer runner/client tests (offline, mocked API)
+# ===========================================================================
+
+
+def _make_api_error(message: str = "", status_code: int | None = None) -> Exception:
+    """Build an APIError instance compatible with the (possibly stubbed) openai module."""
+    cls = sys.modules["openai"].APIError
+    err = cls.__new__(cls)
+    Exception.__init__(err, message)
+    err.message = message
+    err.status_code = status_code
+    return err
+
+
+def _fake_logprob_resp(token_lps_list: list[list[float | None]]) -> MagicMock:
+    """Completions response whose choices carry the given token_logprobs."""
+    resp = MagicMock()
+    choices = []
+    for lps in token_lps_list:
+        choice = MagicMock()
+        choice.logprobs.token_logprobs = lps
+        choices.append(choice)
+    resp.choices = choices
+    return resp
+
+
+def _make_ll_client(max_retries: int = 0):
+    """MCLoglikelihoodClient bypassing __init__ (works with stubbed openai)."""
+    from llmeval.tasks.mc_eval.mc_infer import MCLoglikelihoodClient
+
+    client = MCLoglikelihoodClient.__new__(MCLoglikelihoodClient)
+    client.model_name = "m"
+    client.timeout = 5
+    client.max_retries = max_retries
+    client.client = MagicMock()
+    return client
+
+
+def _make_mc_runner(tmp_path: Path, mode: str = "loglikelihood", max_retries: int = 0):
+    """MCRunner bypassing __init__ (no client construction)."""
+    import threading as _threading
+
+    from llmeval.tasks.mc_eval.mc_infer import MCRunner
+    from llmeval.utils.config import MCInferConfig
+
+    runner = MCRunner.__new__(MCRunner)
+    runner.config = MCInferConfig(
+        input_file=str(tmp_path / "in.jsonl"),
+        output_file=str(tmp_path / "out.jsonl"),
+        mode=mode,
+        max_retries=max_retries,
+        max_workers=1,
+    )
+    runner.client = None
+    runner.system_prompt = None
+    runner._few_shot_fmt = None
+    runner._file_lock = _threading.Lock()
+    runner._stats_lock = _threading.Lock()
+    runner._stats = {"processed": 0, "failed": 0, "correct": 0, "skipped": 0}
+    return runner
+
+
+class TestMCLoglikelihoodClient:
+    def test_batched_single_request_and_trailing_token_sliced(self) -> None:
+        client = _make_ll_client()
+        # [first(None), choice tokens..., trailing generated token]
+        client.client.completions.create.return_value = _fake_logprob_resp(
+            [[None, -1.0, -2.0, -9.9], [None, -0.5, -9.9]]
+        )
+        result = client.get_choices_logprobs("prompt", ["A", "B"])
+        assert result == [-3.0, -0.5]  # trailing -9.9 sliced off
+        # one batched request carrying both choice prompts
+        client.client.completions.create.assert_called_once()
+        prompt_arg = client.client.completions.create.call_args.kwargs["prompt"]
+        assert prompt_arg == ["prompt A", "prompt B"]
+
+    def test_4xx_aborts_without_retry(self) -> None:
+        client = _make_ll_client(max_retries=3)
+        client.client.completions.create.side_effect = _make_api_error("bad", 400)
+        result = client.get_choices_logprobs("p", ["a", "b"])
+        assert result == [float("-inf"), float("-inf")]
+        assert client.client.completions.create.call_count == 1
+
+    def test_total_failure_returns_all_neg_inf(self) -> None:
+        client = _make_ll_client(max_retries=0)
+        client.client.completions.create.side_effect = RuntimeError("down")
+        assert client.get_choices_logprobs("p", ["a"]) == [float("-inf")]
+
+    def test_choice_count_mismatch_retries_to_neg_inf(self) -> None:
+        client = _make_ll_client(max_retries=0)
+        client.client.completions.create.return_value = _fake_logprob_resp(
+            [[None, -1.0]]
+        )
+        assert client.get_choices_logprobs("p", ["a", "b"]) == [float("-inf")] * 2
+
+
+class TestProcessLoglikelihoodItem:
+    def test_all_neg_inf_raises(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.client = MagicMock()
+        runner.client.get_choices_logprobs.return_value = [float("-inf")] * 2
+        item = {"prompt": "q", "choices": ["a", "b"], "gold": 1}
+        with pytest.raises(RuntimeError, match="failed for all choices"):
+            runner.process_loglikelihood_item(item)
+
+    def test_normal_pred_and_correct(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.client = MagicMock()
+        runner.client.get_choices_logprobs.return_value = [-5.0, -1.0]
+        item = {"prompt": "q", "choices": ["a", "b"], "gold": 1}
+        result = runner.process_loglikelihood_item(item)
+        assert result["pred"] == 1 and result["correct"] is True
+
+    def test_no_choices_returns_none(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        assert runner.process_loglikelihood_item({"prompt": "q"}) is None
+
+
+class TestProcessGenerateItem:
+    def test_success(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices[0].message.content = "ans"
+        result = runner.process_generate_item(
+            {"prompt": "q", "answer": "A"}, client, []
+        )
+        assert result["gen"] == ["ans"]
+
+    def test_null_content_raises(self, tmp_path: Path) -> None:
+        """Null/empty generation must raise (not write an empty gen)."""
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices[0].message.content = None
+        with pytest.raises(RuntimeError, match="no usable text"):
+            runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
+
+    def test_persistent_error_raises_after_retries(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate", max_retries=0)
+        client = MagicMock()
+        client.chat.completions.create.side_effect = RuntimeError("down")
+        with pytest.raises(RuntimeError):
+            runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
+
+
+class TestMCRunnerEndToEnd:
+    """Full run() pipeline with a fake loglikelihood client."""
+
+    def _write_input(self, path: Path) -> None:
+        items = [
+            {"prompt": "Q1?\nA. x\nB. y\nAnswer:", "choices": ["x", "y"], "gold": 1},
+            {"prompt": "Q2?\nA. p\nB. q\nAnswer:", "choices": ["p", "q"], "gold": 0},
+        ]
+        with open(path, "w", encoding="utf-8") as f:
+            for it in items:
+                f.write(json.dumps(it, ensure_ascii=False) + "\n")
+
+    def test_run_and_resume(self, tmp_path: Path) -> None:
+        from llmeval.tasks.mc_eval import mc_infer
+        from llmeval.tasks.mc_eval.mc_infer import MCRunner
+        from llmeval.utils.config import MCInferConfig
+
+        class FakeLLClient:
+            def __init__(self, **kwargs):
+                pass
+
+            def get_choices_logprobs(self, prompt, choice_texts):
+                return [-1.0 if i == 1 else -5.0 for i in range(len(choice_texts))]
+
+        inp = tmp_path / "in.jsonl"
+        out = tmp_path / "out.jsonl"
+        self._write_input(inp)
+        cfg = MCInferConfig(
+            input_file=str(inp),
+            output_file=str(out),
+            mode="loglikelihood",
+            max_workers=2,
+        )
+        with patch.object(mc_infer, "MCLoglikelihoodClient", FakeLLClient):
+            MCRunner(cfg).run()
+        rows = [json.loads(x) for x in out.read_text().splitlines()]
+        assert len(rows) == 2
+        by_pred = {r["prompt"][:2]: r for r in rows}
+        assert by_pred["Q1"]["pred"] == 1 and by_pred["Q1"]["correct"] is True
+        assert by_pred["Q2"]["pred"] == 1 and by_pred["Q2"]["correct"] is False
+
+        # Resume: second run must not duplicate
+        with patch.object(mc_infer, "MCLoglikelihoodClient", FakeLLClient):
+            MCRunner(cfg).run()
+        assert len(out.read_text().strip().split("\n")) == 2
+
+    def test_failed_items_dumped_not_written(self, tmp_path: Path) -> None:
+        from llmeval.tasks.mc_eval import mc_infer
+        from llmeval.tasks.mc_eval.mc_infer import MCRunner
+        from llmeval.utils.config import MCInferConfig
+
+        class FailLLClient:
+            def __init__(self, **kwargs):
+                pass
+
+            def get_choices_logprobs(self, prompt, choice_texts):
+                return [float("-inf")] * len(choice_texts)
+
+        inp = tmp_path / "in.jsonl"
+        out = tmp_path / "out.jsonl"
+        self._write_input(inp)
+        cfg = MCInferConfig(
+            input_file=str(inp),
+            output_file=str(out),
+            mode="loglikelihood",
+            max_workers=2,
+        )
+        with patch.object(mc_infer, "MCLoglikelihoodClient", FailLLClient):
+            MCRunner(cfg).run()
+        assert not out.exists()  # nothing scored
+        failed = tmp_path / "out_failed.jsonl"
+        assert failed.exists()
+        assert len(failed.read_text().strip().split("\n")) == 2
