@@ -73,7 +73,8 @@ class FewShotFormatter:
         self.n_shot = n_shot
         self.few_shot_file = few_shot_file
         self.seed = seed
-        self._examples: list[str] = []
+        self._few_shot_pool: list[dict] = []
+        self._all_formatted: list[str] = []
 
     def load(self, input_file: str) -> str:
         """Load few-shot examples and return the formatted prefix string."""
@@ -92,12 +93,29 @@ class FewShotFormatter:
             return ""
 
         rng = random.Random(self.seed)
-        selected = rng.sample(items, self.n_shot)
-        # lm-eval format: "\n\n".join(doc_to_text+doc_to_target for each demo)
-        self._examples = [self._format_demo(it) for it in selected]
-        prefix = "\n\n".join(self._examples) + "\n\n"
+        # Sample n_shot+1: extra for dedup (lm-eval style)
+        selected = rng.sample(items, min(self.n_shot + 1, len(items)))
+        self._few_shot_pool = selected  # store for per-item dedup
+        self._all_formatted = [self._format_demo(it) for it in selected]
         logger.info(f"Loaded {self.n_shot} few-shot examples (seed={self.seed})")
-        return prefix
+        return ""  # prefix built per-item for dedup
+
+    def get_prefix(self, test_prompt: str) -> str:
+        """Get few-shot prefix, excluding any demo matching test_prompt (lm-eval dedup)."""
+        if self.n_shot <= 0:
+            return ""
+
+        # Filter out the test doc if it appears in few-shot pool
+        demos = self._all_formatted
+        if test_prompt:
+            demos = [
+                d
+                for i, d in enumerate(demos)
+                if self._few_shot_pool[i].get("prompt", "") != test_prompt
+            ]
+        demos = demos[: self.n_shot]  # trim to n_shot
+
+        return "\n\n".join(demos) + "\n\n" if demos else ""
 
     @staticmethod
     def _format_demo(item: dict) -> str:
@@ -158,10 +176,10 @@ class MCLoglikelihoodClient:
                 resp = self.client.completions.create(
                     model=self.model_name,
                     prompt=full_text,
-                    max_tokens=1,      # minimal: only need logprobs, not generation
-                    temperature=0,      # deterministic for logprob computation
-                    logprobs=1,         # only need top-1 token logprob per position
-                    echo=True,          # return logprobs for all prompt tokens
+                    max_tokens=1,  # minimal: only need logprobs, not generation
+                    temperature=0,  # deterministic for logprob computation
+                    logprobs=1,  # only need top-1 token logprob per position
+                    echo=True,  # return logprobs for all prompt tokens
                     timeout=self.timeout,
                 )
                 logprob_data = resp.choices[0].logprobs
@@ -220,11 +238,11 @@ class MCRunner:
                     f"Unknown system_prompt_type: {config.system_prompt_type}"
                 )
 
-        # Few-shot prefix
-        self._few_shot_prefix = ""
+        # Few-shot formatter (per-item dedup)
+        self._few_shot_fmt: FewShotFormatter | None = None
         if config.n_shot > 0:
-            fmt = FewShotFormatter(config.n_shot, config.few_shot_file)
-            self._few_shot_prefix = fmt.load(config.input_file)
+            self._few_shot_fmt = FewShotFormatter(config.n_shot, config.few_shot_file)
+            self._few_shot_fmt.load(config.input_file)
 
     # ------------------------------------------------------------------
     # Resume
@@ -305,7 +323,12 @@ class MCRunner:
         self, item: dict[str, Any]
     ) -> dict[str, Any] | None:
         """Process a single MC item via loglikelihood comparison."""
-        prompt = self._few_shot_prefix + item.get("prompt", "")
+        fs_prefix = (
+            self._few_shot_fmt.get_prefix(item.get("prompt", ""))
+            if self._few_shot_fmt
+            else ""
+        )
+        prompt = fs_prefix + item.get("prompt", "")
         choices = item.get("choices", [])
         gold = item.get("gold", -1)
 
@@ -380,7 +403,12 @@ class MCRunner:
         base_messages: list[dict[str, str]],
     ) -> dict[str, Any] | None:
         """Process a single MC item via text generation."""
-        prompt = self._few_shot_prefix + item.get("prompt", "")
+        fs_prefix = (
+            self._few_shot_fmt.get_prefix(item.get("prompt", ""))
+            if self._few_shot_fmt
+            else ""
+        )
+        prompt = fs_prefix + item.get("prompt", "")
         gold = item.get("answer", "")
         messages = [*base_messages, {"role": "user", "content": prompt}]
 

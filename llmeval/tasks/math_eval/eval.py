@@ -32,7 +32,10 @@ from typing import Any
 from transformers import HfArgumentParser
 
 from llmeval.tasks.math_eval.math_score import compute_scores
-from llmeval.tasks.mc_eval.mc_score import score_generate, score_loglikelihood
+from llmeval.tasks.mc_eval.mc_score import (
+    score_generate,
+    score_loglikelihood,
+)
 from llmeval.utils.config import EvalTaskArguments
 from llmeval.utils.logger import init_logger
 
@@ -216,7 +219,9 @@ def evaluate_task(
         sample = eval_dataset[0] if eval_dataset else {}
         if "logprobs" in sample:
             accuracy = score_loglikelihood(eval_dataset, cache_path)
-            logger.info(f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}")
+            logger.info(
+                f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}"
+            )
         else:
             accuracy = score_generate(eval_dataset, label_key, response_key, cache_path)
             logger.info(f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}")
@@ -278,7 +283,9 @@ def main() -> int:
                 processed_data = [{**item, "task": args.task_name} for item in data]
             else:
                 processed_data = [
-                    _process_item(item, args.task_name, args.label_key, args.response_key)
+                    _process_item(
+                        item, args.task_name, args.label_key, args.response_key
+                    )
                     for item in data
                 ]
         except (ValueError, TypeError) as e:

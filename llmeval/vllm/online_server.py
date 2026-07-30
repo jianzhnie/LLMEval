@@ -68,7 +68,13 @@ class InferenceClient:
         base_url (str): Base URL for the OpenAI-compatible API
     """
 
-    def __init__(self, base_url: str, timeout: int, max_retries: int = 3, tool_choice: str = "none") -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: int,
+        max_retries: int = 3,
+        tool_choice: str = "none",
+    ) -> None:
         """Initialize the inference client with API configuration and validation.
 
         Creates a new OpenAI client instance configured with the provided base URL

@@ -4,6 +4,7 @@
 Downloads from HuggingFace and converts to the unified schema.
 Supported benchmarks: gsm8k, math500, hmmt25, gpqa_diamond, hle_full, aime24, aime25.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,7 +25,13 @@ BENCHMARKS: dict[str, tuple[str, str | None, str, str, str]] = {
     "gsm8k": ("openai/gsm8k", "main", "test", "question", "answer"),
     "math500": ("HuggingFaceH4/MATH-500", None, "test", "problem", "answer"),
     "hmmt25": ("MathArena/hmmt_feb_2025", None, "train", "problem", "answer"),
-    "gpqa_diamond": ("lightonai/gpqa_diamond_multilingual", None, "en", "problem", "solution"),
+    "gpqa_diamond": (
+        "lightonai/gpqa_diamond_multilingual",
+        None,
+        "en",
+        "problem",
+        "solution",
+    ),
     "aime26": ("math-ai/aime26", "default", "test", "problem", "answer"),
     # HLE-Full: gated dataset, requires HF_TOKEN. Access: cais/hle
     # "hle_full": ("cais/hle", None, "test", "question", "answer"),
@@ -75,7 +82,9 @@ def prepare_benchmark(name: str, output_dir: Path) -> str:
     output_file = output_dir / f"{name}.jsonl"
 
     if output_file.exists():
-        print(f"[SKIP] {name}: {output_file} already exists ({output_file.stat().st_size} bytes)")
+        print(
+            f"[SKIP] {name}: {output_file} already exists ({output_file.stat().st_size} bytes)"
+        )
         return str(output_file)
 
     print(f"[LOAD] {name}: {hf_path} (config={hf_config}, split={hf_split})")
@@ -113,7 +122,9 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
     if configs == "all":
         # Load all subject configs
         all_configs = get_dataset_config_names(hf_path)
-        subject_configs = [c for c in all_configs if c not in ("all", "auxiliary_train")]
+        subject_configs = [
+            c for c in all_configs if c not in ("all", "auxiliary_train")
+        ]
         print(f"[LOAD] {name}: {hf_path} ({len(subject_configs)} subjects)")
         for cfg in subject_configs:
             try:
@@ -129,6 +140,7 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
             all_rows.append(_format_mc_row(name, ex))
 
     import json
+
     with open(output_file, "w", encoding="utf-8") as f:
         for row in all_rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -150,7 +162,11 @@ def _format_mc_row(name: str, example: dict) -> dict:
 
     if name == "mmlu":
         choices = example["choices"]
-        answer_idx = example["answer"] if isinstance(example["answer"], int) else int(example["answer"])
+        answer_idx = (
+            example["answer"]
+            if isinstance(example["answer"], int)
+            else int(example["answer"])
+        )
         answer = letters[answer_idx]
         fmt = {"question": example["question"]}
         for i, c in enumerate(choices):
@@ -163,7 +179,9 @@ def _format_mc_row(name: str, example: dict) -> dict:
             answer = letters[answer_idx]
         else:
             raw = example.get("answer", "")
-            answer = raw if raw in letters else letters[int(raw)] if raw.isdigit() else raw
+            answer = (
+                raw if raw in letters else letters[int(raw)] if raw.isdigit() else raw
+            )
             answer_idx = letters.index(answer) if answer in letters else -1
         fmt = {"question": example["question"]}
         for i, c in enumerate(choices):
@@ -175,8 +193,10 @@ def _format_mc_row(name: str, example: dict) -> dict:
         answer_idx = letters.index(answer) if answer in letters else -1
         fmt = {
             "question": example["question"],
-            "A": example["A"], "B": example["B"],
-            "C": example["C"], "D": example["D"],
+            "A": example["A"],
+            "B": example["B"],
+            "C": example["C"],
+            "D": example["D"],
         }
 
     else:
@@ -196,16 +216,21 @@ def main() -> None:
         description="Prepare benchmark data from HuggingFace or local files"
     )
     parser.add_argument(
-        "--benchmarks", nargs="*", default=[],
-        help=f"Math benchmarks to prepare. Available: {list(BENCHMARKS)}"
+        "--benchmarks",
+        nargs="*",
+        default=[],
+        help=f"Math benchmarks to prepare. Available: {list(BENCHMARKS)}",
     )
     parser.add_argument(
-        "--mc_benchmarks", nargs="+", default=[],
-        help=f"MC benchmarks to prepare. Available: {list(MC_BENCHMARKS)}"
+        "--mc_benchmarks",
+        nargs="+",
+        default=[],
+        help=f"MC benchmarks to prepare. Available: {list(MC_BENCHMARKS)}",
     )
     parser.add_argument(
-        "--output_dir", default="./data",
-        help="Output directory for JSONL files (default: ./data)"
+        "--output_dir",
+        default="./data",
+        help="Output directory for JSONL files (default: ./data)",
     )
     args = parser.parse_args()
 
@@ -221,13 +246,16 @@ def main() -> None:
             prepare_mc_benchmark(bm, output_dir)
 
     if not any(args.benchmarks) and not any(args.mc_benchmarks):
-        print("[INFO] No benchmarks specified. Use --benchmarks for math, --mc_benchmarks for MC.")
+        print(
+            "[INFO] No benchmarks specified. Use --benchmarks for math, --mc_benchmarks for MC."
+        )
 
     print("\n[DONE] All benchmarks prepared.")
 
     # Print summary
     print("\n--- Data files ---")
     import os
+
     for f in sorted(output_dir.glob("*.jsonl")):
         lines = 0
         with open(f) as fh:
