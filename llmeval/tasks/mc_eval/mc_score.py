@@ -139,8 +139,7 @@ def score_loglikelihood(
     """
     if any(not get_choices(item) for item in eval_dataset):
         logger.warning(
-            "Some items have no 'choices' field — acc_norm will fall back "
-            "to acc.  (mc_infer >= 2026-07-30 writes choices into results.)"
+            "Some items have no 'choices' field — acc_norm will fall back to acc."
         )
 
     records = _score_items(

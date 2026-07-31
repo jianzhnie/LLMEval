@@ -25,29 +25,15 @@ from llmeval.utils.logger import init_logger
 # Configure a dedicated logger for the math scoring module
 logger = init_logger("math_score")
 
-# Define package requirements for better dependency management
-REQUIRED_PACKAGES = {
-    "math-verify": "math-verify>=1.0.0",
-    "pebble": "pebble>=4.6.3",
-    "tqdm": "tqdm>=4.65.0",
-}
-# Attempt to import necessary components from math-verify.
-# Provides helpful error messages if dependencies are missing.
 try:
     from math_verify.metric import math_metric
     from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 except ImportError as e:
-    logger.error(
+    raise ImportError(
         f"Missing required dependency: {e}\n"
-        f"To use Math-Verify, install required packages:\n"
-        f"pip install {' '.join(REQUIRED_PACKAGES.values())}"
-    )
-    import sys
-
-    sys.exit(1)
-
-# Type alias for complex return type
-ProcessResult = tuple[int, float, str | None, str | None] | None
+        "To use Math-Verify, install:  "
+        "pip install math-verify>=1.0.0 pebble>=4.6.3 tqdm>=4.65.0"
+    ) from e
 
 
 @dataclass
@@ -75,7 +61,9 @@ class ProcessingStats:
         return (self.error / self.total * 100) if self.total > 0 else 0.0
 
 
-def process_answers(args: tuple[int, dict[str, Any], str, str]) -> ProcessResult:
+def process_answers(
+    args: tuple[int, dict[str, Any], str, str],
+) -> tuple[int, float, str | None, str | None] | None:
     """
     Process a single model output by extracting and comparing with ground truth.
 

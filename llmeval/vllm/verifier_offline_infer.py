@@ -16,7 +16,7 @@ import os
 import re
 import sys
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -214,7 +214,7 @@ def process_judgment_cursor(judgment_str: str) -> str:
 
 # Map verifier prompt types to their judgment extraction functions.
 # When adding a new prompt type to VERIFY_PROMPT_FACTORY, add its entry here too.
-JUDGMENT_EXTRACTOR: dict[str, type] = {
+JUDGMENT_EXTRACTOR: dict[str, Callable[[str], str]] = {
     "fdd_prompt_cursor": process_judgment_cursor,
     "fdd_prompt": process_judgment_cursor,
     "compassverify_prompt": process_judgment,

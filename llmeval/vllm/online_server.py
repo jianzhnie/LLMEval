@@ -75,7 +75,6 @@ class InferenceClient:
 
         Raises:
             ValueError: If timeout is invalid (<=0) or base_url is empty
-            EnvironmentError: If OPENAI_API_KEY environment variable is not set
         """
         self.base_url: str = base_url  # Store for potential reconnection
         self.timeout: int = timeout
