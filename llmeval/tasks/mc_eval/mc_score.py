@@ -44,17 +44,18 @@ from tqdm import tqdm
 from llmeval.utils.logger import init_logger
 
 __all__ = [
-    "MCScoreResult",
-    "score_generate",
-    "score_loglikelihood",
-    # Semi-public utilities — used by tests and eval.py.
+    # Semi-public utilities
     "argmax",
     "build_result",
     "compute_loglikelihood_metrics",
     "extract_answer",
     "failure_record",
     "get_choices",
+    # Public API
+    "MCScoreResult",
     "parse_gold",
+    "score_generate",
+    "score_loglikelihood",
     "write_cache",
 ]
 
@@ -69,6 +70,7 @@ _ANSWER_MARKER_RE: re.Pattern[str] = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 _LAST_LETTER_RE: re.Pattern[str] = re.compile(r"\b([A-Ja-j])\b")
+
 
 @dataclass
 class MCScoreResult:
@@ -384,7 +386,7 @@ def _score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     # acc_norm — length-normalised logprobs (lm-eval convention).
     if choices and len(choices) == len(logprobs):
         choice_lens = [max(len(str(c)), 1) for c in choices]
-        normed = [lp / cl for lp, cl in zip(logprobs, choice_lens)]
+        normed = [lp / cl for lp, cl in zip(logprobs, choice_lens, strict=False)]
         is_correct_norm = argmax(normed) == gold
     else:
         is_correct_norm = is_correct
@@ -521,7 +523,7 @@ def extract_answer(text: str) -> str:
 
     Strategy (aligned with lm-evaluation-harness conventions)
     ----------------------------------------------------------
-    1. **Marker match** — look for an explicit ``Answer: X`` or ``答案：X``
+    1. **Marker match** — look for an explicit ``Answer: X`` or ``答案: X``
        token at the **end** of a line (``re.MULTILINE``, ``$`` anchor).
        Returns the **first** such match.
     2. **Fallback** — find the **last** standalone letter ``A``-``J``

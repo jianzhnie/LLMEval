@@ -619,9 +619,7 @@ class InferenceRunner:
         skipped_items: int = 0
 
         for item in raw_data:
-            prompt_val: Any = item.get(self.args.input_key) or item.get(
-                "prompt"
-            )
+            prompt_val: Any = item.get(self.args.input_key) or item.get("prompt")
             prompt: str = str(prompt_val) if prompt_val is not None else ""
 
             if not prompt.strip():
@@ -891,14 +889,13 @@ class InferenceRunner:
                             self._stats["failed"] += len(group)
                         sample = group[0]
                         prompt_val = (
-                            sample.get(self.args.input_key)
-                            or sample.get("prompt")
+                            sample.get(self.args.input_key, "") or sample.get("prompt")
                             if isinstance(sample, dict)
                             else None
                         )
                         failed_tasks.append(
                             {
-                                "prompt": (
+                                self.args.input_key: (
                                     str(prompt_val)[:200]
                                     if prompt_val is not None
                                     else None

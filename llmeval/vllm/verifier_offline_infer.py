@@ -576,9 +576,7 @@ class VerifierOfflineInferenceRunner:
                 for line_num, line in enumerate(f, 1):
                     try:
                         item = json.loads(line.strip())
-                        prompt_key = item.get(self.args.input_key) or item.get(
-                            "prompt"
-                        )
+                        prompt_key = item.get(self.args.input_key) or item.get("prompt")
 
                         # Each written line represents a single completed judgment.
                         # Only count entries that contain a non-empty 'Verifier_judgment'.

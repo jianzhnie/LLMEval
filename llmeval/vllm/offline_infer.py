@@ -256,9 +256,7 @@ class OfflineInferenceRunner:
                         # Only write if we got a valid response
                         if model_response and model_response.strip():
                             result: dict[str, Any] = original_item.copy()
-                            gen_list: list[str] = list(
-                                result.get("gen", [])
-                            )
+                            gen_list: list[str] = list(result.get("gen", []))
                             gen_list.append(model_response)
                             result["gen"] = gen_list
 
@@ -326,10 +324,8 @@ class OfflineInferenceRunner:
                 for line_num, line in enumerate(f, 1):
                     try:
                         item: dict[str, Any] = json.loads(line.strip())
-                        prompt_key: Any = item.get(self.args.input_key) or item.get(
-                            "prompt"
-                        )
-                        gen_count: int = len(item.get("gen", []))
+                        prompt_key: Any = item.get(self.args.input_key, "")
+                        gen_count: int = len(item.get(self.args.response_key, []))
                         if prompt_key is not None:
                             completed_counts[str(prompt_key)] += gen_count
                     except json.JSONDecodeError as e:
@@ -429,9 +425,7 @@ class OfflineInferenceRunner:
         skipped_items: int = 0
 
         for item in raw_data:
-            prompt_val: Any = item.get(self.args.input_key) or item.get(
-                "prompt"
-            )
+            prompt_val: Any = item.get(self.args.input_key) or item.get("prompt")
             prompt: str = str(prompt_val) if prompt_val is not None else ""
 
             if not prompt.strip():

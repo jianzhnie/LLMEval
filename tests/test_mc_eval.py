@@ -428,7 +428,10 @@ class TestMCLoglikelihoodClient:
         """An empty top_logprobs dict yields -inf for every choice."""
         client = _make_ll_client(max_retries=0)
         client.client.completions.create.return_value = _fake_top_probs_resp({})
-        assert client.get_choices_logprobs("p", ["A", "B"]) == [float("-inf"), float("-inf")]
+        assert client.get_choices_logprobs("p", ["A", "B"]) == [
+            float("-inf"),
+            float("-inf"),
+        ]
 
 
 class TestProcessLoglikelihoodItem:

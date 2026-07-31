@@ -691,6 +691,18 @@ class MCInferConfig:
         default_factory=lambda: os.environ.get("OPENAI_API_KEY", "EMPTY"),
         metadata={"help": "API key (default: OPENAI_API_KEY env var)."},
     )
+    input_key: str = field(
+        default="prompt",
+        metadata={"help": "Field name for the input prompt text in dataset."},
+    )
+    label_key: str = field(
+        default="answer",
+        metadata={"help": "Field name for the gold label/answer in dataset."},
+    )
+    response_key: str = field(
+        default="gen",
+        metadata={"help": "Field name for model generation results in dataset."},
+    )
 
     def __post_init__(self) -> None:
         """
@@ -705,7 +717,7 @@ class MCInferConfig:
         """
         if self.mode not in ("loglikelihood", "generate"):
             raise ValueError(
-                f"mode must be one of {("loglikelihood", "generate")}, got: {self.mode!r}"
+                f"mode must be one of {('loglikelihood', 'generate')}, got: {self.mode!r}"
             )
         if not self.base_url.strip():
             raise ValueError("base_url cannot be empty")

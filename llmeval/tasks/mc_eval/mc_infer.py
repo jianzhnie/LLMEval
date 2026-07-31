@@ -363,7 +363,7 @@ class MCRunner:
                         continue
                     try:
                         item = json.loads(line)
-                        prompt = item.get("prompt", "")
+                        prompt = item.get(self.config.input_key, "")
                         if prompt:
                             completed.add(prompt)
                     except json.JSONDecodeError as e:
@@ -435,11 +435,11 @@ class MCRunner:
         even when n_shot > 0 changes the prompt that gets written to output.
         """
         fs_prefix = (
-            self._few_shot_fmt.get_prefix(item.get("prompt", ""))
+            self._few_shot_fmt.get_prefix(item.get(self.config.input_key, ""))
             if self._few_shot_fmt
             else ""
         )
-        return fs_prefix + item.get("prompt", "")
+        return fs_prefix + item.get(self.config.input_key, "")
 
     # ------------------------------------------------------------------
     # Concurrent processing
@@ -569,7 +569,7 @@ class MCRunner:
         pred = _argmax(logprobs) if logprobs else -1
         is_correct = pred == gold
         return {
-            "prompt": prompt,
+            self.config.input_key: prompt,
             "choices": choices,  # mc_score 的 acc_norm 需要选项文本做长度归一
             "gold": gold,
             "logprobs": logprobs,
@@ -630,7 +630,7 @@ class MCRunner:
                 all-"-inf" guard (failed, dumped, retried on next run).
         """
         prompt = self.build_prompt(item)
-        gold = item.get("answer", "")
+        gold = item.get(self.config.label_key, "")
         messages = [*base_messages, {"role": "user", "content": prompt}]
 
         gen_text = ""
@@ -679,9 +679,9 @@ class MCRunner:
             raise RuntimeError(f"Generate produced no usable text: {last_error}")
 
         return {
-            "prompt": prompt,
-            "answer": gold,
-            "gen": [gen_text],
+            self.config.input_key: prompt,
+            self.config.label_key: gold,
+            self.config.response_key: [gen_text],
         }
 
     # ------------------------------------------------------------------
