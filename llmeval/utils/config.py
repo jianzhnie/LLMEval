@@ -20,14 +20,11 @@ All configuration classes include validation logic to ensure parameter
 consistency and prevent runtime errors.
 """
 
-import dataclasses
 import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-from transformers import HfArgumentParser
 
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
@@ -835,34 +832,3 @@ class EvalTaskArguments:
             raise ValueError(
                 f"task_name must be one of {valid_tasks}, got {self.task_name}"
             )
-
-
-# Example usage
-def main() -> None:
-    """
-    Example of using the configuration classes for argument parsing.
-
-    This function demonstrates how to:
-    1. Parse command-line arguments into strongly-typed dataclasses
-    2. Validate configuration parameters
-    3. Handle multiple configuration types (eval, online, offline)
-    4. Process the parsed arguments
-
-    Raises:
-        ImportError: If transformers library is not installed
-        ValueError: If required arguments are missing or invalid
-    """
-    # Create parser instances for different argument types
-    parser = HfArgumentParser(OfflineInferArguments)
-
-    # Parse command-line arguments into respective dataclasses
-    (eval_args,) = parser.parse_args_into_dataclasses()
-
-    # Log the parsed arguments
-    logger.info("Initializing with parsed command line arguments...")
-    logger.info("\n=== Evaluation Task Arguments ===")
-    logger.info(json.dumps(dataclasses.asdict(eval_args), indent=2))
-
-
-if __name__ == "__main__":
-    main()
