@@ -706,9 +706,9 @@ class InferenceRunner:
             return None
 
         result = item.copy()
-        gen_list = list(result.get("gen", []))
+        gen_list = list(result.get(self.args.response_key, []))
         gen_list.append(response)
-        result["gen"] = gen_list
+        result[self.args.response_key] = gen_list
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
