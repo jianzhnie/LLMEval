@@ -196,58 +196,61 @@ class MCLoglikelihoodClient:
         )
 
     def get_choices_logprobs(self, prompt: str, choice_texts: list[str]) -> list[float]:
-        """Compute log-probabilities of all choices in ONE batched request.
+        """Compute per-choice log-probabilities from first-token top_logprobs.
 
-        The completions API accepts a list of prompts; choices are returned in
-        the same order. With echo=True each response carries logprobs for prompt
-        tokens plus the max_tokens=1 generated token — the trailing generated
-        token is NOT part of the choice and must be sliced off, otherwise it
-        adds choice-dependent noise to the comparison.
-        Since the prompt is identical across choices, logprob(prompt) cancels
-        out: argmax Σ logprob(prompt+choice_i) = argmax logprob(choice_i|prompt).
+        Uses echo=False + max_tokens=1 + logprobs=20 to obtain the model's top
+        predicted tokens after the prompt. For each target choice, we look up
+        its logprob among the predictions. This directly measures
+        P(target_token | prompt) without the token-alignment issues that arise
+        from echo=True (where prompt tokenization can shift across continuations).
+
+        The target choices (typically "A"/"B"/"C"/"D") are looked up in several
+        common tokenizer forms: with/without leading space, upper/lower case.
 
         Args:
             prompt: The shared MC prompt (few-shot prefix + question)
-            choice_texts: Candidate answer texts for this item
+            choice_texts: Candidate answer tokens (e.g. ["A","B","C","D"])
 
         Returns:
-            One logprob per choice, aligned with choice_texts. All entries are
-            float("-inf") when the request fails after all retries; the caller
-            treats that as a failed item (never as a scored result).
+            One logprob per choice, aligned with choice_texts. Choices not found
+            among the top predictions get float("-inf"). All -inf when the
+            request fails after all retries.
         """
-        full_texts = [f"{prompt} {choice}" for choice in choice_texts]
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 resp = self.client.completions.create(
                     model=self.model_name,
-                    prompt=full_texts,
-                    max_tokens=1,  # minimal: only need logprobs, not generation
-                    temperature=0,  # deterministic for logprob computation
-                    logprobs=1,  # only need top-1 token logprob per position
-                    echo=True,  # return logprobs for all prompt tokens
+                    prompt=prompt,
+                    max_tokens=1,
+                    temperature=0,
+                    logprobs=20,  # enough to cover typical choice sets (4-10)
+                    echo=False,
                     timeout=self.timeout,
                 )
-                if len(resp.choices) != len(choice_texts):
-                    raise ValueError(
-                        f"Expected {len(choice_texts)} choices, got {len(resp.choices)}"
-                    )
+                top_dict: dict[str, float] = (
+                    resp.choices[0].logprobs.top_logprobs[0]
+                    if resp.choices
+                    and resp.choices[0].logprobs
+                    and resp.choices[0].logprobs.top_logprobs
+                    else {}
+                )
                 results = []
-                for choice in resp.choices:
-                    logprob_data = choice.logprobs
-                    if logprob_data and logprob_data.token_logprobs:
-                        # Drop trailing generated token from max_tokens=1.
-                        # With echo=True the response includes all prompt tokens + 1
-                        # generated token. We slice it off so only prompt+choice
-                        # tokens contribute to the logprob sum.
-                        all_lps = logprob_data.token_logprobs
-                        token_lps = all_lps[:-1] if len(all_lps) > 1 else all_lps
-                        results.append(sum(lp for lp in token_lps if lp is not None))
-                    else:
-                        results.append(float("-inf"))
+                for target in choice_texts:
+                    best = float("-inf")
+                    # Check common tokenizer forms: "A", " A", "a", " a", "▁A"
+                    for form in {
+                        target,
+                        f" {target}",
+                        target.lower(),
+                        f" {target.lower()}",
+                    }:
+                        lp = top_dict.get(form)
+                        if lp is not None and lp > best:
+                            best = lp
+                    results.append(best)
                 return results
             except (APIConnectionError, RateLimitError) as e:
-                # Retryable: transient network / rate-limit errors
                 last_error = e
                 if attempt < self.max_retries:
                     retry_backoff(

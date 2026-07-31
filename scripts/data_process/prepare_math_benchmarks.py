@@ -206,7 +206,7 @@ def _format_mc_row(name: str, example: dict) -> dict:
     return {
         "prompt": prompt,
         "answer": answer,
-        "choices": choices,
+        "choices": letters[: len(choices)],  # answer letters (A/B/C/...), loglikelihood targets
         "gold": answer_idx,
     }
 
