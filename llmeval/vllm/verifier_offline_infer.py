@@ -358,9 +358,9 @@ class VerifierOfflineInferenceRunner:
 
     def _effective_keys(self) -> tuple[str, str, str]:
         """Resolve the effective input/label/response keys with fallbacks."""
-        input_key = getattr(self.args, "input_key", None) or "prompt"
-        label_key = getattr(self.args, "label_key", None) or "answer"
-        response_key = getattr(self.args, "response_key", None) or "gen"
+        input_key = self.args.input_key
+        label_key = self.args.label_key
+        response_key = self.args.response_key
         return input_key, label_key, response_key
 
     def convert_to_compass_verifier_format(self, item: dict[str, Any]) -> str | None:
@@ -672,7 +672,7 @@ class VerifierOfflineInferenceRunner:
             if not prompt.strip():
                 logger.warning(
                     f"No valid prompt found under keys [{self.args.input_key!r}, "
-                    f'"{"prompt"}"] for item with keys: {list(item.keys())}'
+                    f'{self.args.input_key!r}"] for item with keys: {list(item.keys())}'
                 )
                 skipped_items += 1
                 continue

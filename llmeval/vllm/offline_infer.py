@@ -183,8 +183,7 @@ class OfflineInferenceRunner:
         Raises:
             ValueError: If required fields are missing, invalid, or chat template is already applied.
         """
-        # Determine field keys with fallbacks
-        input_key: str = getattr(self.args, "input_key", None) or "prompt"
+        input_key: str = self.args.input_key
 
         # Only input_key is required for inference; label is only needed at scoring time
         if input_key not in item:
@@ -256,9 +255,11 @@ class OfflineInferenceRunner:
                         # Only write if we got a valid response
                         if model_response and model_response.strip():
                             result: dict[str, Any] = original_item.copy()
-                            gen_list: list[str] = list(result.get("gen", []))
+                            gen_list: list[str] = list(
+                                result.get(self.args.response_key, [])
+                            )
                             gen_list.append(model_response)
-                            result["gen"] = gen_list
+                            result[self.args.response_key] = gen_list
 
                             f.write(json.dumps(result, ensure_ascii=False) + "\n")
                             f.flush()
@@ -431,7 +432,7 @@ class OfflineInferenceRunner:
             if not prompt.strip():
                 logger.warning(
                     f"No valid prompt found under keys [{self.args.input_key!r}, "
-                    f'"{"prompt"}"] for item with keys: {list(item.keys())}'
+                    f'{self.args.input_key!r}"] for item with keys: {list(item.keys())}'
                 )
                 skipped_items += 1
                 continue
