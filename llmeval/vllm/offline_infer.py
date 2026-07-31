@@ -36,11 +36,6 @@ from llmeval.utils.template import SYSTEM_PROMPT_FACTORY, is_chat_template_appli
 # Initialize logger
 logger = init_logger("offline_vllm_infer", logging.INFO)
 
-# Constants
-DEFAULT_INPUT_KEY: str = "prompt"
-DEFAULT_LABEL_KEY: str = "answer"
-DEFAULT_RESPONSE_KEY: str = "gen"
-
 
 class OfflineInferenceRunner:
     """Main class to handle offline inference with the vLLM engine.
@@ -189,7 +184,7 @@ class OfflineInferenceRunner:
             ValueError: If required fields are missing, invalid, or chat template is already applied.
         """
         # Determine field keys with fallbacks
-        input_key: str = getattr(self.args, "input_key", None) or DEFAULT_INPUT_KEY
+        input_key: str = getattr(self.args, "input_key", None) or "prompt"
 
         # Only input_key is required for inference; label is only needed at scoring time
         if input_key not in item:
@@ -262,10 +257,10 @@ class OfflineInferenceRunner:
                         if model_response and model_response.strip():
                             result: dict[str, Any] = original_item.copy()
                             gen_list: list[str] = list(
-                                result.get(DEFAULT_RESPONSE_KEY, [])
+                                result.get("gen", [])
                             )
                             gen_list.append(model_response)
-                            result[DEFAULT_RESPONSE_KEY] = gen_list
+                            result["gen"] = gen_list
 
                             f.write(json.dumps(result, ensure_ascii=False) + "\n")
                             f.flush()
@@ -332,9 +327,9 @@ class OfflineInferenceRunner:
                     try:
                         item: dict[str, Any] = json.loads(line.strip())
                         prompt_key: Any = item.get(self.args.input_key) or item.get(
-                            DEFAULT_INPUT_KEY
+                            "prompt"
                         )
-                        gen_count: int = len(item.get(DEFAULT_RESPONSE_KEY, []))
+                        gen_count: int = len(item.get("gen", []))
                         if prompt_key is not None:
                             completed_counts[str(prompt_key)] += gen_count
                     except json.JSONDecodeError as e:
@@ -435,14 +430,14 @@ class OfflineInferenceRunner:
 
         for item in raw_data:
             prompt_val: Any = item.get(self.args.input_key) or item.get(
-                DEFAULT_INPUT_KEY
+                "prompt"
             )
             prompt: str = str(prompt_val) if prompt_val is not None else ""
 
             if not prompt.strip():
                 logger.warning(
                     f"No valid prompt found under keys [{self.args.input_key!r}, "
-                    f'"{DEFAULT_INPUT_KEY}"] for item with keys: {list(item.keys())}'
+                    f'"{"prompt"}"] for item with keys: {list(item.keys())}'
                 )
                 skipped_items += 1
                 continue

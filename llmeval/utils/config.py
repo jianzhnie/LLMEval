@@ -25,7 +25,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 from transformers import HfArgumentParser
 
@@ -636,8 +636,6 @@ class MCInferConfig:
         ValueError: If any parameter is outside its valid range.
     """
 
-    VALID_MODES: ClassVar[tuple[str, ...]] = ("loglikelihood", "generate")
-
     input_file: str = field(
         default="", metadata={"help": "Path to the input JSONL file (MC items)."}
     )
@@ -705,9 +703,9 @@ class MCInferConfig:
         Raises:
             ValueError: If any parameter is outside its valid range.
         """
-        if self.mode not in self.VALID_MODES:
+        if self.mode not in ("loglikelihood", "generate"):
             raise ValueError(
-                f"mode must be one of {self.VALID_MODES}, got: {self.mode!r}"
+                f"mode must be one of {("loglikelihood", "generate")}, got: {self.mode!r}"
             )
         if not self.base_url.strip():
             raise ValueError("base_url cannot be empty")

@@ -33,12 +33,6 @@ from llmeval.utils.verifier_template import VERIFY_PROMPT_FACTORY
 # Initialize logger
 logger = init_logger("compass_verifier_infer", logging.INFO)
 
-# Constants
-VALID_JUDGMENTS: frozenset[str] = frozenset({"A", "B", "C", "D"})
-DEFAULT_INPUT_KEY: str = "prompt"
-DEFAULT_LABEL_KEY: str = "answer"
-DEFAULT_RESPONSE_KEY: str = "gen"
-
 
 def _last_n_strs(text: str, n: int) -> str:
     """Return the last n whitespace-separated tokens as a string."""
@@ -128,7 +122,7 @@ def process_judgment(judgment_str: str) -> str:
         return boxed_matches[-1]
 
     # Strategy 2: Direct match for single letter
-    if judgment_str in VALID_JUDGMENTS:
+    if judgment_str in {"A", "B", "C", "D"}:
         return judgment_str
 
     # Strategy 3: Extract from "Final Judgment:" section
@@ -364,9 +358,9 @@ class VerifierOfflineInferenceRunner:
 
     def _effective_keys(self) -> tuple[str, str, str]:
         """Resolve the effective input/label/response keys with fallbacks."""
-        input_key = getattr(self.args, "input_key", None) or DEFAULT_INPUT_KEY
-        label_key = getattr(self.args, "label_key", None) or DEFAULT_LABEL_KEY
-        response_key = getattr(self.args, "response_key", None) or DEFAULT_RESPONSE_KEY
+        input_key = getattr(self.args, "input_key", None) or "prompt"
+        label_key = getattr(self.args, "label_key", None) or "answer"
+        response_key = getattr(self.args, "response_key", None) or "gen"
         return input_key, label_key, response_key
 
     def convert_to_compass_verifier_format(self, item: dict[str, Any]) -> str | None:
@@ -583,7 +577,7 @@ class VerifierOfflineInferenceRunner:
                     try:
                         item = json.loads(line.strip())
                         prompt_key = item.get(self.args.input_key) or item.get(
-                            DEFAULT_INPUT_KEY
+                            "prompt"
                         )
 
                         # Each written line represents a single completed judgment.
@@ -674,13 +668,13 @@ class VerifierOfflineInferenceRunner:
         skipped_items = 0
 
         for item in raw_data:
-            prompt_val = item.get(self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+            prompt_val = item.get(self.args.input_key) or item.get("prompt")
             prompt = str(prompt_val) if prompt_val is not None else ""
 
             if not prompt.strip():
                 logger.warning(
                     f"No valid prompt found under keys [{self.args.input_key!r}, "
-                    f'"{DEFAULT_INPUT_KEY}"] for item with keys: {list(item.keys())}'
+                    f'"{"prompt"}"] for item with keys: {list(item.keys())}'
                 )
                 skipped_items += 1
                 continue

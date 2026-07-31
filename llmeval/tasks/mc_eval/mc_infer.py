@@ -44,11 +44,6 @@ from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
 
 logger = init_logger("mc_infer")
 
-# Constants (aligned with online_server.py)
-DEFAULT_INPUT_KEY: str = "prompt"
-DEFAULT_LABEL_KEY: str = "answer"
-DEFAULT_RESPONSE_KEY: str = "gen"
-
 
 # ===========================================================================
 # Few-shot formatter (MC-specific)
@@ -103,7 +98,7 @@ class FewShotFormatter:
             demos = [
                 d
                 for i, d in enumerate(demos)
-                if self._few_shot_pool[i].get(DEFAULT_INPUT_KEY, "") != test_prompt
+                if self._few_shot_pool[i].get("prompt", "") != test_prompt
             ]
         demos = demos[: self.n_shot]  # trim to n_shot
 
@@ -112,8 +107,8 @@ class FewShotFormatter:
     @staticmethod
     def _format_demo(item: dict[str, Any]) -> str:
         """Format one few-shot demonstration."""
-        prompt = item.get(DEFAULT_INPUT_KEY, "")
-        answer = item.get(DEFAULT_LABEL_KEY, "")
+        prompt = item.get("prompt", "")
+        answer = item.get("answer", "")
         # prompt already ends with "Answer:", append the answer
         return f"{prompt} {answer}"
 
@@ -368,7 +363,7 @@ class MCRunner:
                         continue
                     try:
                         item = json.loads(line)
-                        prompt = item.get(DEFAULT_INPUT_KEY, "")
+                        prompt = item.get("prompt", "")
                         if prompt:
                             completed.add(prompt)
                     except json.JSONDecodeError as e:
@@ -440,11 +435,11 @@ class MCRunner:
         even when n_shot > 0 changes the prompt that gets written to output.
         """
         fs_prefix = (
-            self._few_shot_fmt.get_prefix(item.get(DEFAULT_INPUT_KEY, ""))
+            self._few_shot_fmt.get_prefix(item.get("prompt", ""))
             if self._few_shot_fmt
             else ""
         )
-        return fs_prefix + item.get(DEFAULT_INPUT_KEY, "")
+        return fs_prefix + item.get("prompt", "")
 
     # ------------------------------------------------------------------
     # Concurrent processing
@@ -574,7 +569,7 @@ class MCRunner:
         pred = _argmax(logprobs) if logprobs else -1
         is_correct = pred == gold
         return {
-            DEFAULT_INPUT_KEY: prompt,
+            "prompt": prompt,
             "choices": choices,  # mc_score 的 acc_norm 需要选项文本做长度归一
             "gold": gold,
             "logprobs": logprobs,
@@ -635,7 +630,7 @@ class MCRunner:
                 all-"-inf" guard (failed, dumped, retried on next run).
         """
         prompt = self.build_prompt(item)
-        gold = item.get(DEFAULT_LABEL_KEY, "")
+        gold = item.get("answer", "")
         messages = [*base_messages, {"role": "user", "content": prompt}]
 
         gen_text = ""
@@ -684,9 +679,9 @@ class MCRunner:
             raise RuntimeError(f"Generate produced no usable text: {last_error}")
 
         return {
-            DEFAULT_INPUT_KEY: prompt,
-            DEFAULT_LABEL_KEY: gold,
-            DEFAULT_RESPONSE_KEY: [gen_text],
+            "prompt": prompt,
+            "answer": gold,
+            "gen": [gen_text],
         }
 
     # ------------------------------------------------------------------

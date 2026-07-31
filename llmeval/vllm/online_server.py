@@ -39,11 +39,6 @@ from llmeval.utils.template import SYSTEM_PROMPT_FACTORY, is_chat_template_appli
 
 logger = init_logger("online_vllm_server", logging.INFO)
 
-# Constants
-DEFAULT_INPUT_KEY: str = "prompt"
-DEFAULT_LABEL_KEY: str = "answer"
-DEFAULT_RESPONSE_KEY: str = "gen"
-
 
 class InferenceClient:
     """
@@ -516,10 +511,10 @@ class InferenceRunner:
                     try:
                         item: dict[str, Any] = json.loads(line.strip())
                         prompt: Any = item.get(self.args.input_key) or item.get(
-                            DEFAULT_INPUT_KEY
+                            "prompt"
                         )
                         gen_response = item.get(self.args.response_key) or item.get(
-                            DEFAULT_RESPONSE_KEY
+                            "gen"
                         )
                         gen_count: int = (
                             len(gen_response) if isinstance(gen_response, list) else 0
@@ -625,14 +620,14 @@ class InferenceRunner:
 
         for item in raw_data:
             prompt_val: Any = item.get(self.args.input_key) or item.get(
-                DEFAULT_INPUT_KEY
+                "prompt"
             )
             prompt: str = str(prompt_val) if prompt_val is not None else ""
 
             if not prompt.strip():
                 logger.warning(
                     f"No valid prompt found under keys [{self.args.input_key!r}, "
-                    f'"{DEFAULT_INPUT_KEY}"] for item with keys: {list(item.keys())}'
+                    f'"{"prompt"}"] for item with keys: {list(item.keys())}'
                 )
                 skipped_items += 1
                 continue
@@ -682,7 +677,7 @@ class InferenceRunner:
                 self._stats["failed"] += 1
             return None
 
-        query = item.get(self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+        query = item.get(self.args.input_key) or item.get("prompt")
         if not query:
             logger.warning(f"Missing required query field in item: {item}")
             with self._stats_lock:
@@ -713,9 +708,9 @@ class InferenceRunner:
             return None
 
         result = item.copy()
-        gen_list = list(result.get(DEFAULT_RESPONSE_KEY, []))
+        gen_list = list(result.get("gen", []))
         gen_list.append(response)
-        result[DEFAULT_RESPONSE_KEY] = gen_list
+        result["gen"] = gen_list
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
@@ -865,7 +860,7 @@ class InferenceRunner:
         for idx, item in enumerate(expanded_data):
             key: Any = None
             if isinstance(item, dict):
-                candidate = item.get(self.args.input_key) or item.get(DEFAULT_INPUT_KEY)
+                candidate = item.get(self.args.input_key) or item.get("prompt")
                 if isinstance(candidate, str) and candidate:
                     key = candidate
             if key is None:
@@ -897,7 +892,7 @@ class InferenceRunner:
                         sample = group[0]
                         prompt_val = (
                             sample.get(self.args.input_key)
-                            or sample.get(DEFAULT_INPUT_KEY)
+                            or sample.get("prompt")
                             if isinstance(sample, dict)
                             else None
                         )
