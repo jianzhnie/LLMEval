@@ -44,15 +44,13 @@ from tqdm import tqdm
 from llmeval.utils.logger import init_logger
 
 __all__ = [
-    # Semi-public utilities
+    "MCScoreResult",
     "argmax",
     "build_result",
     "compute_loglikelihood_metrics",
     "extract_answer",
     "failure_record",
     "get_choices",
-    # Public API
-    "MCScoreResult",
     "parse_gold",
     "score_generate",
     "score_loglikelihood",
