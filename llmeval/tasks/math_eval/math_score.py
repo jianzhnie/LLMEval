@@ -35,6 +35,15 @@ except ImportError as e:
         "pip install math-verify>=1.0.0 pebble>=4.6.3 tqdm>=4.65.0"
     ) from e
 
+# Pre-built metric instance — reused across all items (stateless config).
+# Both expression and LaTeX parsers are enabled for robust answer extraction.
+_verify_func = math_metric(
+    gold_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
+    pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
+    aggregation_function=max,
+    precision=6,
+)
+
 
 @dataclass
 class ProcessingStats:
@@ -118,21 +127,8 @@ def process_answers(
         generated_text[0] if isinstance(generated_text, list) else str(generated_text)
     )
 
-    # Initialize the verification function from math_verify
-    verify_func = math_metric(
-        # The gold answer can be an expression or LaTeX.
-        # We use both parsers to be robust to different formats.
-        gold_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
-        # The predicted answer can also be an expression or LaTeX.
-        pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
-        # Use max to select the best score if multiple extractions are successful.
-        aggregation_function=max,
-        precision=6,
-    )
-
     try:
-        # Run the verification using math-verify metric
-        grade, extracted_answers = verify_func([gold_answer_text], [generated_text])
+        grade, extracted_answers = _verify_func([gold_answer_text], [generated_text])
 
         if not extracted_answers:
             logger.warning(f"⚠️ No answers could be extracted for job {index}")

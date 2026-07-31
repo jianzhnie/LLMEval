@@ -88,83 +88,21 @@ def extract_answer(response_string: str, fallback_tokens: int = 200) -> str:
 
 
 def process_judgment(judgment_str: str) -> str:
-    """
-    Extract and clean judgment from model response.
-
-    This function processes the raw model output to extract a clean judgment
-    (A, B, C, or D) using multiple extraction strategies in order of preference.
-
-    Args:
-        judgment_str: Raw judgment string from the model.
-
-    Returns:
-        Clean judgment string ('A' | 'B' | 'C' | 'D') or '' if no valid judgment found.
-
-    Examples:
-        >>> process_judgment("\\boxed{A}")
-        'A'
-        >>> process_judgment("Final Judgment: (B)")
-        'B'
-        >>> process_judgment("The answer is C")
-        'C'
-        >>> process_judgment("Invalid response")
-        ''
-    """
-    if not judgment_str or not isinstance(judgment_str, str):
-        return ""
-
-    judgment_str = judgment_str.strip()
-
-    # Strategy 1: Look for \boxed{letter} pattern, prefer the last
-    boxed_pattern: re.Pattern[str] = re.compile(r"\\boxed\{([A-D])\}")
-    boxed_matches = boxed_pattern.findall(judgment_str)
-    if boxed_matches:
-        return boxed_matches[-1]
-
-    # Strategy 2: Direct match for single letter
-    if judgment_str in {"A", "B", "C", "D"}:
-        return judgment_str
-
-    # Strategy 3: Extract from "Final Judgment:" section
-    if "Final Judgment:" in judgment_str:
-        final_section = judgment_str.split("Final Judgment:")[-1]
-
-        # Look for (A), (B), (C), (D) pattern
-        paren_pattern: re.Pattern[str] = re.compile(r"\(([A-D])\)")
-        paren_matches = paren_pattern.findall(final_section)
-        if paren_matches:
-            return paren_matches[-1]
-
-        # Look for standalone A-D letters (with word boundaries) in the final section
-        letter_pattern: re.Pattern[str] = re.compile(
-            r"(?<![A-Za-z])([A-D])(?![A-Za-z])"
-        )
-        letter_matches = letter_pattern.findall(final_section)
-        if letter_matches:
-            return letter_matches[-1]
-
-    # Strategy 4: Look for standalone A-D in the entire string
-    letter_pattern: re.Pattern[str] = re.compile(r"(?<![A-Za-z])([A-D])(?![A-Za-z])")
-    all_matches = letter_pattern.findall(judgment_str)
-    if all_matches:
-        return all_matches[-1]
-
-    return ""
+    """Extract judgment letter — delegates to :func:`process_judgment_cursor`."""
+    return process_judgment_cursor(judgment_str)
 
 
 def process_judgment_cursor(judgment_str: str) -> str:
     """
     Extract and normalize the final judgment from model output.
 
-    According to the Verifier prompt, the model must output its decision in:
-        \\boxed{[A|B|C|D]}
-    with no extra explanation. We therefore:
-    1) Prefer the last occurrence of content inside \\boxed{...}.
-    2) From that content, extract the last A-D letter (case-insensitive).
-    3) Fallbacks (if no \\boxed{} is present):
-       - Look for (A), (B), (C), (D)
-       - Look for any standalone A-D character
-    Returns uppercase 'A' | 'B' | 'C' | 'D' or '' if nothing valid is found.
+    Uses a five-strategy cascade (first match wins):
+    1. Direct single-letter match (``A``, ``B``, ``C``, ``D``).
+    2. Last ``\\boxed{...}`` content, then the last A-D letter within it.
+    3. "Final Judgment:" section — parenthesized letter within that section.
+    4. Any parenthesized letter ``(A)`` through ``(D)`` anywhere in the text.
+    5. Any standalone A-D letter (word-boundary delimited) as a last resort.
+    All strategies are case-insensitive.  Returns uppercase or ``""``.
 
     Examples:
         >>> process_judgment("\\boxed{A}")
@@ -181,27 +119,37 @@ def process_judgment_cursor(judgment_str: str) -> str:
 
     s = judgment_str.strip()
 
-    # Primary: extract the last boxed content, then find a valid letter within it.
+    # Strategy 1: direct single-letter match (no further processing needed).
+    if s in {"A", "B", "C", "D"}:
+        return s
+
+    # Strategy 2: extract the last boxed content, then find a valid letter within it.
     boxed_content_pattern: re.Pattern[str] = re.compile(
         r"\\boxed\s*\{([^}]*)\}", re.DOTALL | re.IGNORECASE
     )
     boxed_contents = boxed_content_pattern.findall(s)
     if boxed_contents:
         last_box = boxed_contents[-1]
-        # From the boxed content, pick the last A-D letter (case-insensitive)
         letter_in_box_pattern: re.Pattern[str] = re.compile(r"([A-D])", re.IGNORECASE)
         candidates = letter_in_box_pattern.findall(last_box)
         if candidates:
             return candidates[-1].upper()
 
-    # Fallback 1: explicit parenthesized letter like (A), (b), etc.
+    # Strategy 3: "Final Judgment:" section extraction (common in English verifier prompts).
+    if "Final Judgment:" in s:
+        final_section = s.split("Final Judgment:")[-1]
+        paren_pattern: re.Pattern[str] = re.compile(r"\(([A-D])\)", re.IGNORECASE)
+        paren_matches = paren_pattern.findall(final_section)
+        if paren_matches:
+            return paren_matches[-1].upper()
+
+    # Strategy 4: explicit parenthesized letter like (A), (b), etc.
     paren_pattern: re.Pattern[str] = re.compile(r"\(([A-D])\)", re.IGNORECASE)
     paren_matches = paren_pattern.findall(s)
     if paren_matches:
         return paren_matches[-1].upper()
 
-    # Fallback 2: any standalone A-D letter (avoid letters embedded in words).
-    # This is more permissive but helps salvage partially formatted outputs.
+    # Strategy 5: any standalone A-D letter (avoid letters embedded in words).
     standalone_letter_pattern: re.Pattern[str] = re.compile(
         r"(?<![A-Za-z])([A-D])(?![A-Za-z])", re.IGNORECASE
     )
