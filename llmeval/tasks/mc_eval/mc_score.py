@@ -43,28 +43,22 @@ from tqdm import tqdm
 
 from llmeval.utils.logger import init_logger
 
-__all__ = ["MCScoreResult", "score_generate", "score_loglikelihood"]
+__all__ = [
+    "MCScoreResult",
+    "score_generate",
+    "score_loglikelihood",
+    # Semi-public utilities — used by tests and eval.py.
+    "argmax",
+    "build_result",
+    "compute_loglikelihood_metrics",
+    "extract_answer",
+    "failure_record",
+    "get_choices",
+    "parse_gold",
+    "write_cache",
+]
 
 logger = init_logger("mc_score")
-
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
-
-#: A single per-item scoring record (schema depends on mode, see module docstring).
-PerItemRecord = dict[str, Any]
-#: An evaluation dataset: list of items with inference results appended.
-EvalDataset = list[dict[str, Any]]
-#: Supported scoring modes.
-ScoringMode = Literal["loglikelihood", "generate"]
-
-# ---------------------------------------------------------------------------
-# Constants — mc_infer output field keys
-# ---------------------------------------------------------------------------
-
-GOLD_KEY: str = "gold"
-LOGPROBS_KEY: str = "logprobs"
-CHOICES_KEY: str = "choices"
 
 # ---------------------------------------------------------------------------
 # Constants — answer-extraction regexes (precompiled)
@@ -76,23 +70,12 @@ _ANSWER_MARKER_RE: re.Pattern[str] = re.compile(
 )
 _LAST_LETTER_RE: re.Pattern[str] = re.compile(r"\b([A-Ja-j])\b")
 
-# ---------------------------------------------------------------------------
-# Constants — scoring modes
-# ---------------------------------------------------------------------------
-
-MODE_LOGPROBS: ScoringMode = "loglikelihood"
-MODE_GENERATE: ScoringMode = "generate"
-
-# Shorter internal aliases (backward-compatible).
-MODE_LOGLIKELIHOOD = MODE_LOGPROBS
-
-
 @dataclass
 class MCScoreResult:
     """Aggregate MC evaluation metrics (lm-eval aligned).
 
-    Computed by :func:`_build_result` from per-item records and serialised
-    via :func:`_write_cache` alongside the per-item JSONL file.
+    Computed by :func:`build_result` from per-item records and serialised
+    via :func:`write_cache` alongside the per-item JSONL file.
 
     Attributes
     ----------
@@ -120,7 +103,7 @@ class MCScoreResult:
     total: int = 0
     correct: int = 0
     correct_norm: int = 0
-    per_item: list[PerItemRecord] = field(default_factory=list)
+    per_item: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ===========================================================================
@@ -129,7 +112,7 @@ class MCScoreResult:
 
 
 def score_loglikelihood(
-    eval_dataset: EvalDataset,
+    eval_dataset: list[dict[str, Any]],
     cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
@@ -154,22 +137,27 @@ def score_loglikelihood(
     float
         Accuracy (*acc* metric).
     """
-    _warn_missing_choices(eval_dataset)
+    if any(not get_choices(item) for item in eval_dataset):
+        logger.warning(
+            "Some items have no 'choices' field — acc_norm will fall back "
+            "to acc.  (mc_infer >= 2026-07-30 writes choices into results.)"
+        )
+
     records = _score_items(
         eval_dataset,
-        mode=MODE_LOGPROBS,
+        mode="loglikelihood",
         label_key="",
         response_key="",
         max_workers=max_workers,
         timeout=timeout,
     )
-    metrics = _build_result(records)
-    _write_cache(metrics, cache_path)
+    metrics = build_result(records)
+    write_cache(metrics, cache_path)
     return metrics.acc
 
 
-def _compute_loglikelihood_metrics(
-    eval_dataset: EvalDataset,
+def compute_loglikelihood_metrics(
+    eval_dataset: list[dict[str, Any]],
 ) -> MCScoreResult:
     """Compute acc / acc_norm serially.
 
@@ -177,20 +165,7 @@ def _compute_loglikelihood_metrics(
     can be verified without touching the process pool or filesystem.
     """
     records = [_score_loglikelihood_item(item) for item in eval_dataset]
-    return _build_result(records)
-
-
-def _warn_missing_choices(eval_dataset: EvalDataset) -> None:
-    """Log a single warning when any item lacks a ``choices`` field.
-
-    ``acc_norm`` requires choice texts for length-normalisation.  The
-    warning is emitted once rather than per-item to keep log output clean.
-    """
-    if any(not _get_choices(item) for item in eval_dataset):
-        logger.warning(
-            "Some items have no 'choices' field — acc_norm will fall back "
-            "to acc.  (mc_infer >= 2026-07-30 writes choices into results.)"
-        )
+    return build_result(records)
 
 
 # ===========================================================================
@@ -199,7 +174,7 @@ def _warn_missing_choices(eval_dataset: EvalDataset) -> None:
 
 
 def score_generate(
-    eval_dataset: EvalDataset,
+    eval_dataset: list[dict[str, Any]],
     label_key: str,
     response_key: str,
     cache_path: str | Path,
@@ -233,14 +208,14 @@ def score_generate(
     """
     records = _score_items(
         eval_dataset,
-        mode=MODE_GENERATE,
+        mode="generate",
         label_key=label_key,
         response_key=response_key,
         max_workers=max_workers,
         timeout=timeout,
     )
-    metrics = _build_result(records)
-    _write_cache(metrics, cache_path)
+    metrics = build_result(records)
+    write_cache(metrics, cache_path)
     return metrics.acc
 
 
@@ -250,12 +225,12 @@ def score_generate(
 # Mirrors the architecture of ``math_eval/math_score.py``:
 #  - a module-level pool-worker (:func:`_process_item`) stays picklable
 #  - a dispatcher (:func:`_score_items`) chooses serial or parallel path
-#  - a result aggregator (:func:`_build_result`) computes final metrics
+#  - a result aggregator (:func:`build_result`) computes final metrics
 
 
 def _process_item(
-    args: tuple[int, dict[str, Any], ScoringMode, str, str],
-) -> tuple[int, PerItemRecord]:
+    args: tuple[int, dict[str, Any], Literal["loglikelihood", "generate"], str, str],
+) -> tuple[int, dict[str, Any]]:
     """Pool-worker entry point — **must** be module-level for pickling.
 
     Parameters
@@ -265,52 +240,32 @@ def _process_item(
 
     Returns
     -------
-    tuple[int, PerItemRecord]
+    tuple[int, dict[str, Any]]
         ``(original_index, scored_record)``, so results can be re-ordered
         after parallel execution.
     """
     idx, item, mode, label_key, response_key = args
-    if mode == MODE_LOGPROBS:
+    if mode == "loglikelihood":
         return idx, _score_loglikelihood_item(item)
     return idx, _score_generate_item(item, label_key, response_key)
 
 
 def _score_items(
-    eval_dataset: EvalDataset,
-    mode: ScoringMode,
+    eval_dataset: list[dict[str, Any]],
+    mode: Literal["loglikelihood", "generate"],
     label_key: str,
     response_key: str,
     max_workers: int,
     timeout: int,
-) -> list[PerItemRecord]:
+) -> list[dict[str, Any]]:
     """Score every item, preserving input order.
 
     When the dataset is small or workers are limited, scoring runs serially
     to avoid pool overhead.  Otherwise a :class:`~pebble.ProcessPool` is used
     so that large benchmarks (e.g. MMLU ~14k items) finish quickly.
 
-    Timed-out or crashed worker tasks are replaced with :func:`_failure_record`
+    Timed-out or crashed worker tasks are replaced with :func:`failure_record`
     so that a single bad item never aborts the whole run.
-
-    Parameters
-    ----------
-    eval_dataset:
-        Items to score (raw inference output format).
-    mode:
-        ``"loglikelihood"`` or ``"generate"``.
-    label_key:
-        Field name of the gold label (generate mode only; unused for logprobs).
-    response_key:
-        Field name of the generation list (generate mode only; unused for logprobs).
-    max_workers:
-        Requested pool size (clamped).
-    timeout:
-        Per-item timeout in seconds.
-
-    Returns
-    -------
-    list[PerItemRecord]
-        Scored records, one per input item, in the original order.
     """
     total = len(eval_dataset)
     if total == 0:
@@ -325,7 +280,7 @@ def _score_items(
     # Clamp worker count: never more than items, available CPUs, or requested max.
     cpu_count = os.cpu_count() or 1
     optimal_workers = min(total, max_workers, max(1, cpu_count - 1))
-    results_by_index: dict[int, PerItemRecord] = {}
+    results_by_index: dict[int, dict[str, Any]] = {}
 
     with (
         tqdm(total=total, desc="Scoring items", unit="item") as pbar,
@@ -359,12 +314,12 @@ def _score_items(
 
     # Fill in missing entries (timeouts, worker crashes) with failure records.
     return [
-        results_by_index.get(i) or _failure_record(item, mode, label_key)
+        results_by_index.get(i) or failure_record(item, mode, label_key)
         for i, item in enumerate(eval_dataset)
     ]
 
 
-def _build_result(records: list[PerItemRecord]) -> MCScoreResult:
+def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
     """Aggregate per-item records into :class:`MCScoreResult`.
 
     ``correct_norm`` is only present in loglikelihood records; generate-mode
@@ -374,7 +329,7 @@ def _build_result(records: list[PerItemRecord]) -> MCScoreResult:
     n_correct = sum(1 for r in records if r["correct"])
     n_correct_norm = sum(1 for r in records if r.get("correct_norm", r["correct"]))
 
-    safe_total = max(total, 1)  # avoid ZeroDivisionError on empty input
+    safe_total = max(total, 1)
     return MCScoreResult(
         acc=n_correct / safe_total,
         acc_norm=n_correct_norm / safe_total,
@@ -387,14 +342,14 @@ def _build_result(records: list[PerItemRecord]) -> MCScoreResult:
 
 
 # ===========================================================================
-# Per-item scoring
+# Per-item helpers
 # ===========================================================================
 
 
-def _get_choices(item: dict[str, Any]) -> list[Any]:
+def get_choices(item: dict[str, Any]) -> list[Any]:
     """Return the choices list for *item*, preferring ``choices`` over
     the legacy ``choice_texts`` field."""
-    return item.get(CHOICES_KEY) or item.get("choice_texts", [])
+    return item.get("choices") or item.get("choice_texts", [])
 
 
 # ---------------------------------------------------------------------------
@@ -402,19 +357,19 @@ def _get_choices(item: dict[str, Any]) -> list[Any]:
 # ---------------------------------------------------------------------------
 
 
-def _score_loglikelihood_item(item: dict[str, Any]) -> PerItemRecord:
+def _score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     """Score a single loglikelihood item.
 
     Unscorable items (missing / empty logprobs, invalid gold index, or every
     logprob set to ``-inf`` after a failed API call) are marked as incorrect
     with ``pred = -1`` so they never contribute false positives.
     """
-    gold = _parse_gold(item.get(GOLD_KEY, -1))
-    logprobs: list[float] = item.get(LOGPROBS_KEY, [])
-    choices = _get_choices(item)
+    gold = parse_gold(item.get("gold", -1))
+    logprobs: list[float] = item.get("logprobs", [])
+    choices = get_choices(item)
 
     # Guard: unscorable data → forced-incorrect record.
-    if not logprobs or gold < 0 or _all_neg_inf(logprobs):
+    if not logprobs or gold < 0 or all(lp == float("-inf") for lp in logprobs):
         return {
             "gold": gold,
             "pred": -1,
@@ -422,15 +377,15 @@ def _score_loglikelihood_item(item: dict[str, Any]) -> PerItemRecord:
             "correct_norm": False,
         }
 
-    # acc  — argmax over raw logprobs.
-    pred = _argmax(logprobs)
+    # acc — argmax over raw logprobs.
+    pred = argmax(logprobs)
     is_correct = pred == gold
 
     # acc_norm — length-normalised logprobs (lm-eval convention).
     if choices and len(choices) == len(logprobs):
         choice_lens = [max(len(str(c)), 1) for c in choices]
         normed = [lp / cl for lp, cl in zip(logprobs, choice_lens)]
-        is_correct_norm = _argmax(normed) == gold
+        is_correct_norm = argmax(normed) == gold
     else:
         is_correct_norm = is_correct
 
@@ -451,7 +406,7 @@ def _score_generate_item(
     item: dict[str, Any],
     label_key: str,
     response_key: str,
-) -> PerItemRecord:
+) -> dict[str, Any]:
     """Score a single generate-mode item by extracting the answer letter.
 
     Edge cases handled defensively
@@ -469,7 +424,7 @@ def _score_generate_item(
     else:
         pred_text = str(generations[0]) if generations else ""
 
-    pred = _extract_answer(pred_text)
+    pred = extract_answer(pred_text)
     # Both must be non-empty for a match — prevents "" == "".
     is_correct = bool(gold) and bool(pred) and pred == gold
 
@@ -481,20 +436,20 @@ def _score_generate_item(
 # ===========================================================================
 
 
-def _failure_record(
+def failure_record(
     item: dict[str, Any],
-    mode: ScoringMode,
+    mode: Literal["loglikelihood", "generate"],
     label_key: str,
-) -> PerItemRecord:
+) -> dict[str, Any]:
     """Build a placeholder record for a timed-out or crashed pool task.
 
     Loglikelihood failures get ``pred = -1`` (invalid index); generate
     failures get ``pred = ""`` (empty string).  Both are always ``correct =
     False`` so they never inflate accuracy.
     """
-    if mode == MODE_LOGPROBS:
+    if mode == "loglikelihood":
         return {
-            "gold": _parse_gold(item.get(GOLD_KEY, -1)),
+            "gold": parse_gold(item.get("gold", -1)),
             "pred": -1,
             "correct": False,
             "correct_norm": False,
@@ -507,11 +462,11 @@ def _failure_record(
 
 
 # ===========================================================================
-# Utility helpers
+# Utilities
 # ===========================================================================
 
 
-def _argmax(xs: list[float]) -> int:
+def argmax(xs: list[float]) -> int:
     """Return the index of the maximum value in *xs*.
 
     Ties are broken by smallest index (standard :func:`max` behaviour).
@@ -519,17 +474,7 @@ def _argmax(xs: list[float]) -> int:
     return max(enumerate(xs), key=lambda pair: pair[1])[0]
 
 
-def _all_neg_inf(xs: list[float]) -> bool:
-    """Return ``True`` when **every** logprob in *xs* is ``-inf``.
-
-    This is the signature of a failed batched API request — the client
-    fills the entire result with ``float("-inf")`` so the caller can
-    recognise and discard the item without accidental argmax scoring.
-    """
-    return all(lp == float("-inf") for lp in xs)
-
-
-def _parse_gold(value: Any) -> int:
+def parse_gold(value: Any) -> int:
     """Cast *value* to an integer index, returning -1 on failure.
 
     Non-numeric gold values (e.g. a raw letter string like ``"B"`` instead
@@ -542,7 +487,7 @@ def _parse_gold(value: Any) -> int:
         return -1
 
 
-def _write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
+def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
     """Persist per-item records (JSONL) and an aggregated metrics summary (JSON).
 
     The summary is written to ``<cache_path>.summary.json`` alongside the
@@ -571,7 +516,7 @@ def _write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
         )
 
 
-def _extract_answer(text: str) -> str:
+def extract_answer(text: str) -> str:
     """Extract an answer letter (``A``-``J``) from a model-generated string.
 
     Strategy (aligned with lm-evaluation-harness conventions)

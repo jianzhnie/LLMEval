@@ -43,24 +43,24 @@ if "tqdm" not in sys.modules:
 class TestMCExtractAnswer:
     """Test answer letter extraction from generated text."""
 
-    def test_extract_answer_pattern(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import _extract_answer
+    def testextract_answer_pattern(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import extract_answer
 
-        assert _extract_answer("Some text\nAnswer: B") == "B"
-        assert _extract_answer("Reasoning...\n答案：D") == "D"
-        assert _extract_answer("Answer: A") == "A"
+        assert extract_answer("Some text\nAnswer: B") == "B"
+        assert extract_answer("Reasoning...\n答案：D") == "D"
+        assert extract_answer("Answer: A") == "A"
 
     def test_extract_last_letter_fallback(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import _extract_answer
+        from llmeval.tasks.mc_eval.mc_score import extract_answer
 
-        assert _extract_answer("The correct option is C.") == "C"
-        assert _extract_answer("I think A and B but choose D") == "D"
+        assert extract_answer("The correct option is C.") == "C"
+        assert extract_answer("I think A and B but choose D") == "D"
 
     def test_extract_empty(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import _extract_answer
+        from llmeval.tasks.mc_eval.mc_score import extract_answer
 
-        assert _extract_answer("") == ""
-        assert _extract_answer("no letters here") == ""
+        assert extract_answer("") == ""
+        assert extract_answer("no letters here") == ""
 
 
 class TestScoreLoglikelihood:
@@ -581,19 +581,19 @@ class TestMCScoreEdgeCases:
 
     def test_acc_norm_uses_choices_when_present(self, tmp_path: Path) -> None:
         """Length normalization flips the argmax when choices differ in length."""
-        from llmeval.tasks.mc_eval.mc_score import _compute_loglikelihood_metrics
+        from llmeval.tasks.mc_eval.mc_score import compute_loglikelihood_metrics
 
         # raw argmax → index 1; normalized: -2.0/4=-0.5 vs -1.0/1=-1.0 → index 0
         items = [{"gold": 0, "logprobs": [-2.0, -1.0], "choices": ["aaaa", "b"]}]
-        metrics = _compute_loglikelihood_metrics(items)
+        metrics = compute_loglikelihood_metrics(items)
         assert metrics.acc == 0.0
         assert metrics.acc_norm == 1.0
 
     def test_extract_lowercase_letter(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import _extract_answer
+        from llmeval.tasks.mc_eval.mc_score import extract_answer
 
-        assert _extract_answer("the answer is b") == "B"
-        assert _extract_answer("选 c") == "C"
+        assert extract_answer("the answer is b") == "B"
+        assert extract_answer("选 c") == "C"
 
     def test_non_numeric_gold_treated_invalid(self, tmp_path: Path) -> None:
         """A non-numeric gold must not crash scoring; item counts as wrong."""

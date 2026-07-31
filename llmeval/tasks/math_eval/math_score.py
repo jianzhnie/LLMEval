@@ -46,10 +46,8 @@ except ImportError as e:
 
     sys.exit(1)
 
-# Type aliases for better code readability
+# Type alias for complex return type
 ProcessResult = tuple[int, float, str | None, str | None] | None
-DataDict = dict[str, Any]
-EvalDataset = list[DataDict]
 
 
 @dataclass
@@ -77,7 +75,7 @@ class ProcessingStats:
         return (self.error / self.total * 100) if self.total > 0 else 0.0
 
 
-def process_answers(args: tuple[int, DataDict, str, str]) -> ProcessResult:
+def process_answers(args: tuple[int, dict[str, Any], str, str]) -> ProcessResult:
     """
     Process a single model output by extracting and comparing with ground truth.
 
@@ -184,7 +182,7 @@ def process_answers(args: tuple[int, DataDict, str, str]) -> ProcessResult:
 
 
 def compute_scores(
-    eval_dataset: EvalDataset,
+    eval_dataset: list[dict[str, Any]],
     label_key: str,
     response_key: str,
     cache_path: str,
@@ -337,7 +335,7 @@ def compute_scores(
     return accuracy
 
 
-def save_cache(eval_dataset: EvalDataset, cache_path: str) -> None:
+def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:
     """
     Save evaluation results and metadata to a JSONL file.
 
