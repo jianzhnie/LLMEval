@@ -67,3 +67,36 @@ def retry_backoff(attempt: int, max_retries: int, reason: str) -> None:
         f"Sleeping for {sleep_time:.2f}s."
     )
     time.sleep(sleep_time)
+
+
+def should_retry(exc: Exception, attempt: int, max_retries: int) -> bool | None:
+    """Decide whether *exc* is retryable after a failed API call.
+
+    Returns
+    -------
+    ``True`` when the caller should retry (backoff is already applied).
+    ``False`` when the error is fatal and retries should stop.
+    ``None`` when this helper cannot classify the exception (caller decides).
+    """
+    from openai import APIConnectionError, APIError, RateLimitError
+
+    if isinstance(exc, (APIConnectionError, RateLimitError)):
+        if attempt < max_retries:
+            retry_backoff(attempt, max_retries, f"{type(exc).__name__}: {exc!s}")
+            return True
+        return False
+
+    if isinstance(exc, APIError):
+        non_retryable = non_retryable_client_error(exc)
+        if non_retryable:
+            logger.warning(f"Request aborted: {non_retryable}")
+            return False
+        if attempt < max_retries:
+            retry_backoff(attempt, max_retries, f"API error: {exc!s}")
+            return True
+        return False
+
+    if attempt < max_retries:
+        retry_backoff(attempt, max_retries, f"Unexpected {type(exc).__name__}: {exc!s}")
+        return True
+    return False

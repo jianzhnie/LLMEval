@@ -28,16 +28,11 @@ from typing import Any
 
 import httpx
 import openai
-from openai import APIConnectionError, APIError, RateLimitError
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
-from llmeval.utils.api_retry import (
-    error_message,
-    is_context_length_error,
-    non_retryable_client_error,
-    retry_backoff,
-)
+from llmeval.tasks.mc_eval.mc_score import argmax
+from llmeval.utils.api_retry import should_retry
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.logger import init_logger
 from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
@@ -123,22 +118,6 @@ class FewShotFormatter:
         return items
 
 
-def _argmax(xs: list[float]) -> int:
-    """Return index of maximum value."""
-    return max(enumerate(xs), key=lambda x: x[1])[0]
-
-
-def _api_abort_reason(e: APIError) -> str | None:
-    """Return a non-retryable abort reason for an APIError, None if retryable.
-
-    Composes the shared predicates from llmeval.utils.api_retry: prompt
-    exceeding the model's maximum context length, or any non-retryable 4xx.
-    """
-    if is_context_length_error(e):
-        return f"max context length exceeded: {error_message(e)}"
-    return non_retryable_client_error(e)
-
-
 # ===========================================================================
 # Loglikelihood Client
 # ===========================================================================
@@ -219,7 +198,7 @@ class MCLoglikelihoodClient:
                     prompt=prompt,
                     max_tokens=1,
                     temperature=0,
-                    logprobs=20,  # enough to cover typical choice sets (4-10)
+                    logprobs=20,
                     echo=False,
                     timeout=self.timeout,
                 )
@@ -233,7 +212,6 @@ class MCLoglikelihoodClient:
                 results = []
                 for target in choice_texts:
                     best = float("-inf")
-                    # Check common tokenizer forms: "A", " A", "a", " a", "▁A"
                     for form in {
                         target,
                         f" {target}",
@@ -245,28 +223,14 @@ class MCLoglikelihoodClient:
                             best = lp
                     results.append(best)
                 return results
-            except (APIConnectionError, RateLimitError) as e:
-                last_error = e
-                if attempt < self.max_retries:
-                    retry_backoff(
-                        attempt, self.max_retries, f"{type(e).__name__}: {e!s}"
-                    )
-            except APIError as e:
-                last_error = e
-                non_retryable = _api_abort_reason(e)
-                if non_retryable:
-                    logger.warning(f"Logprob request aborted: {non_retryable}")
-                    break
-                if attempt < self.max_retries:
-                    retry_backoff(attempt, self.max_retries, f"API error: {e!s}")
             except Exception as e:
                 last_error = e
-                if attempt < self.max_retries:
-                    retry_backoff(
-                        attempt,
-                        self.max_retries,
-                        f"Unexpected {type(e).__name__}: {e!s}",
-                    )
+                action = should_retry(e, attempt, self.max_retries)
+                if action is False:
+                    break
+                if action is None:
+                    logger.warning(f"Unclassified error: {type(e).__name__}: {e!s}")
+                    break
         logger.warning(
             f"Logprob request failed after {self.max_retries + 1} attempts: {last_error}"
         )
@@ -566,7 +530,7 @@ class MCRunner:
         if all(lp == float("-inf") for lp in logprobs):
             raise RuntimeError("Logprob request failed for all choices")
 
-        pred = _argmax(logprobs) if logprobs else -1
+        pred = argmax(logprobs) if logprobs else -1
         is_correct = pred == gold
         return {
             self.config.input_key: prompt,
@@ -652,29 +616,16 @@ class MCRunner:
                 # max_tokens); normalize to "" — the empty result is a failure
                 gen_text = resp.choices[0].message.content or ""
                 break
-            except (APIConnectionError, RateLimitError) as e:
-                # Retryable: transient network / rate-limit errors
-                last_error = e
-                if attempt < self.config.max_retries:
-                    retry_backoff(
-                        attempt, self.config.max_retries, f"{type(e).__name__}: {e!s}"
-                    )
-            except APIError as e:
-                last_error = e
-                non_retryable = _api_abort_reason(e)
-                if non_retryable:
-                    logger.warning(f"Generate aborted: {non_retryable}")
-                    break
-                if attempt < self.config.max_retries:
-                    retry_backoff(attempt, self.config.max_retries, f"API error: {e!s}")
             except Exception as e:
                 last_error = e
-                if attempt < self.config.max_retries:
-                    retry_backoff(
-                        attempt,
-                        self.config.max_retries,
-                        f"Unexpected {type(e).__name__}: {e!s}",
+                action = should_retry(e, attempt, self.config.max_retries)
+                if action is False:
+                    break
+                if action is None:
+                    logger.warning(
+                        f"Generate aborted: unclassified {type(e).__name__}: {e!s}"
                     )
+                    break
         if not gen_text:
             raise RuntimeError(f"Generate produced no usable text: {last_error}")
 

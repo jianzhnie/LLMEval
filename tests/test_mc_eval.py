@@ -288,11 +288,11 @@ class TestFewShotFormatter:
 
 class TestArgmax:
     def test_basic(self) -> None:
-        from llmeval.tasks.mc_eval.mc_infer import _argmax
+        from llmeval.tasks.mc_eval.mc_score import argmax
 
-        assert _argmax([1.0, 3.0, 2.0]) == 1
-        assert _argmax([5.0]) == 0
-        assert _argmax([-1.0, -0.5, -2.0]) == 1
+        assert argmax([1.0, 3.0, 2.0]) == 1
+        assert argmax([5.0]) == 0
+        assert argmax([-1.0, -0.5, -2.0]) == 1
 
 
 # ===========================================================================
