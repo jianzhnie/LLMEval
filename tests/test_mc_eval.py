@@ -311,7 +311,10 @@ def _make_api_error(message: str = "", status_code: int | None = None) -> Except
 
 
 def _fake_logprob_resp(token_lps_list: list[list[float | None]]) -> MagicMock:
-    """Completions response whose choices carry the given token_logprobs."""
+    """Completions response whose choices carry the given token_logprobs.
+
+    Used by tests that still rely on the echo=True path (if any remain).
+    """
     resp = MagicMock()
     choices = []
     for lps in token_lps_list:
@@ -319,6 +322,19 @@ def _fake_logprob_resp(token_lps_list: list[list[float | None]]) -> MagicMock:
         choice.logprobs.token_logprobs = lps
         choices.append(choice)
     resp.choices = choices
+    return resp
+
+
+def _fake_top_probs_resp(top_probs: dict[str, float]) -> MagicMock:
+    """Completions response with top_logprobs for the first generated token.
+
+    Matches the new echo=False + logprobs=20 + max_tokens=1 API shape
+    that :meth:`MCLoglikelihoodClient.get_choices_logprobs` now uses.
+    """
+    resp = MagicMock()
+    choice = MagicMock()
+    choice.logprobs.top_logprobs = [top_probs]
+    resp.choices = [choice]
     return resp
 
 
@@ -359,20 +375,43 @@ def _make_mc_runner(tmp_path: Path, mode: str = "loglikelihood", max_retries: in
 
 
 class TestMCLoglikelihoodClient:
-    def test_batched_single_request_and_trailing_token_sliced(self) -> None:
+    def test_single_request_with_top_logprobs(self) -> None:
+        """Prompt is sent once; per-choice logprobs extracted from top_logprobs."""
         client = _make_ll_client()
-        # [first(None), choice tokens..., trailing generated token]
-        client.client.completions.create.return_value = _fake_logprob_resp(
-            [[None, -1.0, -2.0, -9.9], [None, -0.5, -9.9]]
+        client.client.completions.create.return_value = _fake_top_probs_resp(
+            {" A": -3.0, " B": -0.5, " C": -4.2, " D": -5.0}
         )
         result = client.get_choices_logprobs("prompt", ["A", "B"])
-        assert result == [-3.0, -0.5]  # trailing -9.9 sliced off
-        # one batched request carrying both choice prompts
+        assert result == [-3.0, -0.5]
+        # Single prompt, not a list — echo=False sends one request.
         client.client.completions.create.assert_called_once()
-        prompt_arg = client.client.completions.create.call_args.kwargs["prompt"]
-        assert prompt_arg == ["prompt A", "prompt B"]
+        call_kwargs = client.client.completions.create.call_args.kwargs
+        assert call_kwargs["prompt"] == "prompt"
+        assert call_kwargs["echo"] is False
+        assert call_kwargs["logprobs"] == 20
+        assert call_kwargs["max_tokens"] == 1
+
+    def test_choice_not_in_top_returns_neg_inf(self) -> None:
+        """A target letter absent from top_logprobs gets float('-inf')."""
+        client = _make_ll_client()
+        client.client.completions.create.return_value = _fake_top_probs_resp(
+            {" B": -0.5, " C": -4.2}
+        )
+        result = client.get_choices_logprobs("p", ["A", "B", "C"])
+        assert result == [float("-inf"), -0.5, -4.2]
+
+    def test_token_form_variants_are_checked(self) -> None:
+        """Letters are looked up as 'X', ' X', 'x', ' x' to handle tokenizer variance."""
+        client = _make_ll_client()
+        # Tokenizer uses lowercase form for some models.
+        client.client.completions.create.return_value = _fake_top_probs_resp(
+            {"b": -1.2, " C": -3.0}
+        )
+        result = client.get_choices_logprobs("p", ["A", "B", "C"])
+        assert result == [float("-inf"), -1.2, -3.0]
 
     def test_4xx_aborts_without_retry(self) -> None:
+        """Non-retryable 4xx errors abort immediately, returning all -inf."""
         client = _make_ll_client(max_retries=3)
         client.client.completions.create.side_effect = _make_api_error("bad", 400)
         result = client.get_choices_logprobs("p", ["a", "b"])
@@ -380,16 +419,16 @@ class TestMCLoglikelihoodClient:
         assert client.client.completions.create.call_count == 1
 
     def test_total_failure_returns_all_neg_inf(self) -> None:
+        """When every retry fails the result is all -inf (never an exception)."""
         client = _make_ll_client(max_retries=0)
         client.client.completions.create.side_effect = RuntimeError("down")
         assert client.get_choices_logprobs("p", ["a"]) == [float("-inf")]
 
-    def test_choice_count_mismatch_retries_to_neg_inf(self) -> None:
+    def test_empty_top_logprobs_returns_all_neg_inf(self) -> None:
+        """An empty top_logprobs dict yields -inf for every choice."""
         client = _make_ll_client(max_retries=0)
-        client.client.completions.create.return_value = _fake_logprob_resp(
-            [[None, -1.0]]
-        )
-        assert client.get_choices_logprobs("p", ["a", "b"]) == [float("-inf")] * 2
+        client.client.completions.create.return_value = _fake_top_probs_resp({})
+        assert client.get_choices_logprobs("p", ["A", "B"]) == [float("-inf"), float("-inf")]
 
 
 class TestProcessLoglikelihoodItem:
