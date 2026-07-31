@@ -130,7 +130,7 @@ class FewShotFormatter:
 
 def _argmax(xs: list[float]) -> int:
     """Return index of maximum value."""
-    return max(range(len(xs)), key=lambda i: xs[i])
+    return max(enumerate(xs), key=lambda x: x[1])[0]
 
 
 def _api_abort_reason(e: APIError) -> str | None:

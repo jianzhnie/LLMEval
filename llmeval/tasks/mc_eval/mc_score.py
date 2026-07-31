@@ -8,17 +8,25 @@ Public API:
 - score_generate:      score results produced by mc_infer generate mode
 - MCScoreResult:       metrics container (also written to the cache files)
 
-This module is deliberately free of heavy dependencies (no openai/torch) so
-scoring can run anywhere, independent of the inference environment.
+Per-item scoring runs in a pebble ProcessPool (same architecture as
+math_eval/math_score.py) so large datasets score in parallel; small inputs
+fall back to serial execution without pool overhead. Only light project
+dependencies (pebble/tqdm) are used, so scoring stays independent of the
+inference environment (no openai/torch).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from pebble import ProcessPool
+from tqdm import tqdm
 
 from llmeval.utils.logger import init_logger
 
@@ -37,6 +45,10 @@ _ANSWER_MARKER_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 _LETTER_FALLBACK_RE = re.compile(r"\b([A-Ja-j])\b")
+
+# Scoring modes supported by _process_item
+MODE_LOGLIKELIHOOD = "loglikelihood"
+MODE_GENERATE = "generate"
 
 
 @dataclass
@@ -71,6 +83,8 @@ class MCScoreResult:
 def score_loglikelihood(
     eval_dataset: list[dict[str, Any]],
     cache_path: str | Path,
+    max_workers: int = 8,
+    timeout: int = 60,
 ) -> float:
     """Score loglikelihood MC results and write the cache files.
 
@@ -78,11 +92,28 @@ def score_loglikelihood(
         eval_dataset: Items with gold / logprobs / choices (mc_infer output)
         cache_path: Per-item records JSONL path; a `<name>.summary.json`
             metrics file is written next to it
+        max_workers: Process-pool size (capped by dataset size and CPUs)
+        timeout: Per-item scoring timeout in seconds
 
     Returns:
         acc (the primary metric)
     """
-    metrics = _compute_loglikelihood_metrics(eval_dataset)
+    if any(
+        not (item.get(CHOICES_KEY) or item.get("choice_texts")) for item in eval_dataset
+    ):
+        logger.warning(
+            "Items have no 'choices' field; acc_norm falls back to acc. "
+            "(mc_infer >= 2026-07-30 writes choices into results)"
+        )
+    records = _score_items(
+        eval_dataset,
+        mode=MODE_LOGLIKELIHOOD,
+        label_key="",
+        response_key="",
+        max_workers=max_workers,
+        timeout=timeout,
+    )
+    metrics = _build_result(records)
     _write_cache(metrics, cache_path)
     return metrics.acc
 
@@ -90,35 +121,151 @@ def score_loglikelihood(
 def _compute_loglikelihood_metrics(
     eval_dataset: list[dict[str, Any]],
 ) -> MCScoreResult:
-    """Compute acc + acc_norm for loglikelihood results (lm-eval style).
+    """Compute acc + acc_norm serially (used by tests).
 
     acc:      argmax of raw logprobs
     acc_norm: argmax of logprob / len(choice_text) for each choice
     """
-    correct = 0
-    correct_norm = 0
-    per_item: list[dict[str, Any]] = []
-    warned_no_choices = False
+    records = [_score_loglikelihood_item(item) for item in eval_dataset]
+    return _build_result(records)
 
-    for item in eval_dataset:
-        record = _score_loglikelihood_item(item)
-        if record["correct"]:
-            correct += 1
-        if record["correct_norm"]:
-            correct_norm += 1
-        if (
-            not item.get(CHOICES_KEY)
-            and not item.get("choice_texts")
-            and not warned_no_choices
-        ):
-            logger.warning(
-                "Items have no 'choices' field; acc_norm falls back to acc. "
-                "(mc_infer >= 2026-07-30 writes choices into results)"
-            )
-            warned_no_choices = True
-        per_item.append(record)
 
-    total = len(per_item)
+# ===========================================================================
+# Generate scoring
+# ===========================================================================
+
+
+def score_generate(
+    eval_dataset: list[dict[str, Any]],
+    label_key: str,
+    response_key: str,
+    cache_path: str | Path,
+    max_workers: int = 8,
+    timeout: int = 60,
+) -> float:
+    """Score generation-based MC results by extracting the answer letter.
+
+    Args:
+        eval_dataset: Items with a label field and a generation list field
+        label_key: Field name of the gold answer letter (e.g. "answer")
+        response_key: Field name of the generations list (e.g. "gen");
+            only the first sample is scored
+        cache_path: Per-item records JSONL path (summary written next to it)
+        max_workers: Process-pool size (capped by dataset size and CPUs)
+        timeout: Per-item scoring timeout in seconds
+
+    Returns:
+        Accuracy (also reported as acc/acc_norm/exact_match in the summary)
+    """
+    records = _score_items(
+        eval_dataset,
+        mode=MODE_GENERATE,
+        label_key=label_key,
+        response_key=response_key,
+        max_workers=max_workers,
+        timeout=timeout,
+    )
+    metrics = _build_result(records)
+    _write_cache(metrics, cache_path)
+    return metrics.acc
+
+
+# ===========================================================================
+# Parallel driver (mirrors math_eval/math_score.py)
+# ===========================================================================
+
+
+def _process_item(args: tuple[int, dict[str, Any], str, str, str]) -> tuple[int, dict[str, Any]]:
+    """Pool worker: score one item. Must stay module-level (picklable).
+
+    Args:
+        args: (index, item, mode, label_key, response_key)
+
+    Returns:
+        (index, per-item record)
+    """
+    idx, item, mode, label_key, response_key = args
+    if mode == MODE_LOGLIKELIHOOD:
+        return idx, _score_loglikelihood_item(item)
+    return idx, _score_generate_item(item, label_key, response_key)
+
+
+def _score_items(
+    eval_dataset: list[dict[str, Any]],
+    mode: str,
+    label_key: str,
+    response_key: str,
+    max_workers: int,
+    timeout: int,
+) -> list[dict[str, Any]]:
+    """Score all items, preserving input order.
+
+    Uses a pebble ProcessPool when there is enough work; tiny inputs and
+    max_workers<=1 take a serial path. Timed-out or crashed items are
+    recorded as failed so one bad item never aborts the run.
+    """
+    total = len(eval_dataset)
+    if total == 0:
+        return []
+    if max_workers <= 1 or total == 1:
+        return [
+            _process_item((i, item, mode, label_key, response_key))[1]
+            for i, item in enumerate(eval_dataset)
+        ]
+
+    # Optimize worker count based on system resources.
+    # Use min(total, max_workers, cpu_count-1) to avoid over-provisioning
+    # for small datasets.
+    cpu_count = os.cpu_count() or 1
+    optimal_workers = min(total, max_workers, max(1, cpu_count - 1))
+    records: dict[int, dict[str, Any]] = {}
+
+    with (
+        tqdm(total=total, desc="Scoring items", unit="item") as pbar,
+        ProcessPool(max_workers=optimal_workers) as pool,
+    ):
+        future = pool.map(
+            _process_item,
+            [
+                (i, item, mode, label_key, response_key)
+                for i, item in enumerate(eval_dataset)
+            ],
+            timeout=timeout,
+        )
+        iterator = future.result()
+        while True:
+            try:
+                result = next(iterator)
+            except StopIteration:
+                break
+            except TimeoutError:
+                logger.warning("Individual scoring task timed out; marked failed")
+                pbar.update(1)
+                continue
+            except Exception as e:
+                logger.error(f"Error retrieving scoring result: {e}")
+                pbar.update(1)
+                continue
+
+            if result is not None:
+                idx, record = result
+                records[idx] = record
+            pbar.update(1)
+
+    # Fill gaps (timeouts / worker crashes) as failed records
+    return [
+        records.get(i) or _failure_record(item, mode, label_key)
+        for i, item in enumerate(eval_dataset)
+    ]
+
+
+def _build_result(records: list[dict[str, Any]]) -> MCScoreResult:
+    """Aggregate per-item records into the final metrics container."""
+    total = len(records)
+    correct = sum(1 for r in records if r["correct"])
+    # Generate-mode records have no correct_norm; it falls back to correct
+    # there, so acc_norm == acc for generate mode.
+    correct_norm = sum(1 for r in records if r.get("correct_norm", r["correct"]))
     total_f = max(total, 1)
     return MCScoreResult(
         acc=correct / total_f,
@@ -127,8 +274,13 @@ def _compute_loglikelihood_metrics(
         total=total,
         correct=correct,
         correct_norm=correct_norm,
-        per_item=per_item,
+        per_item=records,
     )
+
+
+# ===========================================================================
+# Per-item scoring
+# ===========================================================================
 
 
 def _score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -166,53 +318,6 @@ def _score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# ===========================================================================
-# Generate scoring
-# ===========================================================================
-
-
-def score_generate(
-    eval_dataset: list[dict[str, Any]],
-    label_key: str,
-    response_key: str,
-    cache_path: str | Path,
-) -> float:
-    """Score generation-based MC results by extracting the answer letter.
-
-    Args:
-        eval_dataset: Items with a label field and a generation list field
-        label_key: Field name of the gold answer letter (e.g. "answer")
-        response_key: Field name of the generations list (e.g. "gen");
-            only the first sample is scored
-        cache_path: Per-item records JSONL path (summary written next to it)
-
-    Returns:
-        Accuracy (also reported as acc/acc_norm/exact_match in the summary)
-    """
-    correct = 0
-    per_item: list[dict[str, Any]] = []
-
-    for item in eval_dataset:
-        record = _score_generate_item(item, label_key, response_key)
-        if record["correct"]:
-            correct += 1
-        per_item.append(record)
-
-    total = len(per_item)
-    accuracy = correct / total if total > 0 else 0.0
-    result = MCScoreResult(
-        acc=accuracy,
-        acc_norm=accuracy,
-        exact_match=accuracy,
-        total=total,
-        correct=correct,
-        correct_norm=correct,
-        per_item=per_item,
-    )
-    _write_cache(result, cache_path)
-    return accuracy
-
-
 def _score_generate_item(
     item: dict[str, Any], label_key: str, response_key: str
 ) -> dict[str, Any]:
@@ -235,6 +340,22 @@ def _score_generate_item(
     return {"gold": gold, "pred": pred, "correct": is_correct}
 
 
+def _failure_record(item: dict[str, Any], mode: str, label_key: str) -> dict[str, Any]:
+    """Build a failed per-item record for timed-out / crashed pool tasks."""
+    if mode == MODE_LOGLIKELIHOOD:
+        return {
+            "gold": _parse_gold(item.get(GOLD_KEY, -1)),
+            "pred": -1,
+            "correct": False,
+            "correct_norm": False,
+        }
+    return {
+        "gold": str(item.get(label_key, "")).strip().upper(),
+        "pred": "",
+        "correct": False,
+    }
+
+
 # ===========================================================================
 # Helpers
 # ===========================================================================
@@ -242,7 +363,7 @@ def _score_generate_item(
 
 def _argmax(xs: list[float]) -> int:
     """Return index of maximum value."""
-    return max(range(len(xs)), key=lambda i: xs[i])
+    return max(enumerate(xs), key=lambda x: x[1])[0]
 
 
 def _parse_gold(value: Any) -> int:
