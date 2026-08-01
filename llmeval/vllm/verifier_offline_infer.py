@@ -40,7 +40,7 @@ def _last_n_strs(text: str, n: int) -> str:
     return " ".join(tokens[-n:]) if tokens else ""
 
 
-def extract_answer(response_string: str, fallback_tokens: int = 200) -> str:
+def extract_tagged_answer(response_string: str, fallback_tokens: int = 200) -> str:
     """
     Extract content from <answer> tags in model response.
 
@@ -55,9 +55,9 @@ def extract_answer(response_string: str, fallback_tokens: int = 200) -> str:
         Extracted content from <answer> tags, or a fallback string if no tags found.
 
     Example:
-        >>> extract_answer("Some text <answer>42</answer> more text")
+        >>> extract_tagged_answer("Some text <answer>42</answer> more text")
         "42"
-        >>> extract_answer("No tags here")
+        >>> extract_tagged_answer("No tags here")
         "<last 200 tokens of the string, if any>"
     """
     if not response_string or not isinstance(response_string, str):
@@ -172,6 +172,17 @@ JUDGMENT_EXTRACTOR: dict[str, Callable[[str], str]] = {
     "fdd_verify_prompt": process_judgment_cursor,
     "fdd_verify_prompt_zh": process_judgment_cursor,
 }
+
+# Fail fast at import time if a prompt type was added to VERIFY_PROMPT_FACTORY
+# but no matching judgment extractor was registered here.
+_missing_extractors = set(VERIFY_PROMPT_FACTORY) - set(JUDGMENT_EXTRACTOR)
+if _missing_extractors:
+    raise RuntimeError(
+        f"VERIFY_PROMPT_FACTORY keys have no entry in JUDGMENT_EXTRACTOR: "
+        f"{sorted(_missing_extractors)}. "
+        "Add the missing key(s) to JUDGMENT_EXTRACTOR in "
+        "llmeval/vllm/verifier_offline_infer.py."
+    )
 
 
 class VerifierOfflineInferenceRunner:
@@ -360,7 +371,7 @@ class VerifierOfflineInferenceRunner:
             return None
 
         # Extract answer from response if it contains <answer> tags
-        llm_response = extract_answer(llm_response)
+        llm_response = extract_tagged_answer(llm_response)
 
         # Ensure we have a verifier prompt template
         if not self.verifier_prompt:

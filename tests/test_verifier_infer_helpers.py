@@ -1,6 +1,6 @@
 """Tests for llmeval.vllm.verifier_offline_infer helper functions.
 
-These tests target the pure-utility functions (extract_answer, process_judgment,
+These tests target the pure-utility functions (extract_tagged_answer, process_judgment,
 etc.) that don't require a vLLM engine.  We mock the heavy imports so the module
 can be loaded without vllm/openai installed.
 """
@@ -33,7 +33,7 @@ if "transformers" not in sys.modules:
 
 from llmeval.vllm.verifier_offline_infer import (
     _last_n_strs,
-    extract_answer,
+    extract_tagged_answer,
     process_judgment,
     process_judgment_cursor,
 )
@@ -52,7 +52,7 @@ class TestLastNStrs:
         assert _last_n_strs("", 3) == ""
 
 
-# ── extract_answer ────────────────────────────────────────────────
+# ── extract_tagged_answer ──────────────────────────────────────────
 
 
 class TestExtractAnswer:
@@ -65,38 +65,38 @@ class TestExtractAnswer:
         ],
     )
     def test_answer_tag_extraction(self, text: str, expected: str) -> None:
-        assert extract_answer(text) == expected
+        assert extract_tagged_answer(text) == expected
 
     def test_fallback_after_think_tag(self) -> None:
         text = "Some thinking\n</think >\n\nThe result is 7"
-        assert extract_answer(text) == "The result is 7"
+        assert extract_tagged_answer(text) == "The result is 7"
 
     def test_think_tag_case_insensitive(self) -> None:
         text = "Think...\n</THINK>\nvalue"
-        assert extract_answer(text) == "value"
+        assert extract_tagged_answer(text) == "value"
 
     def test_fallback_last_n_tokens(self) -> None:
         text = "alpha beta gamma"
-        result = extract_answer(text, fallback_tokens=2)
+        result = extract_tagged_answer(text, fallback_tokens=2)
         assert "beta gamma" in result
 
     def test_empty_string_returns_empty(self) -> None:
-        assert extract_answer("") == ""
+        assert extract_tagged_answer("") == ""
 
     def test_none_returns_empty(self) -> None:
-        assert extract_answer(None) == ""
+        assert extract_tagged_answer(None) == ""
 
     def test_non_string_returns_empty(self) -> None:
-        assert extract_answer(123) == ""
+        assert extract_tagged_answer(123) == ""
 
     def test_empty_answer_tag_falls_through(self) -> None:
         text = "<answer></answer>some content"
-        result = extract_answer(text)
+        result = extract_tagged_answer(text)
         assert result != ""
 
     def test_answer_tag_takes_priority_over_think(self) -> None:
         text = "</think />\nwrong <answer>correct</answer>"
-        assert extract_answer(text) == "correct"
+        assert extract_tagged_answer(text) == "correct"
 
 
 # ── process_judgment ──────────────────────────────────────────────
