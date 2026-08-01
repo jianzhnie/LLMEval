@@ -84,7 +84,7 @@ def _get_after_think(text: str) -> str:
     return text
 
 
-def _preprocess_answers(
+def preprocess_answers(
     data: list[dict[str, Any]], response_key: str
 ) -> list[dict[str, Any]]:
     """Strip think tags from all generated responses before scoring.
@@ -217,22 +217,24 @@ def evaluate_task(
     elif dataset_source == "mc_opensource":
         sample = eval_dataset[0] if eval_dataset else {}
         if "logprobs" in sample:
-            accuracy = score_loglikelihood(eval_dataset, cache_path)
-            # Read acc_norm from summary for lm-eval compatible reporting
-            summary_path = cache_path.with_suffix(".summary.json")
-            if summary_path.exists():
-                with open(summary_path, encoding="utf-8") as sf:
-                    s = json.load(sf)
-                logger.info(
-                    f"✅ Task: {task_name} (loglikelihood), "
-                    f"acc={s.get('acc', 0):.2%}, acc_norm={s.get('acc_norm', 0):.2%}"
-                )
-            else:
-                logger.info(
-                    f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}"
-                )
+            accuracy = score_loglikelihood(
+                eval_dataset=eval_dataset,
+                cache_path=cache_path,
+                max_workers=max_workers,
+                timeout=timeout,
+            )
+            logger.info(
+                f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}"
+            )
         else:
-            accuracy = score_generate(eval_dataset, label_key, response_key, cache_path)
+            accuracy = score_generate(
+                eval_dataset=eval_dataset,
+                label_key=label_key,
+                response_key=response_key,
+                cache_path=cache_path,
+                max_workers=max_workers,
+                timeout=timeout,
+            )
             logger.info(f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}")
         return accuracy
     else:
@@ -305,7 +307,7 @@ def main() -> int:
         # Models using deepseek_r1/openr1 system prompts output
         # <think>...</think><answer>...</answer> format, and math_verify
         # may fail to extract answers from raw think-tagged text.
-        # _preprocess_answers(processed_data, args.response_key)
+        # preprocess_answers(processed_data, args.response_key)
 
         # Run evaluation and get results
         accuracy = evaluate_task(

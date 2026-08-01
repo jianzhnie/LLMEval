@@ -80,7 +80,7 @@ def should_retry(exc: Exception, attempt: int, max_retries: int) -> bool | None:
     """
     from openai import APIConnectionError, APIError, RateLimitError
 
-    if isinstance(exc, (APIConnectionError, RateLimitError)):
+    if isinstance(exc, APIConnectionError | RateLimitError):
         if attempt < max_retries:
             retry_backoff(attempt, max_retries, f"{type(exc).__name__}: {exc!s}")
             return True

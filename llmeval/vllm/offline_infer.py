@@ -432,7 +432,7 @@ class OfflineInferenceRunner:
             if not prompt.strip():
                 logger.warning(
                     f"No valid prompt found under keys [{self.args.input_key!r}, "
-                    f'{self.args.input_key!r}"] for item with keys: {list(item.keys())}'
+                    f'"prompt"] for item with keys: {list(item.keys())}'
                 )
                 skipped_items += 1
                 continue
