@@ -825,8 +825,8 @@ class EvalTaskArguments:
             "mc_opensource/mmlu",
             "mc_opensource/mmlu_pro",
             "mc_opensource/ceval",
-            "livecodebench",
-            "ifeval",
+            # Code generation (pass@k evaluation)
+            "code_opensource/humaneval",
         ]
         if self.task_name not in valid_tasks:
             raise ValueError(

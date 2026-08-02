@@ -31,6 +31,7 @@ from typing import Any
 
 from transformers import HfArgumentParser
 
+from llmeval.tasks.code_eval.code_score import score_code
 from llmeval.tasks.math_eval.math_score import compute_scores
 from llmeval.tasks.mc_eval.mc_score import (
     score_generate,
@@ -237,6 +238,21 @@ def evaluate_task(
             )
             logger.info(f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}")
         return accuracy
+    elif dataset_source == "code_opensource":
+        try:
+            accuracy = score_code(
+                eval_dataset=eval_dataset,
+                label_key=label_key,
+                response_key=response_key,
+                cache_path=cache_path,
+                max_workers=max_workers,
+                timeout=timeout,
+            )
+            logger.info(f"✅ Task: {task_name}, Pass@1: {accuracy:.2%}")
+            return accuracy
+        except Exception as e:
+            logger.error(f"❌ Evaluation failed: {e!s}", exc_info=True)
+            return None
     else:
         logger.error(f"🤷‍♂️ Unsupported task type: '{task_name}'")
         return None
