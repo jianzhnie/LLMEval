@@ -14,7 +14,7 @@ LLMEval is a comprehensive evaluation system for assessing Large Language Models
 
 - **Multiple Inference Backends**: Support for vLLM (GPU/NPU) and SGLang
 - **Flexible Evaluation Modes**: Online (API), offline (local), and MC (loglikelihood/generate)
-- **Rich Benchmark Coverage**: 10 benchmarks — AIME 2024/2025/2026, MATH-500, GSM8K, GPQA-Diamond, HMMT-25, MMLU, MMLU-Pro, C-Eval
+- **Rich Benchmark Coverage**: 14 benchmarks — AIME 2024/2025/2026, MATH-500, GSM8K, GPQA-Diamond, HMMT-25, HumanEval, MBPP, MMLU, MMLU-Pro, C-Eval
 - **lm-eval Aligned**: Loglikelihood MC scoring with acc/acc_norm/exact_match, few-shot dedup
 - **One-Click Pipeline**: Shell scripts for end-to-end inference → scoring
 - **Resume Capability**: Automatically resume interrupted evaluations
@@ -203,6 +203,17 @@ bash scripts/longcat-flash/mc_score.sh
 MC_MODE=generate bash scripts/longcat-flash/mc_infer.sh
 ```
 
+**Code benchmarks** — generation with sandbox execution + pass@k:
+
+```bash
+# HumanEval + MBPP
+bash scripts/longcat-flash/code_infer.sh
+bash scripts/longcat-flash/code_score.sh
+
+# Pass@64 (64 samples, temperature 0.2)
+N_SAMPLES=64 TEMPERATURE=0.2 bash scripts/longcat-flash/code_infer.sh
+```
+
 Or run each math step separately:
 
 ```bash
@@ -260,6 +271,8 @@ Offline mode specific:
 | Math | `math_opensource/aime24` `math_opensource/aime25` `math_opensource/aime26` | math-verify |
 | Math | `math_opensource/gsm8k` `math_opensource/math500` `math_opensource/hmmt25` | math-verify |
 | Science | `math_opensource/gpqa_diamond` | math-verify |
+| Code | `code_opensource/humaneval` `code_opensource/mbpp` | pass@1 sandbox |
+| Code | `code_opensource/humaneval_plus` `code_opensource/mbpp_plus` | pass@1 sandbox |
 | MC | `mc_opensource/mmlu` `mc_opensource/mmlu_pro` `mc_opensource/ceval` | loglikelihood |
 
 See [docs/benchmark.md](docs/benchmark.md) for dataset details and HuggingFace links.
@@ -296,35 +309,42 @@ python -m sglang.launch_server \
 ```
 LLMEval/
 ├── llmeval/
-│   ├── vllm/              # Inference engines
-│   │   ├── online_server.py
-│   │   ├── offline_infer.py
-│   │   └── verifier_offline_infer.py
-│   ├── tasks/
-│   │   ├── math_eval/     # Math scoring (math-verify)
-│   │   │   ├── eval.py
+│   ├── evaluator.py        # Main orchestrator (math / mc / code)
+│   ├── inference/           # Inference backends
+│   │   ├── online.py        #   OpenAI-compatible API
+│   │   ├── offline.py       #   vLLM local engine
+│   │   ├── verifier.py      #   Verifier inference
+│   │   └── mc.py            #   MC inference
+│   ├── tasks/               # Task-specific scoring
+│   │   ├── code_eval/       #   Code (HumanEval / MBPP / pass@k)
+│   │   │   ├── execute.py   #     Sandbox execution
+│   │   │   └── code_score.py #    pass@k driver
+│   │   ├── math_eval/       #   Math (math-verify)
 │   │   │   ├── math_score.py
 │   │   │   └── utils_parser.py
-│   │   └── mc_eval/       # MC scoring (loglikelihood/generate)
-│   │       ├── mc_infer.py
+│   │   └── mc_eval/         #   MC (loglikelihood/generate)
 │   │       └── mc_score.py
-│   └── utils/             # Utilities
-│       ├── config.py
-│       ├── logger.py
-│       ├── template.py
-│       └── verifier_template.py
+│   └── utils/               # Shared utilities
+│       ├── config.py        #   Configuration dataclasses
+│       ├── log.py           #   Logging
+│       ├── retry.py         #   API retry logic
+│       ├── prompts.py       #   System prompts
+│       └── verifier_prompts.py # Verifier prompts
 ├── scripts/
-│   ├── longcat-flash/     # One-click eval
-│   │   ├── run_all.sh     #   Math full pipeline
-│   │   ├── online_infer.sh #   Math inference
-│   │   ├── get_score.sh   #   Math scoring
-│   │   ├── mc_infer.sh    #   MC inference
-│   │   └── mc_score.sh    #   MC scoring
-│   └── data_process/      # Data preparation
-│       └── prepare_math_benchmarks.py
-├── tests/                 # 130 tests
-├── data/                  # 10 benchmarks, 7000+ problems
-└── docs/benchmark.md      # Benchmark reference
+│   ├── longcat-flash/       # One-click evaluation
+│   │   ├── run_all.sh
+│   │   ├── online_infer.sh  #   Math inference
+│   │   ├── get_score.sh     #   Math scoring
+│   │   ├── code_infer.sh    #   Code inference
+│   │   ├── code_score.sh    #   Code scoring
+│   │   ├── mc_infer.sh      #   MC inference
+│   │   └── mc_score.sh      #   MC scoring
+│   └── data_process/
+│       ├── prepare_math_benchmarks.py
+│       └── prepare_code_benchmarks.py
+├── tests/                   # Unit tests
+├── data/                    # Benchmark datasets
+└── docs/                    # Documentation
 ```
 
 ## License

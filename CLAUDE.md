@@ -52,7 +52,7 @@ These are composed via multiple inheritance into mode-specific argument classes:
 
 System prompts are stored in factory dictionaries (`SYSTEM_PROMPT_FACTORY`, `VERIFY_PROMPT_FACTORY`) mapping string names to prompt text. Key types: `deepseek_r1`, `amthinking`, `openr1`, `default`, `empty` (which maps to `None`). The `is_chat_template_applied()` function detects pre-formatted queries and raises an error to prevent double-application of chat templates.
 
-### Inference Layer (`llmeval/vllm/`)
+### Inference Layer (`llmeval/inference/`)
 
 Three main entry points, each a standalone script with its own `main()`:
 
