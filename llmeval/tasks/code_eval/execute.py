@@ -1,15 +1,21 @@
 """Safe subprocess code execution for code-generation evaluation.
 
-This module provides a self-contained code execution sandbox inspired by the
-HuggingFace ``evaluate`` library's ``code_eval`` metric.  Generated code is
-run inside a separate process with a timeout, disabled dangerous builtins, and
-IO redirection so that a single hanging or misbehaving sample cannot corrupt
-the evaluation run.
+This module provides a self-contained code execution sandbox.  Generated code
+is run inside a separate process with:
+
+* **Timeout** — a signal-based timer and a process-level ``join(timeout)``
+  double safety net.
+* **Dangerous-function guard** — builtins like ``exit()``, ``quit()``, and
+  many ``os`` / ``shutil`` functions are disabled; modules like ``subprocess``
+  and ``ctypes`` are blocked from re-import.
+* **IO redirection** — ``stdout``, ``stderr``, and ``stdin`` are redirected so
+  that generated code cannot read captured output or interfere with the parent
+  process's streams.
 
 .. warning::
     This is a **safety guard**, not a security sandbox.  It prevents accidental
-    interference (infinite loops, filesystem noise) but does *not* protect
-    against intentionally malicious code.  Only run on trusted model outputs.
+    interference but does *not* protect against intentionally malicious code.
+    Only run on trusted model outputs.
 """
 
 from __future__ import annotations
@@ -23,12 +29,88 @@ import signal
 import sys
 import tempfile
 import traceback
+import types
+from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from typing import Any
 
-# ---------------------------------------------------------------------------
+__all__ = [
+    "TimeoutException",
+    "check_correctness",
+    "create_tempdir",
+    "reliability_guard",
+    "reliability_restore",
+    "swallow_io",
+    "time_limit",
+    "unsafe_execute",
+]
+
+# ===========================================================================
+# Module-level data for reliability_guard / reliability_restore
+# ===========================================================================
+
+#: Saved values keyed by name so that ``reliability_restore`` can undo
+#: all modifications made by ``reliability_guard``.
+_ORIGINAL_BUILTINS: dict[str, Any] = {}
+_ORIGINAL_OS_FUNCS: dict[str, Any] = {}
+_ORIGINAL_SHUTIL_FUNCS: dict[str, Any] = {}
+_ORIGINAL_MODULES: dict[str, Any] = {}
+
+#: ``os`` functions that are disabled by ``reliability_guard``.
+_FORBIDDEN_OS_FUNCTIONS: tuple[str, ...] = (
+    "kill",
+    "system",
+    "remove",
+    "rmdir",
+    "fork",
+    "rename",
+    "chmod",
+    "chown",
+    "getpid",
+    "getppid",
+    "listdir",
+    "killpg",
+    "unlink",
+    "symlink",
+    "link",
+    "forkpty",
+    "fchmod",
+    "fchown",
+    "chflags",
+    "lchflags",
+    "lchmod",
+    "lchown",
+)
+
+#: ``shutil`` functions that are disabled by ``reliability_guard``.
+_FORBIDDEN_SHUTIL_FUNCTIONS: tuple[str, ...] = (
+    "rmtree",
+    "move",
+    "copy",
+    "copy2",
+)
+
+#: Modules set to ``None`` in ``sys.modules`` so that ``import`` of them
+#: raises ``ImportError``.
+_BLOCKED_MODULES: tuple[str, ...] = (
+    "subprocess",
+    "faulthandler",
+    "ipdb",
+    "joblib",
+    "resource",
+    "psutil",
+    "tkinter",
+    "ctypes",
+    "multiprocessing",
+)
+
+#: Built-in names that are set to ``None`` inside the ``builtins`` module.
+_DISABLED_BUILTINS: tuple[str, ...] = ("exit", "quit")
+
+
+# ===========================================================================
 # Timeout
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 
 class TimeoutException(Exception):
@@ -36,32 +118,37 @@ class TimeoutException(Exception):
 
 
 @contextmanager
-def time_limit(seconds: float) -> Any:
+def time_limit(seconds: float) -> Generator[None, None, None]:
     """Context manager that raises :class:`TimeoutException` after *seconds*.
 
     Uses ``signal.setitimer(ITIMER_REAL, ...)`` so the timeout fires even
-    when the main thread is blocked in a C extension call.
+    when the main thread is blocked in a C-extension call.
+
+    The previous ``SIGALRM`` handler is saved and restored on exit.
     """
 
     def _handler(_signum: int, _frame: Any) -> None:
         raise TimeoutException("Code execution timed out")
 
-    signal.signal(signal.SIGALRM, _handler)
+    _prev_handler = signal.signal(signal.SIGALRM, _handler)
     signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, _prev_handler)
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # IO swallowing
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 
 class WriteOnlyStringIO(io.StringIO):
-    """A StringIO that rejects reads — prevents generated code from peeking
-    at captured output."""
+    """A ``StringIO`` that rejects reads.
+
+    Prevents generated code from peeking at captured output.
+    """
 
     def read(self, *args: Any, **kwargs: Any) -> str:
         raise OSError("reading from stdout/stderr is not allowed")
@@ -74,11 +161,10 @@ class WriteOnlyStringIO(io.StringIO):
 
 
 @contextmanager
-def swallow_io() -> Any:
+def swallow_io() -> Generator[None, None, None]:
     """Redirect stdout, stderr, and stdin so generated code cannot interfere.
 
-    Yields nothing — after the block, callers can inspect
-    ``sys.stdout.getvalue()`` etc. directly.
+    After the block, callers can inspect ``sys.stdout.getvalue()`` etc.
     """
     _out, _err, _in = sys.stdout, sys.stderr, sys.stdin
     sys.stdout = WriteOnlyStringIO()
@@ -92,100 +178,69 @@ def swallow_io() -> Any:
         sys.stdin = _in
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Reliability guard
-# ---------------------------------------------------------------------------
-
-_ORIGINAL_BUILTINS: dict[str, Any] = {}
-_ORIGINAL_OS_FUNCS: dict[str, Any] = {}
-_ORIGINAL_SHUTIL_FUNCS: dict[str, Any] = {}
-_ORIGINAL_MODULES: dict[str, Any] = {}
+# ===========================================================================
 
 
-def _get_builtins_module() -> Any:
-    """Return the actual ``builtins`` module regardless of context.
+def _get_builtins_module() -> types.ModuleType:
+    """Return the ``builtins`` module regardless of execution context.
 
-    In the main interpreter ``__builtins__`` is the ``builtins`` module.
-    Inside a ``multiprocessing.Process`` (or ``exec``) it may be the
-    module's ``__dict__`` instead.
+    Inside ``multiprocessing.Process`` or ``exec()``, ``__builtins__`` is
+    the module's ``__dict__`` instead of the module itself.  This helper
+    always returns the real module.
     """
-    import builtins as _bi
+    import builtins
 
-    return _bi
+    return builtins
 
 
 def reliability_guard() -> None:
-    """Disable dangerous builtins and standard-library functions.
+    """Disable dangerous builtins and stdlib functions.
 
-    Generated code that calls ``exit()``, ``os.system()``, ``subprocess.Popen``,
-    ``shutil.rmtree``, etc. will get an ``AttributeError`` instead of causing
-    real side-effects.
+    After calling this function, generated code that tries to:
 
-    Modules are set to ``None`` in ``sys.modules`` (rather than popped) so
-    that ``import subprocess`` raises ``ImportError`` instead of silently
-    reloading the real module.
+    * call ``exit()`` / ``quit()``
+    * call ``os.system()``, ``os.kill()``, ``os.remove()``, …
+    * call ``shutil.rmtree()``, ``shutil.move()``, …
+    * ``import subprocess``, ``import ctypes``, ``import multiprocessing``, …
+
+    will receive an ``AttributeError`` or ``ImportError`` instead of
+    causing side effects.
+
+    Call :func:`reliability_restore` to undo all changes.
     """
     _bi = _get_builtins_module()
 
-    # --- builtins ---
-    for _name in ("exit", "quit"):
+    # -- builtins ---------------------------------------------------------------
+    for _name in _DISABLED_BUILTINS:
         _ORIGINAL_BUILTINS[_name] = getattr(_bi, _name, None)
         setattr(_bi, _name, None)
 
-    # --- os ---
-    _forbidden_os = (
-        "kill",
-        "system",
-        "remove",
-        "rmdir",
-        "fork",
-        "rename",
-        "chmod",
-        "chown",
-        "getpid",
-        "getppid",
-        "listdir",
-        "killpg",
-        "unlink",
-        "symlink",
-        "link",
-        "forkpty",
-        "fchmod",
-        "fchown",
-        "chflags",
-        "lchflags",
-        "lchmod",
-        "lchown",
-    )
-    for _name in _forbidden_os:
+    # -- os ---------------------------------------------------------------------
+    for _name in _FORBIDDEN_OS_FUNCTIONS:
         if hasattr(os, _name):
             _ORIGINAL_OS_FUNCS[_name] = getattr(os, _name)
             setattr(os, _name, None)
 
-    # --- shutil ---
-    for _name in ("rmtree", "move", "copy", "copy2"):
+    # -- shutil -----------------------------------------------------------------
+    for _name in _FORBIDDEN_SHUTIL_FUNCTIONS:
         if hasattr(shutil, _name):
             _ORIGINAL_SHUTIL_FUNCS[_name] = getattr(shutil, _name)
             setattr(shutil, _name, None)
 
-    # --- dangerous modules — block re-import by setting sys.modules[key] = None ---
-    for _mod in (
-        "subprocess",
-        "faulthandler",
-        "ipdb",
-        "joblib",
-        "resource",
-        "psutil",
-        "tkinter",
-        "ctypes",
-        "multiprocessing",
-    ):
+    # -- dangerous modules (block re-import) ------------------------------------
+    for _mod in _BLOCKED_MODULES:
         _ORIGINAL_MODULES[_mod] = sys.modules.get(_mod)
-        sys.modules[_mod] = None
+        sys.modules[_mod] = None  # None → ImportError on re-import
 
 
 def reliability_restore() -> None:
-    """Reverse the effects of :func:`reliability_guard`."""
+    """Reverse the effects of :func:`reliability_guard`.
+
+    Restores the original values of all disabled builtins, ``os`` /
+    ``shutil`` functions, and ``sys.modules`` entries.
+    """
     _bi = _get_builtins_module()
     for _name, _val in _ORIGINAL_BUILTINS.items():
         setattr(_bi, _name, _val)
@@ -200,14 +255,17 @@ def reliability_restore() -> None:
             sys.modules[_name] = _val
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Temp directory
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 
 @contextmanager
-def create_tempdir() -> Any:
-    """Create and chdir into a temporary directory, cleaning up on exit."""
+def create_tempdir() -> Generator[str, None, None]:
+    """Create a temporary directory, ``chdir`` into it, and clean up on exit.
+
+    Yields the path of the temporary directory.
+    """
     _orig_cwd = os.getcwd()
     _td = tempfile.TemporaryDirectory()
     try:
@@ -218,9 +276,9 @@ def create_tempdir() -> Any:
         _td.cleanup()
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Core execution
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 
 def unsafe_execute(
@@ -228,28 +286,28 @@ def unsafe_execute(
     timeout: float,
     exec_globals: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
-    """Execute *check_program* with safety guards and a timeout.
+    """Execute *check_program* inside safety guards with a timeout.
 
     Parameters
     ----------
-    check_program:
-        Python source to execute (candidate + test harness concatenated).
-    timeout:
+    check_program : str
+        Python source to execute (candidate function + test harness).
+    timeout : float
         Maximum seconds before raising :exc:`TimeoutException`.
-    exec_globals:
-        Optional globals dict for ``exec``.  If ``None`` a fresh ``{}`` is used.
+    exec_globals : dict or None
+        Optional globals dict for ``exec()``.  ``None`` means a fresh ``{}``.
 
     Returns
     -------
-    (status, stderr_str)
-        ``status`` is one of ``"passed"``, ``"timed out"``, or
-        ``"failed: <exception-name>"``.
+    tuple[str, str]
+        ``(status, stderr_traceback)`` where *status* is one of
+        ``"passed"``, ``"timed out"``, or ``"failed: <ExceptionName>"``.
     """
     if exec_globals is None:
         exec_globals = {}
 
     with create_tempdir():
-        # Preserve cleanup helpers that reliability_guard would break.
+        # Save clean-up helpers before reliability_guard disables them.
         _saved_rmtree = shutil.rmtree
         _saved_os_rmdir = os.rmdir
         _saved_os_chdir = os.chdir
@@ -268,14 +326,14 @@ def unsafe_execute(
             return (f"failed: {type(exc).__name__}", _stack)
         finally:
             reliability_restore()
-            shutil.rmtree = _saved_rmtree
-            os.rmdir = _saved_os_rmdir
-            os.chdir = _saved_os_chdir
+            shutil.rmtree = _saved_rmtree  # type: ignore[assignment]
+            os.rmdir = _saved_os_rmdir  # type: ignore[assignment]
+            os.chdir = _saved_os_chdir  # type: ignore[assignment]
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Multiprocess wrapper
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 
 def _worker(
@@ -284,8 +342,10 @@ def _worker(
     task_id: str,
     result_file: str,
 ) -> None:
-    """Entry-point for the child process — runs *check_program* and writes
-    the result dict to *result_file* as JSON."""
+    """Run *check_program* in a child process and write the result to disk.
+
+    This function is the ``target`` of ``multiprocessing.Process``.
+    """
     status, stderr = unsafe_execute(check_program, timeout)
     result: dict[str, Any] = {
         "task_id": task_id,
@@ -298,7 +358,7 @@ def _worker(
 
 
 def _cleanup_tmp(path: str) -> None:
-    """Remove temporary file, ignoring errors if it does not exist."""
+    """Remove *path*, ignoring ``OSError`` if it does not exist."""
     with suppress(OSError):
         os.unlink(path)
 
@@ -310,31 +370,37 @@ def check_correctness(
 ) -> dict[str, Any]:
     """Execute *check_program* in a child process with a double safety net.
 
-    The inner guard is :func:`unsafe_execute` with a signal-based timeout.
-    The outer guard is ``multiprocessing.Process.join(timeout+1)`` followed
-    by ``p.kill()`` — this catches cases where the signal-based timeout
-    itself is blocked or delayed (e.g. inside an uninterruptible syscall).
+    The **inner** guard is :func:`unsafe_execute` (signal-based timeout +
+    reliability guard).  The **outer** guard is a process-level
+    ``join(timeout+1)`` followed by ``kill()`` — this catches cases where
+    the signal-based timeout is blocked (e.g. inside an uninterruptible
+    syscall).
 
-    Uses ``spawn`` context for cross-platform safety (``fork`` is unsafe on
-    macOS) and a temporary JSON file for IPC so that no complex object
-    pickling (queues, pipes) is needed across the spawn boundary.
+    IPC uses a temporary JSON file so no complex object pickling (queues,
+    pipes, managers) is needed across the process boundary.
 
-    Returns a dict with keys ``task_id``, ``passed``, ``result``, ``stderr``.
+    The multiprocessing start method is configurable via the environment
+    variable ``LLMEVAL_MP_METHOD`` (default ``"fork"`` — library-friendly,
+    no ``if __name__ == "__main__"`` guard required in the caller).  Set to
+    ``"spawn"`` on macOS if your calling script uses proper guards.
+
+    Returns
+    -------
+    dict[str, Any]
+        Keys: ``task_id``, ``passed`` (bool), ``result`` (str), ``stderr`` (str).
     """
-    # Default to "fork" for library‑friendly usage (no ``if __name__``
-    # guard required in the caller).  On macOS, set ``LLMEVAL_MP_METHOD=spawn``
-    # if your calling script has proper ``if __name__ == "__main__"`` guards
-    # and you want to avoid potential fork‑safety issues.
+    # -- resolve multiprocessing context ----------------------------------------
     _mp_method = os.environ.get("LLMEVAL_MP_METHOD", "fork")
     try:
         ctx = multiprocessing.get_context(_mp_method)
     except ValueError:
         ctx = multiprocessing.get_context()
 
-    # Temporary JSON file for IPC — avoids Manager / pickling of Queue objects.
+    # -- create temporary result file -------------------------------------------
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="code_eval_")
     os.close(tmp_fd)
 
+    # -- start worker process ---------------------------------------------------
     p = ctx.Process(
         target=_worker,
         args=(check_program, timeout, task_id, tmp_path),
@@ -343,47 +409,39 @@ def check_correctness(
         p.start()
     except Exception:
         _cleanup_tmp(tmp_path)
-        return {
-            "task_id": task_id,
-            "passed": False,
-            "result": "failed: could not start worker process",
-            "stderr": "",
-        }
+        return _fail(task_id, "failed: could not start worker process")
 
-    # If the process exits before the timeout, p.join returns immediately.
     p.join(timeout + 1)
 
+    # -- timeout -----------------------------------------------------------------
     if p.is_alive():
         p.kill()
-        p.join(5)  # give SIGKILL time to deliver
+        p.join(5)
         _cleanup_tmp(tmp_path)
-        return {
-            "task_id": task_id,
-            "passed": False,
-            "result": "timed out",
-            "stderr": "",
-        }
+        return _fail(task_id, "timed out")
 
+    # -- segmentation fault -----------------------------------------------------
     if p.exitcode == -signal.SIGSEGV:
         _cleanup_tmp(tmp_path)
-        return {
-            "task_id": task_id,
-            "passed": False,
-            "result": "failed: SegmentationFault",
-            "stderr": "",
-        }
+        return _fail(task_id, "failed: SegmentationFault")
 
+    # -- collect result ----------------------------------------------------------
     try:
         with open(tmp_path, encoding="utf-8") as f:
             result: dict[str, Any] = json.load(f)
     except Exception:
-        result = {
-            "task_id": task_id,
-            "passed": False,
-            "result": "failed: worker did not produce a result",
-            "stderr": "",
-        }
+        result = _fail(task_id, "failed: worker did not produce a result")
     finally:
         _cleanup_tmp(tmp_path)
 
     return result
+
+
+def _fail(task_id: str, reason: str) -> dict[str, Any]:
+    """Return a uniform failure record."""
+    return {
+        "task_id": task_id,
+        "passed": False,
+        "result": reason,
+        "stderr": "",
+    }

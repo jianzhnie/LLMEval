@@ -43,6 +43,10 @@ from llmeval.utils.logger import init_logger
 # Initialize logger for the evaluation module
 logger = init_logger("math_eval")
 
+# Precompiled regex for think-tag stripping (used by _get_after_think).
+_ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
+_THINK_END_RE = re.compile(r"</think\s*>", re.IGNORECASE)
+
 
 def _get_after_think(text: str) -> str:
     """
@@ -67,15 +71,13 @@ def _get_after_think(text: str) -> str:
         return ""
 
     # Prefer content inside <answer>...</answer> tags
-    answer_pattern = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
-    match = answer_pattern.search(text)
+    match = _ANSWER_TAG_RE.search(text)
     if match:
         # Return stripped content even if empty — empty answer is valid extraction
         return match.group(1).strip()
 
     # Fallback: extract content after </think> (with optional spaces and newlines)
-    think_end_pattern = re.compile(r"</think\s*>", re.IGNORECASE)
-    match = think_end_pattern.search(text)
+    match = _THINK_END_RE.search(text)
     if match:
         tail = text[match.end() :].strip()
         if tail:
@@ -85,9 +87,7 @@ def _get_after_think(text: str) -> str:
     return text
 
 
-def preprocess_answers(
-    data: list[dict[str, Any]], response_key: str
-) -> list[dict[str, Any]]:
+def preprocess_answers(data: list[dict[str, Any]], response_key: str) -> None:
     """Strip think tags from all generated responses before scoring.
 
     Args:
@@ -103,7 +103,7 @@ def preprocess_answers(
             item[response_key] = [_get_after_think(str(g)) for g in gen]
         elif isinstance(gen, str):
             item[response_key] = _get_after_think(gen)
-    return data
+    return None  # mutates in-place; callers should not rely on return value
 
 
 def _process_item(
@@ -240,8 +240,6 @@ def evaluate_task(
             logger.info(f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}")
         return accuracy
     elif dataset_source == "code_opensource":
-        # Strip think tags for reasoning-model outputs before code extraction.
-        preprocess_answers(eval_dataset, response_key)
         try:
             accuracy = score_code(
                 eval_dataset=eval_dataset,
