@@ -8,13 +8,14 @@
 
 ## Overview
 
-LLMEval is a comprehensive evaluation system for assessing Large Language Models (LLMs) on mathematical reasoning and general knowledge benchmarks. It supports both online (API-based) and offline (local inference) modes with built-in answer verification and multiple-choice evaluation.
+LLMEval is a comprehensive evaluation system for assessing Large Language Models (LLMs) on mathematical reasoning, code generation, and general knowledge benchmarks. It supports both online (API-based) and offline (local inference) modes with built-in answer verification and multiple-choice evaluation.
 
 ### Key Features
 
 - **Multiple Inference Backends**: Support for vLLM (GPU/NPU) and SGLang
 - **Flexible Evaluation Modes**: Online (API), offline (local), and MC (loglikelihood/generate)
 - **Rich Benchmark Coverage**: 14 benchmarks — AIME 2024/2025/2026, MATH-500, GSM8K, GPQA-Diamond, HMMT-25, HumanEval, MBPP, MMLU, MMLU-Pro, C-Eval
+- **Code Evaluation**: HumanEval / MBPP with sandbox execution and pass@k scoring
 - **lm-eval Aligned**: Loglikelihood MC scoring with acc/acc_norm/exact_match, few-shot dedup
 - **One-Click Pipeline**: Shell scripts for end-to-end inference → scoring
 - **Resume Capability**: Automatically resume interrupted evaluations
@@ -226,11 +227,20 @@ bash scripts/longcat-flash/get_score.sh      # scoring
 Alternatively, use the CLI directly:
 
 ```bash
+# Math evaluation
 python ./llmeval/evaluator.py \
     --input_path "./output/longcat-flash/aime24_bz32.jsonl" \
     --cache_path "./output/longcat-flash/eval_score/aime24_bz32.jsonl" \
     --task_name "math_opensource/aime24" \
     --max_workers 16
+
+# Code evaluation (pass@1, 5s execution timeout)
+python ./llmeval/evaluator.py \
+    --input_path "./output/longcat-flash/humaneval_bz1.jsonl" \
+    --cache_path "./output/longcat-flash/eval_score/humaneval_bz1.jsonl" \
+    --task_name "code_opensource/humaneval" \
+    --max_workers 32 \
+    --exec_timeout 5.0
 ```
 
 ## Detailed Usage
@@ -246,6 +256,7 @@ Common parameters for both online and offline modes:
 | `--top_p` | 0.95 | Nucleus sampling parameter |
 | `--top_k` | 40 | Top-k sampling parameter |
 | `--max_tokens` | 32768 | Maximum tokens to generate |
+| `--exec_timeout` | 3.0 | Code execution timeout (seconds, code tasks only) |
 
 Online mode specific:
 

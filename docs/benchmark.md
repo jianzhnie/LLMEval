@@ -96,6 +96,53 @@ MMLU 增强版，10 选项，去除了简单题。
 
 ---
 
+## 代码生成任务
+
+代码生成评估使用沙箱执行 + pass@k 评分。模型生成代码后，在隔离子进程中执行测试用例。
+
+### HumanEval
+OpenAI 发布的 164 道 Python 函数生成题。
+
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [openai/openai_humaneval](https://huggingface.co/datasets/openai/openai_humaneval) |
+| 样本数 | 164 (test) |
+| 答案格式 | assert + check() |
+| 评分方式 | pass@1 沙箱执行 |
+
+### HumanEval+
+HumanEval 增强版，每个题目增加更多测试用例。
+
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [evalplus/humanevalplus](https://huggingface.co/datasets/evalplus/humanevalplus) |
+| 样本数 | 164 (test) |
+| 答案格式 | assert + check() |
+| 评分方式 | pass@1 沙箱执行 |
+
+### MBPP
+Google 发布的 500 道 Python 编程题（test split）。
+
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [google-research-datasets/mbpp](https://huggingface.co/datasets/google-research-datasets/mbpp) (full) |
+| 样本数 | 500 (test) |
+| 答案格式 | assert 语句 |
+| 评分方式 | pass@1 沙箱执行 |
+
+### MBPP+
+MBPP 增强版。
+
+| 属性 | 值 |
+|------|-----|
+| HF 数据集 | [evalplus/mbppplus](https://huggingface.co/datasets/evalplus/mbppplus) |
+| 样本数 | 500 (test) |
+| 答案格式 | assert 语句 |
+| 评分方式 | pass@1 沙箱执行 |
+
+
+---
+
 ## 汇总表
 
 | Benchmark | 类型 | 样本数 | 评分 | HF |
@@ -110,6 +157,10 @@ MMLU 增强版，10 选项，去除了简单题。
 | mmlu | MC | ~14,000 | loglikelihood | [cais/mmlu](https://huggingface.co/datasets/cais/mmlu) |
 | mmlu_pro | MC | ~12,000 | loglikelihood | [TIGER-Lab/MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro) |
 | ceval | MC | ~5,500 | loglikelihood | [ceval/ceval-exam](https://huggingface.co/datasets/ceval/ceval-exam) |
+| humaneval | 代码 | 164 | pass@1 | [openai/openai_humaneval](https://huggingface.co/datasets/openai/openai_humaneval) |
+| humaneval_plus | 代码 | 164 | pass@1 | [evalplus/humanevalplus](https://huggingface.co/datasets/evalplus/humanevalplus) |
+| mbpp | 代码 | 500 | pass@1 | [google-research-datasets/mbpp](https://huggingface.co/datasets/google-research-datasets/mbpp) |
+| mbpp_plus | 代码 | 500 | pass@1 | [evalplus/mbppplus](https://huggingface.co/datasets/evalplus/mbppplus) |
 
 ## 数据准备
 
@@ -117,6 +168,10 @@ MMLU 增强版，10 选项，去除了简单题。
 # 数学 benchmark
 python scripts/data_process/prepare_math_benchmarks.py \
     --benchmarks gsm8k math500 aime24 aime25 aime26 hmmt25 gpqa_diamond
+
+# 代码 benchmark
+python scripts/data_process/prepare_code_benchmarks.py \
+    --benchmarks humaneval mbpp
 
 # MC benchmark
 python scripts/data_process/prepare_math_benchmarks.py \

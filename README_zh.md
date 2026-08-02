@@ -15,6 +15,7 @@ LLMEval 是一个用于评测大型语言模型（LLM）的综合评估系统，
 - **多推理后端**：vLLM (GPU/NPU)、SGLang、OpenAI API
 - **三种评测模式**：在线生成、离线本地推理、MC loglikelihood 对比
 - **10 个 Benchmark**：AIME 2024/2025/2026、MATH-500、GSM8K、GPQA-Diamond、HMMT-25、MMLU、MMLU-Pro、C-Eval
+- **代码评估**: HumanEval / MBPP 沙箱执行 + pass@k 评分
 - **lm-eval 对齐**：acc/acc_norm/exact_match、few-shot 去重
 - **一键评测**：Shell 脚本端到端推理 → 评分
 - **断点续评**：自动恢复中断的评测任务
