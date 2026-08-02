@@ -153,7 +153,7 @@ mkdir -p "${output_dir}"
 
 # --- Run Inference Tasks ---
 # aime24 (repeated sample 64 times)
-python ./llmeval/vllm/online_server.py \
+python ./llmeval/inference/online.py \
     --input_file "./data/aime24.jsonl" \
     --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
     --base_url "${base_url}" \
@@ -163,7 +163,7 @@ python ./llmeval/vllm/online_server.py \
     --max_workers 8
 
 # aime25 (repeated sample 64 times)
-python ./llmeval/vllm/online_server.py \
+python ./llmeval/inference/online.py \
     --input_file "./data/aime25.jsonl" \
     --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
     --base_url "${base_url}" \
@@ -215,7 +215,7 @@ bash scripts/longcat-flash/get_score.sh      # scoring
 Alternatively, use the CLI directly:
 
 ```bash
-python ./llmeval/tasks/math_eval/eval.py \
+python ./llmeval/evaluator.py \
     --input_path "./output/longcat-flash/aime24_bz32.jsonl" \
     --cache_path "./output/longcat-flash/eval_score/aime24_bz32.jsonl" \
     --task_name "math_opensource/aime24" \

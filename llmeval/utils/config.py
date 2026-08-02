@@ -26,9 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from llmeval.utils.logger import init_logger
-from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
-from llmeval.utils.verifier_template import VERIFY_PROMPT_FACTORY
+from llmeval.utils.log import init_logger
+from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
+from llmeval.utils.verifier_prompts import VERIFY_PROMPT_FACTORY
 
 __all__ = [
     "DataArguments",
@@ -607,7 +607,7 @@ class MCInferConfig:
     """
     Configuration for MC (multiple-choice) inference.
 
-    Used by llmeval/tasks/mc_eval/mc_infer.py and parsed from the command
+    Used by llmeval/inference/mc.py and parsed from the command
     line by HfArgumentParser; field names map 1:1 to CLI flags
     (e.g. --input_file, --max_workers).
 

@@ -55,7 +55,7 @@ for task in $BENCHMARKS; do
 
     if [[ "$PARALLEL" == "1" ]]; then
         {
-            python llmeval/tasks/math_eval/eval.py \
+            python llmeval/evaluator.py \
                 --input_path "$input_file" \
                 --cache_path "$cache_file" \
                 --task_name "$task_name" \
@@ -64,7 +64,7 @@ for task in $BENCHMARKS; do
         } &
         TASK_PIDS+=($!)
     else
-        python llmeval/tasks/math_eval/eval.py \
+        python llmeval/evaluator.py \
             --input_path "$input_file" \
             --cache_path "$cache_file" \
             --task_name "$task_name" \

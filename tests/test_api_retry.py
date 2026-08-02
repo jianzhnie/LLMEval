@@ -1,4 +1,4 @@
-"""Tests for llmeval.utils.api_retry (shared retry utilities)."""
+"""Tests for llmeval.utils.retry (shared retry utilities)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from llmeval.utils.api_retry import (
+from llmeval.utils.retry import (
     ClientError,
     error_message,
     is_context_length_error,

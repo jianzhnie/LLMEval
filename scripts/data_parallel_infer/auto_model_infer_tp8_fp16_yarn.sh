@@ -230,7 +230,7 @@ readonly EXTRA_ENGINE_ARGS="${EXTRA_ENGINE_ARGS:-}"
 
 # 项目路径配置
 readonly PROJECT_DIR="${PROJECT_DIR:-/home/jianzhnie/llmtuner/llm/LLMEval}"
-readonly INFER_SCRIPT="${INFER_SCRIPT:-${PROJECT_DIR}/llmeval/vllm/online_server.py}"
+readonly INFER_SCRIPT="${INFER_SCRIPT:-${PROJECT_DIR}/llmeval/inference/online.py}"
 readonly SET_ENV_SCRIPT="${SET_ENV_SCRIPT:-${PROJECT_DIR}/set_env.sh}"
 
 # 输出与日志路径配置

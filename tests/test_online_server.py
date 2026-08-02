@@ -1,4 +1,4 @@
-"""Tests for llmeval.vllm.online_server.
+"""Tests for llmeval.inference.online.
 
 Focuses on data-loading, resume logic, and thread-safe writing --
 all testable without a live vLLM server.
@@ -39,7 +39,7 @@ if "tqdm" not in sys.modules:
     _tqdm.tqdm = MagicMock
     sys.modules["tqdm"] = _tqdm
 
-from llmeval.vllm.online_server import (
+from llmeval.inference.online import (
     InferenceRunner,
 )
 
@@ -251,7 +251,7 @@ def _make_api_error(message: str = "", status_code: int | None = None) -> Except
 
 def _make_client(max_retries: int = 0):
     """InferenceClient bypassing __init__ (works with stubbed openai module)."""
-    from llmeval.vllm.online_server import InferenceClient
+    from llmeval.inference.online import InferenceClient
 
     client = InferenceClient.__new__(InferenceClient)
     client.timeout = 5
@@ -293,7 +293,7 @@ class TestGetContent:
         client.client.chat.completions.create.side_effect = _make_api_error(
             "invalid", 400
         )
-        from llmeval.utils.api_retry import ClientError
+        from llmeval.utils.retry import ClientError
 
         with pytest.raises(ClientError, match="non-retryable"):
             client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
@@ -303,7 +303,7 @@ class TestGetContent:
         monkeypatch.setattr(time, "sleep", lambda s: None)
         client = _make_client(max_retries=1)
         client.client.chat.completions.create.side_effect = _make_api_error("boom", 500)
-        from llmeval.utils.api_retry import ClientError
+        from llmeval.utils.retry import ClientError
 
         with pytest.raises(ClientError):
             client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)

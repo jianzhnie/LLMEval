@@ -27,15 +27,15 @@ from openai import APIConnectionError, APIError, RateLimitError
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
-from llmeval.utils.api_retry import (
+from llmeval.utils.config import OnlineInferArguments
+from llmeval.utils.log import init_logger
+from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
+from llmeval.utils.retry import (
     ClientError,
     is_context_length_error,
     non_retryable_client_error,
     retry_backoff,
 )
-from llmeval.utils.config import OnlineInferArguments
-from llmeval.utils.logger import init_logger
-from llmeval.utils.template import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
 
 logger = init_logger("online_vllm_server", logging.INFO)
 

@@ -1,11 +1,11 @@
-"""Tests for llmeval.utils.logger."""
+"""Tests for llmeval.utils.log."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
-from llmeval.utils.logger import get_logger, init_logger, set_log_level
+from llmeval.utils.log import get_logger, init_logger, set_log_level
 
 
 class TestInitLogger:

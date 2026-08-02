@@ -16,7 +16,7 @@ mkdir -p "${output_dir}"
 
 # --- Run Inference Tasks ---
 # aime25 (repeated sample 64 times)
-python ./llmeval/vllm/online_server.py \
+python ./llmeval/inference/online.py \
     --input_file "./data/aime25.jsonl" \
     --input_key "prompt" \
     --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
@@ -28,7 +28,7 @@ python ./llmeval/vllm/online_server.py \
     --max_workers 64
 
 # aime24 (repeated sample 64 times)
-python ./llmeval/vllm/online_server.py \
+python ./llmeval/inference/online.py \
     --input_file "./data/aime24.jsonl" \
     --input_key "prompt" \
     --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \

@@ -41,7 +41,7 @@ from typing import Any, Literal
 from pebble import ProcessPool
 from tqdm import tqdm
 
-from llmeval.utils.logger import init_logger
+from llmeval.utils.log import init_logger
 
 __all__ = [
     "MCScoreResult",

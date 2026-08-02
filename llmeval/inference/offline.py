@@ -30,8 +30,8 @@ from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
 from llmeval.utils.config import OfflineInferArguments
-from llmeval.utils.logger import init_logger
-from llmeval.utils.template import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
+from llmeval.utils.log import init_logger
+from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
 
 # Initialize logger
 logger = init_logger("offline_vllm_infer", logging.INFO)

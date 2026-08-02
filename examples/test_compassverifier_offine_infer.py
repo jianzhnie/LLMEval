@@ -2,11 +2,11 @@
 """
 Test script for CompassVerifier offline inference.
 
-This script demonstrates how to use the optimized CompassVerifierOfflineInferenceRunner
+This script demonstrates how to use the optimized VerifierOfflineInferenceRunner
 for an end-to-end offline evaluation workflow:
 - parse CLI arguments into `OfflineInferArguments`
 - create sample input data
-- run inference with `CompassVerifierOfflineInferenceRunner`
+- run inference with `VerifierOfflineInferenceRunner`
 - read and display results
 - clean up temporary files
 """
@@ -19,11 +19,9 @@ import sys
 
 from transformers import HfArgumentParser
 
+from llmeval.inference.verifier import VerifierOfflineInferenceRunner
 from llmeval.utils.config import OfflineInferArguments
-from llmeval.utils.logger import init_logger
-from llmeval.vllm.compassverifier_offline_infer import (
-    CompassVerifierOfflineInferenceRunner,
-)
+from llmeval.utils.log import init_logger
 
 # Initialize logger early so we can report parsing/IO issues consistently.
 logger = init_logger("vllm_infer", logging.INFO)
@@ -98,7 +96,7 @@ def main() -> None:
         print(f"Output will be saved to: {args.output_path}")
 
         # Run CompassVerifier inference.
-        runner = CompassVerifierOfflineInferenceRunner(args)
+        runner = VerifierOfflineInferenceRunner(args)
         runner.run()
 
         # Read and display results.

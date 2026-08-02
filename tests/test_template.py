@@ -1,10 +1,10 @@
-"""Tests for llmeval.utils.template."""
+"""Tests for llmeval.utils.prompts."""
 
 from __future__ import annotations
 
 import pytest
 
-from llmeval.utils.template import (
+from llmeval.utils.prompts import (
     SYSTEM_PROMPT_FACTORY,
     is_chat_template_applied,
 )

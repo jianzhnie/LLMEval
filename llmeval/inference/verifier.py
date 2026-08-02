@@ -27,8 +27,8 @@ from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
 from llmeval.utils.config import VerifierInferArguments
-from llmeval.utils.logger import init_logger
-from llmeval.utils.verifier_template import VERIFY_PROMPT_FACTORY
+from llmeval.utils.log import init_logger
+from llmeval.utils.verifier_prompts import VERIFY_PROMPT_FACTORY
 
 # Initialize logger
 logger = init_logger("compass_verifier_infer", logging.INFO)
@@ -181,7 +181,7 @@ if _missing_extractors:
         f"VERIFY_PROMPT_FACTORY keys have no entry in JUDGMENT_EXTRACTOR: "
         f"{sorted(_missing_extractors)}. "
         "Add the missing key(s) to JUDGMENT_EXTRACTOR in "
-        "llmeval/vllm/verifier_offline_infer.py."
+        "llmeval/inference/verifier_offline_infer.py."
     )
 
 

@@ -89,7 +89,7 @@ run_eval() {
     echo "[INFO] 缓存:   $cache_file"
     echo "[INFO] 结果:   $result_file"
 
-    if python llmeval/tasks/math_eval/eval.py \
+    if python llmeval/evaluator.py \
         --input_path "$input_file" \
         --cache_path "$cache_file" \
         --task_name "$task_name" \

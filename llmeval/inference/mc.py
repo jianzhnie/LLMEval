@@ -1,6 +1,6 @@
 """Multiple-choice inference: loglikelihood and generation modes.
 
-This module mirrors llmeval/vllm/online_server.py in structure, naming, and
+This module mirrors llmeval/inference/online_server.py in structure, naming, and
 documentation style so the two can be reviewed side by side with a file diff:
 - MCLoglikelihoodClient  ~  InferenceClient
 - MCRunner               ~  InferenceRunner
@@ -32,10 +32,10 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.tasks.mc_eval.mc_score import argmax
-from llmeval.utils.api_retry import should_retry
 from llmeval.utils.config import MCInferConfig
-from llmeval.utils.logger import init_logger
-from llmeval.utils.template import SYSTEM_PROMPT_FACTORY
+from llmeval.utils.log import init_logger
+from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
+from llmeval.utils.retry import should_retry
 
 logger = init_logger("mc_infer")
 

@@ -162,7 +162,7 @@ bash scripts/longcat-flash/get_score.sh      # 数学评分
 
 在线模式：
 ```bash
-python ./llmeval/vllm/online_server.py \
+python ./llmeval/inference/online.py \
     --input_file "./data/aime24.jsonl" \
     --output_file "./output/aime24.jsonl" \
     --base_url "http://127.0.0.1:8090/v1" \
@@ -173,7 +173,7 @@ python ./llmeval/vllm/online_server.py \
 
 离线模式（无需启动服务器）：
 ```bash
-python llmeval/vllm/offline_infer.py \
+python llmeval/inference/offline.py \
     --input_file "./data/aime24.jsonl" \
     --output_file "./output/aime24.jsonl" \
     --model_name_or_path "Qwen/QwQ-32B" \
@@ -184,7 +184,7 @@ python llmeval/vllm/offline_infer.py \
 ### 4. 手动评分
 
 ```bash
-python ./llmeval/tasks/math_eval/eval.py \
+python ./llmeval/evaluator.py \
     --input_path "./output/aime24.jsonl" \
     --cache_path "./output/aime24_scores.jsonl" \
     --task_name "math_opensource/aime24" \

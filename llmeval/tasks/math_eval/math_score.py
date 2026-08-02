@@ -20,7 +20,7 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
-from llmeval.utils.logger import init_logger
+from llmeval.utils.log import init_logger
 
 # Configure a dedicated logger for the math scoring module
 logger = init_logger("math_score")

@@ -1,5 +1,5 @@
 """
-Model Output Evaluation Script
+Main evaluation orchestrator — dispatches to math / code / mc scorers
 
 This script provides functionality to evaluate language model outputs for various tasks.
 It processes input data in JSONL format and computes performance metrics based on the
@@ -38,7 +38,7 @@ from llmeval.tasks.mc_eval.mc_score import (
     score_loglikelihood,
 )
 from llmeval.utils.config import EvalTaskArguments
-from llmeval.utils.logger import init_logger
+from llmeval.utils.log import init_logger
 
 # Initialize logger for the evaluation module
 logger = init_logger("math_eval")

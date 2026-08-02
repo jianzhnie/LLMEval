@@ -1,6 +1,6 @@
 """Shared retry utilities for OpenAI-compatible API clients.
 
-Used by llmeval/vllm/online_server.py and llmeval/tasks/mc_eval/mc_infer.py
+Used by llmeval/inference/online.py and llmeval/inference/mc.py
 so both classify and back off from API failures identically.
 """
 
@@ -11,7 +11,7 @@ import time
 
 from openai import APIError
 
-from llmeval.utils.logger import init_logger
+from llmeval.utils.log import init_logger
 
 logger = init_logger("api_retry")
 

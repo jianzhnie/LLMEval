@@ -1,4 +1,4 @@
-"""Tests for llmeval.tasks.math_eval.eval helpers.
+"""Tests for llmeval.evaluator helpers.
 
 These tests target _process_item and evaluate_task logic without
 requiring pebble / math-verify to be installed.
@@ -30,7 +30,7 @@ if "transformers" not in sys.modules:
     _tf.HfArgumentParser = MagicMock
     sys.modules["transformers"] = _tf
 
-from llmeval.tasks.math_eval.eval import _process_item, evaluate_task
+from llmeval.evaluator import _process_item, evaluate_task
 
 
 class TestProcessItem:

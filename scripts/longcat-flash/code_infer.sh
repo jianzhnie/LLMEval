@@ -120,7 +120,7 @@ run_infer() {
 
     echo "[START] $task (temp=$temperature, n=$n_samples) -> $output_file"
 
-    python llmeval/vllm/online_server.py \
+    python llmeval/inference/online.py \
         --input_file "$input_file" \
         --input_key "prompt" \
         --task "$task" \

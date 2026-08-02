@@ -1,4 +1,4 @@
-"""Tests for llmeval.vllm.verifier_offline_infer helper functions.
+"""Tests for llmeval.inference.verifier helper functions.
 
 These tests target the pure-utility functions (extract_tagged_answer, process_judgment,
 etc.) that don't require a vLLM engine.  We mock the heavy imports so the module
@@ -31,7 +31,7 @@ if "transformers" not in sys.modules:
     _tf.HfArgumentParser = MagicMock
     sys.modules["transformers"] = _tf
 
-from llmeval.vllm.verifier_offline_infer import (
+from llmeval.inference.verifier import (
     _last_n_strs,
     extract_tagged_answer,
     process_judgment,

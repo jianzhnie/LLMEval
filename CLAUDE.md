@@ -56,15 +56,15 @@ System prompts are stored in factory dictionaries (`SYSTEM_PROMPT_FACTORY`, `VER
 
 Three main entry points, each a standalone script with its own `main()`:
 
-- **`online_server.py`** — `InferenceClient` wraps `openai.OpenAI` with exponential backoff retry logic. `InferenceRunner` orchestrates concurrent requests via `ThreadPoolExecutor`, with resume support (reads existing output file, counts completed samples per prompt, continues). Entry: `python llmeval/vllm/online_server.py --input_file ... --output_file ... --base_url ...`
+- **`online_server.py`** — `InferenceClient` wraps `openai.OpenAI` with exponential backoff retry logic. `InferenceRunner` orchestrates concurrent requests via `ThreadPoolExecutor`, with resume support (reads existing output file, counts completed samples per prompt, continues). Entry: `python llmeval/inference/online.py --input_file ... --output_file ... --base_url ...`
 
-- **`offline_infer.py`** — `OfflineInferenceRunner` uses vLLM's native `LLM` class for local batched inference. Converts data to chat message format, handles resume, writes results incrementally. Entry: `python llmeval/vllm/offline_infer.py --model_name_or_path ... --input_file ...`
+- **`offline_infer.py`** — `OfflineInferenceRunner` uses vLLM's native `LLM` class for local batched inference. Converts data to chat message format, handles resume, writes results incrementally. Entry: `python llmeval/inference/offline.py --model_name_or_path ... --input_file ...`
 
 - **`verifier_offline_infer.py`** — Extends offline inference with verifier-specific logic. Uses `VERIFY_PROMPT_FACTORY` prompts to have an LLM judge whether candidate answers match ground truth. Supports prompt templates like `compassverify`, `fdd_prompt_cursor`, etc.
 
 ### Evaluation/Scoring Layer (`llmeval/tasks/math_eval/`)
 
-- **`eval.py`** — Entry point for scoring. Parses `EvalTaskArguments`, validates input JSONL, delegates to `compute_scores()` for math tasks. Entry: `python llmeval/tasks/math_eval/eval.py --input_path ... --task_name math_opensource/aime24 --cache_path ...`
+- **`eval.py`** — Entry point for scoring. Parses `EvalTaskArguments`, validates input JSONL, delegates to `compute_scores()` for math tasks. Entry: `python llmeval/evaluator.py --input_path ... --task_name math_opensource/aime24 --cache_path ...`
 
 - **`math_score.py`** — Core scoring logic using `math-verify` library. Uses `ProcessPool` (pebble) for parallel answer verification with timeout support. Implements `math_metric` with both `ExprExtractionConfig` and `LatexExtractionConfig` for robust answer extraction. Tracks statistics (correct, timeout, error counts) and caches results as JSONL.
 

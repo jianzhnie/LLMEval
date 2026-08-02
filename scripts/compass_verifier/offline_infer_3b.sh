@@ -8,7 +8,7 @@ input_file=/home/jianzhnie/llmtuner/llm/LLMEval/output/am-thinking-0528/infer_qw
 output_file=./output/CompassVerifier-3B/infer_qwen25_32B_math_top_30K_rl_merged_comass-verifier3b.jsonl
 model_name_or_path=/home/jianzhnie/llmtuner/hfhub/models/OpenCompass/CompassVerifier-3B
 
-python /home/jianzhnie/llmtuner/llm/LLMEval/llmeval/vllm/verifier_offline_infer.py \
+python /home/jianzhnie/llmtuner/llm/LLMEval/llmeval/inference/verifier.py \
     --input_file $input_file \
     --output_file $output_file \
     --model_name_or_path $model_name_or_path \

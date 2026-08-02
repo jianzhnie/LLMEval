@@ -20,7 +20,7 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.code_eval.execute import check_correctness
-from llmeval.utils.logger import init_logger
+from llmeval.utils.log import init_logger
 
 logger = init_logger("code_score")
 

@@ -88,7 +88,7 @@ for task in $BENCHMARKS; do
 
     if [[ "$PARALLEL" == "1" ]]; then
         {
-            python llmeval/tasks/mc_eval/mc_infer.py \
+            python llmeval/inference/mc.py \
                 --input_file "$input_file" \
                 --output_file "$output_file" \
                 --base_url "$BASE_URL" \
@@ -106,7 +106,7 @@ for task in $BENCHMARKS; do
         } >> "$log_file" &
         TASK_PIDS+=($!)
     else
-        python llmeval/tasks/mc_eval/mc_infer.py \
+        python llmeval/inference/mc.py \
             --input_file "$input_file" \
             --output_file "$output_file" \
             --base_url "$BASE_URL" \

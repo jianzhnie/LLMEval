@@ -189,7 +189,7 @@ class TestMCInferConfig:
     """Test MCInferConfig defaults and API key resolution."""
 
     def test_defaults(self) -> None:
-        from llmeval.tasks.mc_eval.mc_infer import MCInferConfig
+        from llmeval.inference.mc import MCInferConfig
 
         c = MCInferConfig()
         assert c.mode == "loglikelihood"
@@ -198,14 +198,14 @@ class TestMCInferConfig:
         assert c.n_shot == 0
 
     def test_api_key_default(self) -> None:
-        from llmeval.tasks.mc_eval.mc_infer import MCInferConfig
+        from llmeval.inference.mc import MCInferConfig
 
         with patch.dict("os.environ", {}, clear=True):
             c = MCInferConfig()
             assert c.api_key == "EMPTY"
 
     def test_api_key_from_env(self) -> None:
-        from llmeval.tasks.mc_eval.mc_infer import MCInferConfig
+        from llmeval.inference.mc import MCInferConfig
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
             c = MCInferConfig()
@@ -232,13 +232,13 @@ class TestFewShotFormatter:
             return f.name
 
     def test_zero_shot(self) -> None:
-        from llmeval.tasks.mc_eval.mc_infer import FewShotFormatter
+        from llmeval.inference.mc import FewShotFormatter
 
         fmt = FewShotFormatter(n_shot=0)
         assert fmt.get_prefix("any prompt") == ""
 
     def test_load_and_prefix(self) -> None:
-        from llmeval.tasks.mc_eval.mc_infer import FewShotFormatter
+        from llmeval.inference.mc import FewShotFormatter
 
         tmp = self._make_examples(10)
         try:
@@ -253,7 +253,7 @@ class TestFewShotFormatter:
             Path(tmp).unlink(missing_ok=True)
 
     def test_dedup_excludes_test_prompt(self) -> None:
-        from llmeval.tasks.mc_eval.mc_infer import FewShotFormatter
+        from llmeval.inference.mc import FewShotFormatter
 
         tmp = self._make_examples(10)
         try:
@@ -274,7 +274,7 @@ class TestFewShotFormatter:
             Path(tmp).unlink(missing_ok=True)
 
     def test_insufficient_examples(self) -> None:
-        from llmeval.tasks.mc_eval.mc_infer import FewShotFormatter
+        from llmeval.inference.mc import FewShotFormatter
 
         tmp = self._make_examples(3)
         try:
@@ -340,7 +340,7 @@ def _fake_top_probs_resp(top_probs: dict[str, float]) -> MagicMock:
 
 def _make_ll_client(max_retries: int = 0):
     """MCLoglikelihoodClient bypassing __init__ (works with stubbed openai)."""
-    from llmeval.tasks.mc_eval.mc_infer import MCLoglikelihoodClient
+    from llmeval.inference.mc import MCLoglikelihoodClient
 
     client = MCLoglikelihoodClient.__new__(MCLoglikelihoodClient)
     client.model_name = "m"
@@ -354,7 +354,7 @@ def _make_mc_runner(tmp_path: Path, mode: str = "loglikelihood", max_retries: in
     """MCRunner bypassing __init__ (no client construction)."""
     import threading as _threading
 
-    from llmeval.tasks.mc_eval.mc_infer import MCRunner
+    from llmeval.inference.mc import MCRunner
     from llmeval.utils.config import MCInferConfig
 
     runner = MCRunner.__new__(MCRunner)
@@ -495,8 +495,8 @@ class TestMCRunnerEndToEnd:
                 f.write(json.dumps(it, ensure_ascii=False) + "\n")
 
     def test_run_and_resume(self, tmp_path: Path) -> None:
+        from llmeval.inference.mc import MCRunner
         from llmeval.tasks.mc_eval import mc_infer
-        from llmeval.tasks.mc_eval.mc_infer import MCRunner
         from llmeval.utils.config import MCInferConfig
 
         class FakeLLClient:
@@ -529,8 +529,8 @@ class TestMCRunnerEndToEnd:
         assert len(out.read_text().strip().split("\n")) == 2
 
     def test_failed_items_dumped_not_written(self, tmp_path: Path) -> None:
+        from llmeval.inference.mc import MCRunner
         from llmeval.tasks.mc_eval import mc_infer
-        from llmeval.tasks.mc_eval.mc_infer import MCRunner
         from llmeval.utils.config import MCInferConfig
 
         class FailLLClient:
