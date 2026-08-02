@@ -6,6 +6,7 @@ requiring pebble / math-verify to be installed.
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import types
 from pathlib import Path
@@ -14,18 +15,34 @@ from unittest.mock import MagicMock
 import pytest
 
 # ── Mock heavy dependencies ──
-for mod_name in ("pebble", "math_verify", "math_verify.metric", "math_verify.parser"):
-    if mod_name not in sys.modules:
+# Only stub modules that are genuinely absent.  If pebble/math-verify are
+# installed, leave the real modules in place so that other test modules
+# running in the same process keep working (a global MagicMock on
+# pebble.ProcessPool would break test_mc_eval's parallel path).
+_pebble_absent = "pebble" not in sys.modules and not importlib.util.find_spec("pebble")
+_math_verify_absent = "math_verify" not in sys.modules and not importlib.util.find_spec(
+    "math_verify"
+)
+
+if _pebble_absent:
+    sys.modules["pebble"] = types.ModuleType("pebble")
+if _math_verify_absent:
+    for mod_name in ("math_verify", "math_verify.metric", "math_verify.parser"):
         sys.modules[mod_name] = types.ModuleType(mod_name)
 
-sys.modules["pebble"].ProcessPool = MagicMock  # type: ignore[attr-defined]
-sys.modules["math_verify"].metric = types.ModuleType("metric")
-sys.modules["math_verify"].parser = types.ModuleType("parser")
-sys.modules["math_verify.metric"].math_metric = MagicMock(return_value=MagicMock())
-sys.modules["math_verify.parser"].ExprExtractionConfig = MagicMock
-sys.modules["math_verify.parser"].LatexExtractionConfig = MagicMock
+if _pebble_absent:
+    sys.modules["pebble"].ProcessPool = MagicMock  # type: ignore[attr-defined]
+if _math_verify_absent:
+    sys.modules["math_verify"].metric = types.ModuleType("metric")
+    sys.modules["math_verify"].parser = types.ModuleType("parser")
+    sys.modules["math_verify.metric"].math_metric = MagicMock(return_value=MagicMock())
+    sys.modules["math_verify.parser"].ExprExtractionConfig = MagicMock
+    sys.modules["math_verify.parser"].LatexExtractionConfig = MagicMock
 
-if "transformers" not in sys.modules:
+# Only stub transformers if it is genuinely absent — a partial stub (just
+# HfArgumentParser) would otherwise pollute sys.modules for other test modules
+# that need the real AutoTokenizer (e.g. test_verifier_infer_helpers).
+if "transformers" not in sys.modules and not importlib.util.find_spec("transformers"):
     _tf = types.ModuleType("transformers")
     _tf.HfArgumentParser = MagicMock
     sys.modules["transformers"] = _tf

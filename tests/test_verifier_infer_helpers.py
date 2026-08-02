@@ -7,6 +7,7 @@ can be loaded without vllm/openai installed.
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import types
 from unittest.mock import MagicMock
@@ -14,18 +15,21 @@ from unittest.mock import MagicMock
 import pytest
 
 # ── Mock heavy dependencies before importing the module under test ──
-for mod_name in ("vllm", "vllm.outputs"):
-    if mod_name not in sys.modules:
-        sys.modules[mod_name] = types.ModuleType(mod_name)
+_vllm_absent = importlib.util.find_spec("vllm") is None
+if _vllm_absent:
+    sys.modules["vllm"] = types.ModuleType("vllm")
+    sys.modules["vllm.outputs"] = types.ModuleType("vllm.outputs")
 
 # Provide stubs that the module's top-level imports need
-sys.modules["vllm"].LLM = MagicMock  # type: ignore[attr-defined]
-sys.modules["vllm"].SamplingParams = MagicMock  # type: ignore[attr-defined]
-sys.modules["vllm"].RequestOutput = MagicMock  # type: ignore[attr-defined]
-sys.modules["vllm.outputs"].RequestOutput = MagicMock  # type: ignore[attr-defined]
+if _vllm_absent:
+    sys.modules["vllm"].LLM = MagicMock  # type: ignore[attr-defined]
+    sys.modules["vllm"].SamplingParams = MagicMock  # type: ignore[attr-defined]
+    sys.modules["vllm"].RequestOutput = MagicMock  # type: ignore[attr-defined]
+    sys.modules["vllm.outputs"].RequestOutput = MagicMock  # type: ignore[attr-defined]
 
-# transformers may be available; if not, mock it
-if "transformers" not in sys.modules:
+# transformers may be available; if not, mock it.  Guarded with find_spec so
+# the real module (with AutoTokenizer) is never shadowed in sys.modules.
+if "transformers" not in sys.modules and not importlib.util.find_spec("transformers"):
     _tf = types.ModuleType("transformers")
     _tf.AutoTokenizer = MagicMock
     _tf.HfArgumentParser = MagicMock

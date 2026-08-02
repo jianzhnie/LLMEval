@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 import tempfile
@@ -22,14 +23,15 @@ for _exc in ("APIConnectionError", "APIError", "RateLimitError"):
     if not hasattr(_openai_mod, _exc):
         setattr(_openai_mod, _exc, type(_exc, (Exception,), {}))
 
-# mc_infer imports HfArgumentParser/tqdm at module level; stub if absent
-
-if "transformers" not in sys.modules:
+# mc_infer imports HfArgumentParser/tqdm at module level; stub only if absent.
+# A partial transformers stub would pollute sys.modules for other test modules
+# that need the real AutoTokenizer.
+if "transformers" not in sys.modules and not importlib.util.find_spec("transformers"):
     _tf = types.ModuleType("transformers")
     _tf.HfArgumentParser = MagicMock
     sys.modules["transformers"] = _tf
 
-if "tqdm" not in sys.modules:
+if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
     _tqdm = types.ModuleType("tqdm")
     _tqdm.tqdm = MagicMock
     sys.modules["tqdm"] = _tqdm
@@ -495,8 +497,8 @@ class TestMCRunnerEndToEnd:
                 f.write(json.dumps(it, ensure_ascii=False) + "\n")
 
     def test_run_and_resume(self, tmp_path: Path) -> None:
+        from llmeval.inference import mc as mc_infer
         from llmeval.inference.mc import MCRunner
-        from llmeval.tasks.mc_eval import mc_infer
         from llmeval.utils.config import MCInferConfig
 
         class FakeLLClient:
@@ -529,8 +531,8 @@ class TestMCRunnerEndToEnd:
         assert len(out.read_text().strip().split("\n")) == 2
 
     def test_failed_items_dumped_not_written(self, tmp_path: Path) -> None:
+        from llmeval.inference import mc as mc_infer
         from llmeval.inference.mc import MCRunner
-        from llmeval.tasks.mc_eval import mc_infer
         from llmeval.utils.config import MCInferConfig
 
         class FailLLClient:

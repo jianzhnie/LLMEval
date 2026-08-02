@@ -7,6 +7,7 @@ stubbed or avoided entirely.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 import tempfile
@@ -16,10 +17,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ── Stub pebble before importing the scoring module ────────────────────
-if "pebble" not in sys.modules:
+# ── Stub pebble only if it is genuinely absent ────────────────────────
+# If pebble is installed (as it is in dev environments), leave the real
+# module in place.  An unconditional global MagicMock on pebble.ProcessPool
+# would pollute other test modules (e.g. test_mc_eval) running in the same
+# process.
+if "pebble" not in sys.modules and not importlib.util.find_spec("pebble"):
     sys.modules["pebble"] = types.ModuleType("pebble")
-sys.modules["pebble"].ProcessPool = MagicMock
+    sys.modules["pebble"].ProcessPool = MagicMock
 
 from llmeval.tasks.code_eval.code_score import (
     CodeScoreResult,

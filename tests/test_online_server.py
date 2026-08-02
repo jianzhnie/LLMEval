@@ -6,6 +6,7 @@ all testable without a live vLLM server.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 import threading
@@ -28,13 +29,16 @@ _openai_mod.APIConnectionError = type("APIConnectionError", (Exception,), {})
 _openai_mod.APIError = type("APIError", (Exception,), {})
 _openai_mod.RateLimitError = type("RateLimitError", (Exception,), {})
 
-if "transformers" not in sys.modules:
+# Only stub transformers if genuinely absent — a partial stub (just
+# HfArgumentParser) would pollute sys.modules for other test modules needing
+# the real AutoTokenizer.
+if "transformers" not in sys.modules and not importlib.util.find_spec("transformers"):
     _tf = types.ModuleType("transformers")
     _tf.HfArgumentParser = MagicMock
     sys.modules["transformers"] = _tf
 
 # tqdm is likely available, but just in case
-if "tqdm" not in sys.modules:
+if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
     _tqdm = types.ModuleType("tqdm")
     _tqdm.tqdm = MagicMock
     sys.modules["tqdm"] = _tqdm
