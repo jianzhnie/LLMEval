@@ -161,6 +161,7 @@ def evaluate_task(
     cache_path: str | Path,
     max_workers: int,
     timeout: int = 20,
+    exec_timeout: float = 3.0,
 ) -> float | None:
     """
     Evaluate model outputs against ground truth data for a specific task.
@@ -239,6 +240,8 @@ def evaluate_task(
             logger.info(f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}")
         return accuracy
     elif dataset_source == "code_opensource":
+        # Strip think tags for reasoning-model outputs before code extraction.
+        preprocess_answers(eval_dataset, response_key)
         try:
             accuracy = score_code(
                 eval_dataset=eval_dataset,
@@ -247,6 +250,7 @@ def evaluate_task(
                 cache_path=cache_path,
                 max_workers=max_workers,
                 timeout=timeout,
+                exec_timeout=exec_timeout,
             )
             logger.info(f"✅ Task: {task_name}, Pass@1: {accuracy:.2%}")
             return accuracy
@@ -323,7 +327,7 @@ def main() -> int:
         # Models using deepseek_r1/openr1 system prompts output
         # <think>...</think><answer>...</answer> format, and math_verify
         # may fail to extract answers from raw think-tagged text.
-        # preprocess_answers(processed_data, args.response_key)
+        preprocess_answers(processed_data, args.response_key)
 
         # Run evaluation and get results
         accuracy = evaluate_task(
@@ -334,6 +338,7 @@ def main() -> int:
             args.cache_path,
             args.max_workers,
             args.timeout,
+            args.exec_timeout,
         )
 
         if accuracy is not None:

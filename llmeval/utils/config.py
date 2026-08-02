@@ -792,6 +792,12 @@ class EvalTaskArguments:
     timeout: int = field(
         default=20, metadata={"help": "Timeout for LLM inference in seconds."}
     )
+    exec_timeout: float = field(
+        default=3.0,
+        metadata={
+            "help": "Per-item code execution timeout in seconds (code tasks only)."
+        },
+    )
 
     def __post_init__(self) -> None:
         """
@@ -810,6 +816,8 @@ class EvalTaskArguments:
             raise ValueError(f"max_workers must be positive, got {self.max_workers}")
         if self.timeout <= 0:
             raise ValueError(f"timeout must be positive, got {self.timeout}")
+        if self.exec_timeout <= 0:
+            raise ValueError(f"exec_timeout must be positive, got {self.exec_timeout}")
         valid_tasks = [
             # Math (math-verify scoring)
             "math_opensource/math500",
@@ -827,6 +835,9 @@ class EvalTaskArguments:
             "mc_opensource/ceval",
             # Code generation (pass@k evaluation)
             "code_opensource/humaneval",
+            "code_opensource/mbpp",
+            "code_opensource/humaneval_plus",
+            "code_opensource/mbpp_plus",
         ]
         if self.task_name not in valid_tasks:
             raise ValueError(

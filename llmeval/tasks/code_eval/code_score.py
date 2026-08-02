@@ -48,6 +48,28 @@ _CODE_START_RE: re.Pattern[str] = re.compile(
     re.MULTILINE,
 )
 
+# Lines that suggest the model output continues past the actual code body.
+# Only matches at column 0 (top-level) — indented def/class inside a function
+# body are *not* stop markers.
+_STOP_MARKERS: re.Pattern[str] = re.compile(
+    r"^(?:class |def |if __name__|print\b|#)",
+    re.MULTILINE,
+)
+
+# Think-tag stripping for reasoning-model outputs (deepseek_r1 / openr1).
+_THINK_RE: re.Pattern[str] = re.compile(
+    r"<think[^>]*>.*?</think>",
+    re.DOTALL | re.IGNORECASE,
+)
+_THINK_END_RE: re.Pattern[str] = re.compile(
+    r"</think\s*>",
+    re.IGNORECASE,
+)
+_ANSWER_TAG_RE: re.Pattern[str] = re.compile(
+    r"<answer>(.*?)</answer>",
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 # ---------------------------------------------------------------------------
 # Code extraction
@@ -74,7 +96,7 @@ def extract_code(text: str) -> str:
     # Strategy 1 — fenced block
     m = _FENCE_RE.search(text)
     if m:
-        return m.group(1).strip()
+        return m.group(1).rstrip()
 
     # Strategy 2 — first code line to first stop marker
     start_m = _CODE_START_RE.search(text)
@@ -83,21 +105,17 @@ def extract_code(text: str) -> str:
         # Skip past the initial code-start line.
         first_line_end = body.find("\n")
         if first_line_end == -1:
-            return body.strip()
+            return body.rstrip()
         after_first_line = body[first_line_end + 1 :]
-        # Find the next stop marker (class/def/if __name__/print/#) that starts
-        # at column 0 — these are top-level constructs, not indented body lines.
-        stop_m = re.search(
-            r"^(?:class |def |if __name__|print\b|#)",
-            after_first_line,
-            re.MULTILINE,
-        )
+        # Find the next stop marker at column 0 — these are top-level
+        # constructs, not indented body lines.
+        stop_m = _STOP_MARKERS.search(after_first_line)
         if stop_m:
             body = body[: first_line_end + 1 + stop_m.start()]
-        return body.strip()
+        return body.rstrip()
 
     # Strategy 3 — raw fallback
-    return text.strip()
+    return text.rstrip()
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +139,7 @@ def estimate_pass_at_k(num_samples: int, num_correct: int, k: int) -> float:
     if n - c < k:
         return 1.0
     result = 1.0
-    for i in range(n - c + 1, min(n + 1, n + 1)):
+    for i in range(n - c + 1, n + 1):
         result *= 1.0 - k / i
     return 1.0 - result
 
@@ -154,6 +172,22 @@ def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
         "result": "scoring error",
         "stderr": "",
     }
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove reasoning-model output wrappers from *text*.
+
+    - Prefer content inside ``<answer>...</answer>``.
+    - Fall back to text after ``</think>``.
+    - Otherwise return *text* unchanged.
+    """
+    _am = _ANSWER_TAG_RE.search(text)
+    if _am:
+        return _am.group(1)
+    _tm = _THINK_END_RE.search(text)
+    if _tm:
+        return text[_tm.end() :]
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +234,11 @@ def _process_code_item(
             "stderr": "",
         }
 
+    # Strip reasoning-model output wrappers before code extraction.
+    # Prefer <answer>...</answer> content; fall back to text after </think>;
+    # otherwise keep the original string unchanged.
+    gen_str = _strip_think_tags(gen_str)
+
     code = extract_code(gen_str)
 
     if not code.strip():
@@ -211,10 +250,8 @@ def _process_code_item(
         }
 
     # --- construct the check program --------------------------------------------
-    # Keep the raw generation text unmodified to preserve indentation.
-    # For HumanEval: prompt is the function head (e.g. "def add(a, b):\n"),
-    # gen is the indented function body (e.g. "    return a + b").
-    code = gen_str.rstrip()
+    # extract_code() now uses .rstrip() so indentation is preserved for
+    # HumanEval-style bare function bodies (e.g. "    return a + b").
     candidate = prompt.rstrip() + "\n" + code
     check_program = candidate + "\n" + test_code
 

@@ -15,6 +15,7 @@ the evaluation run.
 from __future__ import annotations
 
 import io
+import json
 import multiprocessing
 import os
 import shutil
@@ -22,7 +23,7 @@ import signal
 import sys
 import tempfile
 import traceback
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -119,6 +120,10 @@ def reliability_guard() -> None:
     Generated code that calls ``exit()``, ``os.system()``, ``subprocess.Popen``,
     ``shutil.rmtree``, etc. will get an ``AttributeError`` instead of causing
     real side-effects.
+
+    Modules are set to ``None`` in ``sys.modules`` (rather than popped) so
+    that ``import subprocess`` raises ``ImportError`` instead of silently
+    reloading the real module.
     """
     _bi = _get_builtins_module()
 
@@ -163,12 +168,20 @@ def reliability_guard() -> None:
             _ORIGINAL_SHUTIL_FUNCS[_name] = getattr(shutil, _name)
             setattr(shutil, _name, None)
 
-    # --- subprocess (module-level block) ---
-    _ORIGINAL_MODULES["subprocess"] = sys.modules.pop("subprocess", None)
-
-    # --- other noisy / dangerous modules ---
-    for _mod in ("faulthandler", "ipdb", "joblib", "resource", "psutil", "tkinter"):
-        _ORIGINAL_MODULES[_mod] = sys.modules.pop(_mod, None)
+    # --- dangerous modules — block re-import by setting sys.modules[key] = None ---
+    for _mod in (
+        "subprocess",
+        "faulthandler",
+        "ipdb",
+        "joblib",
+        "resource",
+        "psutil",
+        "tkinter",
+        "ctypes",
+        "multiprocessing",
+    ):
+        _ORIGINAL_MODULES[_mod] = sys.modules.get(_mod)
+        sys.modules[_mod] = None
 
 
 def reliability_restore() -> None:
@@ -181,7 +194,9 @@ def reliability_restore() -> None:
     for _name, _val in _ORIGINAL_SHUTIL_FUNCS.items():
         setattr(shutil, _name, _val)
     for _name, _val in _ORIGINAL_MODULES.items():
-        if _val is not None:
+        if _val is None:
+            sys.modules.pop(_name, None)
+        else:
             sys.modules[_name] = _val
 
 
@@ -264,22 +279,28 @@ def unsafe_execute(
 
 
 def _worker(
-    queue: Any,
     check_program: str,
     timeout: float,
     task_id: str,
+    result_file: str,
 ) -> None:
-    """Entry-point for the child process — runs *check_program* and puts the
-    result dict onto *queue*."""
+    """Entry-point for the child process — runs *check_program* and writes
+    the result dict to *result_file* as JSON."""
     status, stderr = unsafe_execute(check_program, timeout)
-    queue.put(
-        {
-            "task_id": task_id,
-            "passed": status == "passed",
-            "result": status,
-            "stderr": stderr,
-        }
-    )
+    result: dict[str, Any] = {
+        "task_id": task_id,
+        "passed": status == "passed",
+        "result": status,
+        "stderr": stderr,
+    }
+    with open(result_file, "w", encoding="utf-8") as f:
+        json.dump(result, f)
+
+
+def _cleanup_tmp(path: str) -> None:
+    """Remove temporary file, ignoring errors if it does not exist."""
+    with suppress(OSError):
+        os.unlink(path)
 
 
 def check_correctness(
@@ -294,13 +315,40 @@ def check_correctness(
     by ``p.kill()`` — this catches cases where the signal-based timeout
     itself is blocked or delayed (e.g. inside an uninterruptible syscall).
 
+    Uses ``spawn`` context for cross-platform safety (``fork`` is unsafe on
+    macOS) and a temporary JSON file for IPC so that no complex object
+    pickling (queues, pipes) is needed across the spawn boundary.
+
     Returns a dict with keys ``task_id``, ``passed``, ``result``, ``stderr``.
     """
-    ctx = multiprocessing.get_context("fork")
-    manager = ctx.Manager()
-    queue = manager.Queue()
-    p = ctx.Process(target=_worker, args=(queue, check_program, timeout, task_id))
-    p.start()
+    # Default to "fork" for library‑friendly usage (no ``if __name__``
+    # guard required in the caller).  On macOS, set ``LLMEVAL_MP_METHOD=spawn``
+    # if your calling script has proper ``if __name__ == "__main__"`` guards
+    # and you want to avoid potential fork‑safety issues.
+    _mp_method = os.environ.get("LLMEVAL_MP_METHOD", "fork")
+    try:
+        ctx = multiprocessing.get_context(_mp_method)
+    except ValueError:
+        ctx = multiprocessing.get_context()
+
+    # Temporary JSON file for IPC — avoids Manager / pickling of Queue objects.
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="code_eval_")
+    os.close(tmp_fd)
+
+    p = ctx.Process(
+        target=_worker,
+        args=(check_program, timeout, task_id, tmp_path),
+    )
+    try:
+        p.start()
+    except Exception:
+        _cleanup_tmp(tmp_path)
+        return {
+            "task_id": task_id,
+            "passed": False,
+            "result": "failed: could not start worker process",
+            "stderr": "",
+        }
 
     # If the process exits before the timeout, p.join returns immediately.
     p.join(timeout + 1)
@@ -308,6 +356,7 @@ def check_correctness(
     if p.is_alive():
         p.kill()
         p.join(5)  # give SIGKILL time to deliver
+        _cleanup_tmp(tmp_path)
         return {
             "task_id": task_id,
             "passed": False,
@@ -316,6 +365,7 @@ def check_correctness(
         }
 
     if p.exitcode == -signal.SIGSEGV:
+        _cleanup_tmp(tmp_path)
         return {
             "task_id": task_id,
             "passed": False,
@@ -324,11 +374,16 @@ def check_correctness(
         }
 
     try:
-        return queue.get_nowait()
+        with open(tmp_path, encoding="utf-8") as f:
+            result: dict[str, Any] = json.load(f)
     except Exception:
-        return {
+        result = {
             "task_id": task_id,
             "passed": False,
             "result": "failed: worker did not produce a result",
             "stderr": "",
         }
+    finally:
+        _cleanup_tmp(tmp_path)
+
+    return result
