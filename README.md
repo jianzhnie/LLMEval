@@ -115,7 +115,7 @@ num_gpus=8
 max_model_len=32768  # ✅ supports 32k context
 gpu_memory_utilization=0.9  # ✅ improves memory utilization
 
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model $model_path \
     --trust-remote-code \
     --served-model-name $model_name \
@@ -301,7 +301,7 @@ For contexts exceeding 32K tokens, use RoPE scaling:
 
 **vLLM:**
 ```bash
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model Qwen/Qwen3-8B \
     --rope-scaling '{"rope_type":"yarn","factor":4.0}' \
     --max-model-len 131072

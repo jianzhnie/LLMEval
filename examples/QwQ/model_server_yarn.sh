@@ -39,4 +39,4 @@ vllm_args=(
 )
 
 echo "Starting vLLM server for model: $model_name on port 8090..."
-python -m vllm.entrypoints.openai.api_server "${vllm_args[@]}"
+vllm serve "${vllm_args[@]}"

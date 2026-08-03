@@ -119,7 +119,7 @@ python setup.py install
 
 使用 vLLM：
 ```bash
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model Qwen/QwQ-32B \
     --served-model-name QwQ-32B \
     --tensor-parallel-size 8 \
@@ -266,7 +266,7 @@ python ./llmeval/evaluator.py \
 
 **vLLM：**
 ```bash
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model Qwen/Qwen3-8B \
     --rope-scaling '{"rope_type":"yarn","factor":4.0}' \
     --max-model-len 131072

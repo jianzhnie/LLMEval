@@ -153,12 +153,10 @@ get_remote_device_count() {
     # 使用ssh-keyscan防止"Host key verification failed"错误
     ssh-keyscan -H "$node" >/dev/null 2>&1
 
-    # 尝试连接并执行命令，同时忽略ssh警告
+    # 尝试连接并执行命令，同时忽略ssh警告（复用 ssh_run，带上 SSH_USER 与 SSH_OPTS）
     local output
-    output=$(ssh -q -o BatchMode=yes -o ConnectTimeout=10 "$node" "npu-smi info 2>/dev/null" 2>/dev/null)
-
-    # 如果ssh命令失败（例如连接超时），则直接判定为不可用
-    if [ $? -ne 0 ]; then
+    if ! output=$(ssh_run "$node" "npu-smi info 2>/dev/null" 2>/dev/null); then
+        # 如果ssh命令失败（例如连接超时），则直接判定为不可用
         echo "🔴 节点 $node: 连接失败或命令执行失败"
         echo "0"
         return 0
@@ -303,10 +301,9 @@ usage() {
   MAX_WAIT_TIME          服务启动最大等待时间（默认：900秒）
   DATASET_GLOB           数据集文件匹配模式
   SYSTEM_PROMPT_TYPE     系统提示类型（默认：amthinking）
-  MAX_WORKERS            推理客户端内部并发（默认：32）
-  DISABLE_LOG_REQUESTS   是否关闭请求日志（默认：1）
+  MAX_WORKERS            推理客户端内部并发（默认：128）
+  DISABLE_LOG_REQUESTS   是否关闭请求日志（默认：True）
   EXTRA_ENGINE_ARGS      附加引擎参数字符串（默认：空）
-  MAX_CONCURRENT_TASKS_PER_NODE 单节点最大并发任务数（默认：8）
   DEVICE_COUNT_MULTIPLIER npu-smi 统计修正因子（默认：2）
   DEBUG                  启用调试模式（默认：0）
 
@@ -990,25 +987,25 @@ assign_data_to_instances() {
 
     log_info "📊 正在分配全部 ${#FILES[@]} 个数据文件到 ${total_instances} 个实例..."
 
-    # 销毁并初始化实例分配数组
+    # 销毁并初始化实例分配数组（nameref 替代 eval，避免文件名注入）
     for ((i = 0; i < total_instances; i++)); do
-        # 动态声明/清空数组变量
-        eval "INSTANCE_ASSIGNMENTS_$i=()"
+        local -n _assign_init="INSTANCE_ASSIGNMENTS_$i"
+        _assign_init=()
     done
 
     # 轮询分配文件
     for idx in "${!FILES[@]}"; do
         local file="${FILES[idx]}"
         local instance_idx=$((idx % total_instances))
-        # 动态赋值数组元素
-        eval "INSTANCE_ASSIGNMENTS_${instance_idx}+=(\"\$file\")"
+        local -n _assign_files="INSTANCE_ASSIGNMENTS_${instance_idx}"
+        _assign_files+=("$file")
         log_info "分配文件: ${file} -> 实例 ${instance_idx}"
     done
 
     # 打印分配结果统计
     for ((i = 0; i < total_instances; i++)); do
-        local count
-        eval "count=\${#INSTANCE_ASSIGNMENTS_${i}[@]}"
+        local -n _assign_cnt="INSTANCE_ASSIGNMENTS_$i"
+        local count="${#_assign_cnt[@]}"
         log_info "实例 ${i} 分配 ${count} 个文件"
     done
 

@@ -11,7 +11,7 @@ num_gpus=2
 max_model_len=32768  # ✅ 支持 32k 上下文
 gpu_memory_utilization=0.9  # ✅ 提高内存利用率
 
-python -m vllm.entrypoints.openai.api_server \
+vllm serve \
     --model $model_path \
     --trust-remote-code \
     --served-model-name $model_name \
