@@ -1,11 +1,11 @@
-"""Multiple-choice scoring: loglikelihood and generation-based evaluation.
+"""Multiple-choice scoring: answer-token loglikelihood and generation-based evaluation.
 
 Aligned with lm-evaluation-harness metric definitions.
 
 Metrics
 -------
-acc         — accuracy (argmax of raw logprobs, or letter extraction in generate mode)
-acc_norm    — accuracy with length-normalized logprobs (loglikelihood only; equals acc in generate)
+acc         — accuracy (argmax of raw answer-token logprobs, or letter extraction in generate mode)
+acc_norm    — accuracy with length-normalized logprobs when continuation tokens are available; equals acc for answer-letter scoring
 exact_match — alias for acc in the MC context
 
 Entry points
@@ -78,11 +78,12 @@ class MCScoreResult:
     Attributes
     ----------
     acc:
-        Accuracy via argmax of raw logprobs (loglikelihood), or via answer-letter
+        Accuracy via argmax of raw answer-token logprobs (loglikelihood), or via answer-letter
         extraction from generated text (generate mode).
     acc_norm:
-        Accuracy via length-normalized logprobs.  In generate mode this always
-        equals *acc* because generate records carry no ``correct_norm`` field.
+        Accuracy via length-normalized logprobs when continuation tokens are
+        available. In generate mode this always equals *acc* because generate
+        records carry no ``correct_norm`` field.
     exact_match:
         Convenience alias for *acc* in the multiple-choice context.
     total:
@@ -121,7 +122,8 @@ def score_loglikelihood(
     ----------
     eval_dataset:
         Items with ``gold`` / ``logprobs`` / ``choices`` fields (output of the
-        MC inference loglikelihood mode).
+        MC inference loglikelihood mode). Newer inference outputs also include
+        ``choice_tokens`` to record the actual answer tokens scored.
     cache_path:
         Path for the per-item JSONL cache.  A ``<stem>.summary.json`` metrics
         file is written alongside it.
@@ -136,10 +138,13 @@ def score_loglikelihood(
         Accuracy (*acc* metric).
     """
     if any(
-        not (item.get("choices") or item.get("choice_texts")) for item in eval_dataset
+        not (
+            item.get("choice_tokens") or item.get("choices") or item.get("choice_texts")
+        )
+        for item in eval_dataset
     ):
         logger.warning(
-            "Some items have no 'choices' field — acc_norm will fall back to acc."
+            "Some items have no 'choice_tokens'/'choices' field — acc_norm will fall back to acc."
         )
 
     records = score_items(
@@ -352,7 +357,9 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         )
         gold = -1
     logprobs: list[float] = item.get("logprobs", [])
-    choices = item.get("choices") or item.get("choice_texts", [])
+    choices = (
+        item.get("choice_tokens") or item.get("choices") or item.get("choice_texts", [])
+    )
 
     # Guard: unscorable data → forced-incorrect record.
     if not logprobs or gold < 0 or all(lp == float("-inf") for lp in logprobs):

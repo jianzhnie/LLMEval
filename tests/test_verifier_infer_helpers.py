@@ -8,8 +8,10 @@ can be loaded without vllm/openai installed.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -36,6 +38,7 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
     sys.modules["transformers"] = _tf
 
 from llmeval.inference.verifier import (
+    VerifierOfflineInferenceRunner,
     _last_n_strs,
     extract_tagged_answer,
     process_judgment,
@@ -178,3 +181,48 @@ class TestProcessJudgmentCursor:
 
     def test_last_boxed_wins(self) -> None:
         assert process_judgment_cursor("\\boxed{A} \\boxed{C}") == "C"
+
+
+class TestVerifierResume:
+    def _runner(self, tmp_path: Path) -> VerifierOfflineInferenceRunner:
+        runner = VerifierOfflineInferenceRunner.__new__(VerifierOfflineInferenceRunner)
+        args = MagicMock()
+        args.input_key = "prompt"
+        args.label_key = "answer"
+        args.response_key = "gen"
+        args.keep_origin_data = False
+        args.output_file = str(tmp_path / "verifier.jsonl")
+        args.input_file = str(tmp_path / "input.jsonl")
+        args.n_samples = 1
+        args.verifier_prompt_type = "fdd_prompt_cursor"
+        runner.args = args
+        return runner
+
+    def test_resume_id_survives_compacted_output(self, tmp_path: Path) -> None:
+        runner = self._runner(tmp_path)
+        item = {"prompt": "q", "answer": "4", "gen": ["4"]}
+        result = runner._prepare_result_item(item, "\\boxed{A}")
+
+        assert result["prompt"] == ""
+        assert result["gen"] == ""
+        assert result["llmeval_verifier_id"]
+
+        Path(runner.args.output_file).write_text(
+            json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        counts = runner.count_completed_samples()
+
+        assert counts[result["llmeval_verifier_id"]] == 1
+
+    def test_load_data_skips_completed_resume_id(self, tmp_path: Path) -> None:
+        runner = self._runner(tmp_path)
+        item = {"prompt": "q", "answer": "4", "gen": ["4"]}
+        Path(runner.args.input_file).write_text(
+            json.dumps(item, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        result = runner._prepare_result_item(item, "\\boxed{A}")
+        Path(runner.args.output_file).write_text(
+            json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+        assert runner.load_data() == []

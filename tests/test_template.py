@@ -43,5 +43,9 @@ class TestIsChatTemplateApplied:
     def test_plain_text_returns_false(self) -> None:
         assert is_chat_template_applied("What is 2+2?") is False
 
+    def test_human_word_inside_plain_text_returns_false(self) -> None:
+        query = "In this passage, the label Human: appears as ordinary text."
+        assert is_chat_template_applied(query) is False
+
     def test_empty_string_returns_false(self) -> None:
         assert is_chat_template_applied("") is False

@@ -62,6 +62,7 @@ class TestGenerationArguments:
         args = GenerationArguments()
         assert 0 < args.temperature <= 2.0
         assert args.n_samples > 0
+        assert args.max_tokens == 32768
 
     @pytest.mark.parametrize("temp", [-0.1, 2.1])
     def test_invalid_temperature_raises(self, temp: float) -> None:

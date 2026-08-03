@@ -69,15 +69,20 @@ class TestExtractCode:
         assert extract_code(text) == "def add(a, b):\n    return a + b"
 
     def test_from_import_with_separate_def(self) -> None:
-        """from + def are two independent top-level constructs —
-        extraction stops at the first ``def`` after the ``from … import`` line."""
+        """Imports and helper functions should be preserved together."""
         text = "some text\nfrom typing import List\n\ndef foo(x: List):\n    return x"
-        assert extract_code(text) == "from typing import List"
+        assert (
+            extract_code(text)
+            == "from typing import List\n\ndef foo(x: List):\n    return x"
+        )
 
-    def test_stop_marker_truncation(self) -> None:
-        """After code, the model may start a class or define another function
-        — those markers should be stripped."""
+    def test_preserves_multiple_top_level_defs(self) -> None:
+        """Helper classes/functions can be required by the candidate."""
         text = "def foo():\n    return 1\n\nclass Bar:\n    pass"
+        assert extract_code(text) == "def foo():\n    return 1\n\nclass Bar:\n    pass"
+
+    def test_trims_trailing_prose(self) -> None:
+        text = "def foo():\n    return 1\n\nThis solves the problem."
         assert extract_code(text) == "def foo():\n    return 1"
 
     def test_empty_input(self) -> None:
@@ -292,6 +297,33 @@ class TestScoreCode:
         finally:
             cache_path.unlink(missing_ok=True)
             cache_path.with_suffix(".summary.json").unlink(missing_ok=True)
+
+    def test_multi_sample_pass_at_k_summary(self, tmp_path: Path) -> None:
+        items = [
+            {
+                "task_id": "task/0",
+                "prompt": "def add(a, b):\n",
+                "answer": "\nassert add(1, 2) == 3\n",
+                "gen": ["    return a * b", "    return a + b"],
+            }
+        ]
+        cache_path = tmp_path / "code.jsonl"
+        acc = score_code(
+            items,
+            "answer",
+            "gen",
+            cache_path,
+            max_workers=0,
+            exec_timeout=3.0,
+            k_values=(1, 2),
+        )
+
+        summary = json.loads(cache_path.with_suffix(".summary.json").read_text())
+        assert acc == pytest.approx(0.5)
+        assert summary["pass_at_k"]["pass@1"] == 0.5
+        assert summary["pass_at_k"]["pass@2"] == 1.0
+        assert summary["total"] == 2
+        assert summary["problems"] == 1
 
     def test_failure_record(self) -> None:
         """_failure_code_record marks every item as failed."""

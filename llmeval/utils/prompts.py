@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Final
 
 # Defaults (used only if CLI values are not provided)
@@ -37,6 +38,10 @@ SYSTEM_PROMPT_FACTORY: dict[str, str | None] = {
     "empty": None,
 }
 
+_CHAT_ROLE_LINE_RE: re.Pattern[str] = re.compile(
+    r"(?m)^\s*(?:###\s*)?(?:Human|Assistant)\s*:",
+)
+
 
 def is_chat_template_applied(query: str) -> bool:
     """Check if the query has already been processed with a chat template.
@@ -47,7 +52,10 @@ def is_chat_template_applied(query: str) -> bool:
     Returns:
         True if chat template appears to be applied, False otherwise
     """
-    # Common chat template markers that indicate the query is already formatted
+    if not query:
+        return False
+
+    # Explicit tokenizer/chat-template control tokens.
     template_markers = [
         "<|im_start|>",
         "<|im_end|>",  # ChatML format
@@ -57,11 +65,11 @@ def is_chat_template_applied(query: str) -> bool:
         "[/INST]",  # Llama format
         "<|user|>",
         "<|assistant|>",  # Other formats
-        "### Human:",
-        "### Assistant:",  # Alpaca format
-        "Human:",
-        "Assistant:",  # Simple format
     ]
 
-    # Check if any template markers are present
-    return any(marker in query for marker in template_markers)
+    if any(marker in query for marker in template_markers):
+        return True
+
+    # Human:/Assistant: is too common as normal problem text to detect via
+    # substring; treat it as a template only when it appears as a role line.
+    return bool(_CHAT_ROLE_LINE_RE.search(query))

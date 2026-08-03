@@ -9,6 +9,8 @@ Architecture matches ``mc_score.py``:
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import os
 import re
@@ -56,10 +58,10 @@ _CODE_START_RE: re.Pattern[str] = re.compile(
 """First line that looks like the start of actual Python code."""
 
 _STOP_MARKERS: re.Pattern[str] = re.compile(
-    r"^(?:class |def |if __name__|print\b|#)",
+    r"^(?:if __name__|print\b)",
     re.MULTILINE,
 )
-"""Top-level (column-0) markers after which the code block is considered done."""
+"""Top-level executable markers after which the code block is considered done."""
 
 _THINK_END_RE: re.Pattern[str] = re.compile(
     r"</think\s*>",
@@ -105,21 +107,34 @@ def extract_code(text: object) -> str:
     if m:
         return m.group(1).rstrip()
 
-    # Strategy 2 — first code line → first top-level stop marker
+    # Strategy 2 — first code line → longest syntactically-valid Python prefix.
+    # This preserves helper functions/imports while dropping trailing prose.
     start_m = _CODE_START_RE.search(text)
     if start_m:
         body = text[start_m.start() :]
-        first_line_end = body.find("\n")
-        if first_line_end == -1:
-            return body.rstrip()
-        after_first_line = body[first_line_end + 1 :]
-        stop_m = _STOP_MARKERS.search(after_first_line)
+        stop_m = _STOP_MARKERS.search(body)
         if stop_m:
-            body = body[: first_line_end + 1 + stop_m.start()]
+            body = body[: stop_m.start()]
+        body = _longest_valid_python_prefix(body)
         return body.rstrip()
 
     # Strategy 3 — raw fallback (preserve leading whitespace for indentation)
     return text.rstrip()
+
+
+def _longest_valid_python_prefix(code: str) -> str:
+    """Return the longest prefix of *code* that parses as Python."""
+    lines = code.rstrip().splitlines()
+    for end in range(len(lines), 0, -1):
+        candidate = "\n".join(lines[:end]).rstrip()
+        if not candidate:
+            continue
+        try:
+            ast.parse(candidate)
+        except SyntaxError:
+            continue
+        return candidate
+    return code.rstrip()
 
 
 # ===========================================================================
@@ -161,11 +176,17 @@ class CodeScoreResult:
     pass_at_1: float = 0.0
     """Pass@1 accuracy in [0.0, 1.0]."""
 
+    pass_at_k: dict[str, float] = field(default_factory=dict)
+    """Pass@k metrics keyed as ``pass@1``, ``pass@10``, ..."""
+
     total: int = 0
-    """Total number of evaluated items."""
+    """Total number of evaluated samples."""
 
     correct: int = 0
-    """Number of items that passed all tests."""
+    """Number of samples that passed all tests."""
+
+    problems: int = 0
+    """Number of distinct benchmark problems."""
 
     per_item: list[dict[str, Any]] = field(default_factory=list)
     """Per-item execution records (``task_id``, ``passed``, ``result``, ``stderr``)."""
@@ -179,7 +200,9 @@ class CodeScoreResult:
 def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
     """Build a placeholder record for items that could not be scored."""
     return {
-        "task_id": item.get("task_id", ""),
+        "task_id": item.get("task_id", item.get("_llmeval_group_id", "")),
+        "group_id": item.get("_llmeval_group_id", item.get("task_id", "")),
+        "sample_index": item.get("_llmeval_sample_index", 0),
         "passed": False,
         "result": "scoring error",
         "stderr": "",
@@ -233,7 +256,11 @@ def _process_code_item(
     idx, item, label_key, response_key, exec_timeout = args
 
     # -- resolve identifiers ----------------------------------------------------
-    task_id: str = str(item.get("task_id", f"task_{idx}"))
+    group_id: str = str(
+        item.get("_llmeval_group_id") or item.get("task_id", f"task_{idx}")
+    )
+    sample_index: int = int(item.get("_llmeval_sample_index", 0))
+    task_id: str = str(item.get("task_id") or group_id)
     prompt: str = str(item.get("prompt", ""))
     test_code: str = str(item.get(label_key, ""))
 
@@ -247,7 +274,9 @@ def _process_code_item(
         gen_str = ""
 
     if not gen_str.strip():
-        return idx, _failure(task_id, "failed: empty generation")
+        return idx, _failure(
+            task_id, "failed: empty generation", group_id, sample_index
+        )
 
     # Strip reasoning-model wrappers before code extraction.
     gen_str = _strip_think_tags(gen_str)
@@ -255,7 +284,9 @@ def _process_code_item(
     # -- extract code -----------------------------------------------------------
     code = extract_code(gen_str)
     if not code.strip():
-        return idx, _failure(task_id, "failed: no code extracted")
+        return idx, _failure(
+            task_id, "failed: no code extracted", group_id, sample_index
+        )
 
     # -- construct and execute --------------------------------------------------
     # extract_code() preserves leading indentation (uses .rstrip()), so bare
@@ -265,13 +296,22 @@ def _process_code_item(
 
     exec_result = check_correctness(check_program, exec_timeout, task_id)
     exec_result.setdefault("task_id", task_id)
+    exec_result.setdefault("group_id", group_id)
+    exec_result.setdefault("sample_index", sample_index)
     return idx, exec_result
 
 
-def _failure(task_id: str, reason: str) -> dict[str, Any]:
+def _failure(
+    task_id: str,
+    reason: str,
+    group_id: str | None = None,
+    sample_index: int = 0,
+) -> dict[str, Any]:
     """Return a uniform failure record for a single item."""
     return {
         "task_id": task_id,
+        "group_id": group_id or task_id,
+        "sample_index": sample_index,
         "passed": False,
         "result": reason,
         "stderr": "",
@@ -370,6 +410,66 @@ def _score_items(
     ]
 
 
+def _stable_problem_id(item: dict[str, Any], index: int) -> str:
+    """Build a stable grouping id for pass@k aggregation."""
+    if item.get("task_id") is not None:
+        return str(item["task_id"])
+    if item.get("prompt") is not None:
+        digest = hashlib.sha1(
+            str(item["prompt"]).encode("utf-8", errors="replace")
+        ).hexdigest()[:16]
+        return f"prompt:{digest}"
+    return f"task_{index}"
+
+
+def _expand_code_samples(
+    eval_dataset: list[dict[str, Any]], response_key: str
+) -> list[dict[str, Any]]:
+    """Expand each record into one scoring job per generated sample."""
+    expanded: list[dict[str, Any]] = []
+    for item_idx, item in enumerate(eval_dataset):
+        group_id = _stable_problem_id(item, item_idx)
+        gen_raw = item.get(response_key)
+        if isinstance(gen_raw, list):
+            samples = gen_raw if gen_raw else [""]
+        elif isinstance(gen_raw, str):
+            samples = [gen_raw]
+        else:
+            samples = [""]
+
+        for sample_idx, sample in enumerate(samples):
+            sample_item = item.copy()
+            sample_item[response_key] = [sample]
+            sample_item["_llmeval_group_id"] = group_id
+            sample_item["_llmeval_sample_index"] = sample_idx
+            expanded.append(sample_item)
+    return expanded
+
+
+def _compute_pass_at_k(
+    records: list[dict[str, Any]], k_values: tuple[int, ...]
+) -> tuple[dict[str, float], int]:
+    """Aggregate sample records into problem-level pass@k metrics."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        group_id = str(record.get("group_id") or record.get("task_id") or "")
+        grouped.setdefault(group_id, []).append(record)
+
+    metrics: dict[str, float] = {}
+    for k in sorted(set(k_values)):
+        eligible_scores: list[float] = []
+        for group_records in grouped.values():
+            n = len(group_records)
+            if n < k:
+                continue
+            c = sum(1 for record in group_records if record.get("passed"))
+            eligible_scores.append(estimate_pass_at_k(n, c, k))
+        if eligible_scores:
+            metrics[f"pass@{k}"] = sum(eligible_scores) / len(eligible_scores)
+
+    return metrics, len(grouped)
+
+
 # ===========================================================================
 # Public API
 # ===========================================================================
@@ -383,6 +483,7 @@ def score_code(
     max_workers: int = 8,
     timeout: int = 20,
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
+    k_values: tuple[int, ...] = (1, 10, 64),
 ) -> float:
     """Score a code-generation dataset and return Pass@1 accuracy.
 
@@ -390,8 +491,8 @@ def score_code(
     ----------
     eval_dataset : list[dict]
         Items to score.  Each must contain *label_key* (test harness) and
-        *response_key* (model output).  Only the **first** sample of
-        multi-sample outputs is evaluated.
+        *response_key* (model output).  List-valued generations are expanded
+        so every sample contributes to pass@k.
     label_key : str
         Dict key for the ground-truth test harness (e.g. ``"answer"``).
     response_key : str
@@ -405,26 +506,31 @@ def score_code(
         Pool-level timeout per worker task in seconds.
     exec_timeout : float
         Per-item code execution timeout in seconds (default 3.0).
+    k_values : tuple[int, ...]
+        pass@k values to include in the summary when enough samples exist.
 
     Returns
     -------
     float
         Pass@1 score in [0.0, 1.0].
     """
-    total = len(eval_dataset)
-    if total == 0:
+    if not eval_dataset:
         logger.warning("Empty dataset — returning 0.0")
         return 0.0
 
+    expanded_dataset = _expand_code_samples(eval_dataset, response_key)
+    total = len(expanded_dataset)
+
     logger.info(
-        "Scoring %d item(s) with max_workers=%d, exec_timeout=%.1fs",
+        "Scoring %d sample(s) from %d record(s) with max_workers=%d, exec_timeout=%.1fs",
         total,
+        len(eval_dataset),
         max_workers,
         exec_timeout,
     )
 
     records = _score_items(
-        eval_dataset,
+        expanded_dataset,
         label_key,
         response_key,
         exec_timeout,
@@ -433,7 +539,8 @@ def score_code(
     )
 
     correct = sum(1 for r in records if r.get("passed"))
-    pass_at_1 = correct / max(total, 1)
+    pass_at_k, problems = _compute_pass_at_k(records, k_values)
+    pass_at_1 = pass_at_k.get("pass@1", correct / max(total, 1))
 
     # Log failures for diagnostics (up to 10).
     failures = [r for r in records if not r.get("passed")]
@@ -446,13 +553,21 @@ def score_code(
 
     result = CodeScoreResult(
         pass_at_1=pass_at_1,
+        pass_at_k=pass_at_k,
         total=total,
         correct=correct,
+        problems=problems,
         per_item=records,
     )
     write_cache(result, cache_path)
 
-    logger.info("Pass@1: %.2f%% (%d/%d)", pass_at_1 * 100, correct, total)
+    logger.info(
+        "Pass@1: %.2f%% (%d/%d correct samples, %d problem(s))",
+        pass_at_1 * 100,
+        correct,
+        total,
+        problems,
+    )
     return pass_at_1
 
 
@@ -478,8 +593,12 @@ def write_cache(result: CodeScoreResult, cache_path: str | Path) -> None:
         json.dump(
             {
                 "pass_at_1": round(result.pass_at_1, 6),
+                "pass_at_k": {
+                    key: round(value, 6) for key, value in result.pass_at_k.items()
+                },
                 "total": result.total,
                 "correct": result.correct,
+                "problems": result.problems,
             },
             fh,
             indent=2,

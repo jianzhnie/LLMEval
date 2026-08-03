@@ -16,7 +16,7 @@ LLMEval is a comprehensive evaluation system for assessing Large Language Models
 - **Flexible Evaluation Modes**: Online (API), offline (local), and MC (loglikelihood/generate)
 - **Rich Benchmark Coverage**: 14 benchmarks — AIME 2024/2025/2026, MATH-500, GSM8K, GPQA-Diamond, HMMT-25, HumanEval, MBPP, MMLU, MMLU-Pro, C-Eval
 - **Code Evaluation**: HumanEval / MBPP with sandbox execution and pass@k scoring
-- **lm-eval Aligned**: Loglikelihood MC scoring with acc/acc_norm/exact_match, few-shot dedup
+- **MC Scoring**: Answer-token loglikelihood with acc/acc_norm/exact_match, few-shot dedup
 - **One-Click Pipeline**: Shell scripts for end-to-end inference → scoring
 - **Resume Capability**: Automatically resume interrupted evaluations
 - **Verification Support**: Built-in answer extraction and correctness verification
@@ -193,7 +193,7 @@ BENCHMARKS=QUICK bash examples/longcat-flash/run_all.sh
 BENCHMARKS=HARD bash examples/longcat-flash/run_all.sh
 ```
 
-**Multiple-choice benchmarks** — loglikelihood comparison with acc/acc_norm:
+**Multiple-choice benchmarks** — answer-token loglikelihood comparison with acc/acc_norm:
 
 ```bash
 # 5-shot MMLU / C-Eval
@@ -204,7 +204,7 @@ bash examples/longcat-flash/mc_score.sh
 MC_MODE=generate bash examples/longcat-flash/mc_infer.sh
 ```
 
-**Code benchmarks** — generation with sandbox execution + pass@k:
+**Code benchmarks** — generation with sandbox execution + pass@k summary:
 
 ```bash
 # HumanEval + MBPP
@@ -234,7 +234,7 @@ python ./llmeval/evaluator.py \
     --task_name "math_opensource/aime24" \
     --max_workers 16
 
-# Code evaluation (pass@1, 5s execution timeout)
+# Code evaluation (pass@k summary, 5s execution timeout)
 python ./llmeval/evaluator.py \
     --input_path "./output/longcat-flash/humaneval_bz1.jsonl" \
     --cache_path "./output/longcat-flash/eval_score/humaneval_bz1.jsonl" \
@@ -282,9 +282,9 @@ Offline mode specific:
 | Math | `math_opensource/aime24` `math_opensource/aime25` `math_opensource/aime26` | math-verify |
 | Math | `math_opensource/gsm8k` `math_opensource/math500` `math_opensource/math` `math_opensource/hmmt25` | math-verify |
 | Science | `math_opensource/gpqa_diamond` `math_opensource/hle_full` | math-verify |
-| Code | `code_opensource/humaneval` `code_opensource/mbpp` | pass@1 sandbox |
-| Code | `code_opensource/humaneval_plus` `code_opensource/mbpp_plus` | pass@1 sandbox |
-| MC | `mc_opensource/mmlu` `mc_opensource/mmlu_pro` `mc_opensource/ceval` | loglikelihood |
+| Code | `code_opensource/humaneval` `code_opensource/mbpp` | pass@k sandbox |
+| Code | `code_opensource/humaneval_plus` `code_opensource/mbpp_plus` | pass@k sandbox |
+| MC | `mc_opensource/mmlu` `mc_opensource/mmlu_pro` `mc_opensource/ceval` | answer-token loglikelihood |
 
 See [docs/benchmark.md](docs/benchmark.md) for dataset details and HuggingFace links.
 

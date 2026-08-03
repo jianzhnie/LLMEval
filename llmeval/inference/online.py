@@ -58,6 +58,7 @@ class InferenceClient:
         timeout: int,
         max_retries: int = 3,
         tool_choice: str = "none",
+        api_key: str | None = None,
     ) -> None:
         """Initialize the inference client with API configuration and validation.
 
@@ -70,6 +71,7 @@ class InferenceClient:
             timeout: Request timeout in seconds (must be positive)
             max_retries: Maximum number of retries for requests to VLLM server (must be non-negative)
             tool_choice: Tool calling mode: 'none' (default, disables tools), 'auto', or tool name.
+            api_key: API key; falls back to the OPENAI_API_KEY env var and then EMPTY.
 
         Raises:
             ValueError: If timeout is invalid (<=0) or base_url is empty
@@ -78,7 +80,7 @@ class InferenceClient:
         self.timeout: int = timeout
         self.max_retries: int = max_retries
         self.tool_choice: str = tool_choice
-        self.api_key: str = os.environ.get("OPENAI_API_KEY", "EMPTY")
+        self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
         # Warn if using default EMPTY key
         if self.api_key == "EMPTY":
@@ -388,6 +390,7 @@ class InferenceRunner:
                 timeout=args.request_timeout,
                 max_retries=args.max_retries,
                 tool_choice=args.tool_choice,
+                api_key=args.api_key,
             )
         except (OSError, ValueError) as e:
             raise RuntimeError(f"Failed to initialize inference client: {e}") from e

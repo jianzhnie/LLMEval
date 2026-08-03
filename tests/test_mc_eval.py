@@ -473,6 +473,17 @@ class TestProcessLoglikelihoodItem:
         item = {"prompt": "q", "choices": ["a", "b"], "gold": 1}
         result = runner.process_loglikelihood_item(item)
         assert result["pred"] == 1 and result["correct"] is True
+        assert result["choice_tokens"] == ["A", "B"]
+        runner.client.get_choices_logprobs.assert_called_once_with("q", ["A", "B"])
+
+    def test_full_choice_text_uses_answer_letters(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.client = MagicMock()
+        runner.client.get_choices_logprobs.return_value = [-1.0, -5.0]
+        item = {"prompt": "q", "choices": ["Paris", "London"], "gold": 0}
+        result = runner.process_loglikelihood_item(item)
+        assert result["choice_tokens"] == ["A", "B"]
+        assert result["correct"] is True
 
     def test_no_choices_returns_none(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
@@ -615,6 +626,22 @@ class TestMCScoreEdgeCases:
         assert acc == 0.0
         summary = json.loads((tmp_path / "c.summary.json").read_text())
         assert summary["acc_norm"] == 1.0
+
+    def test_acc_norm_prefers_choice_tokens_when_present(self, tmp_path: Path) -> None:
+        """Answer-token scoring should not normalize by full option text length."""
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+
+        items = [
+            {
+                "gold": 0,
+                "logprobs": [-2.0, -1.0],
+                "choice_tokens": ["A", "B"],
+                "choices": ["aaaa", "b"],
+            }
+        ]
+        score_loglikelihood(items, tmp_path / "c.jsonl")
+        summary = json.loads((tmp_path / "c.summary.json").read_text())
+        assert summary["acc_norm"] == 0.0
 
     def test_extract_lowercase_letter(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import extract_answer

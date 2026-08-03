@@ -16,7 +16,7 @@ LLMEval 是一个用于评测大型语言模型（LLM）的综合评估系统，
 - **三种评测模式**：在线生成、离线本地推理、MC loglikelihood 对比
 - **14 个 Benchmark**：AIME 2024/2025/2026、MATH-500、GSM8K、GPQA-Diamond、HMMT-25、MMLU、MMLU-Pro、C-Eval、HumanEval、MBPP
 - **代码评估**: HumanEval / MBPP 沙箱执行 + pass@k 评分
-- **lm-eval 对齐**：acc/acc_norm/exact_match、few-shot 去重
+- **MC 评分**：答案 token loglikelihood + acc/acc_norm/exact_match、few-shot 去重
 - **一键评测**：Shell 脚本端到端推理 → 评分
 - **断点续评**：自动恢复中断的评测任务
 
@@ -146,14 +146,14 @@ BENCHMARKS=QUICK bash examples/longcat-flash/run_all.sh   # 快速验证
 BENCHMARKS=HARD bash examples/longcat-flash/run_all.sh    # 高难度
 ```
 
-**MC benchmark** — loglikelihood 选项对比 + acc/acc_norm 评分：
+**MC benchmark** — 答案 token loglikelihood 对比 + acc/acc_norm 评分：
 
 ```bash
 N_SHOT=5 bash examples/longcat-flash/mc_infer.sh   # 5-shot 推理
 bash examples/longcat-flash/mc_score.sh              # 评分
 ```
 
-**代码 benchmark** — 代码生成 + 沙箱执行 pass@k 评分：
+**代码 benchmark** — 代码生成 + 沙箱执行 pass@k summary：
 
 ```bash
 bash examples/longcat-flash/code_infer.sh            # HumanEval + MBPP 推理
@@ -202,7 +202,7 @@ python ./llmeval/evaluator.py \
     --task_name "math_opensource/aime24" \
     --max_workers 16
 
-# 代码评分（pass@1，执行超时 5 秒）
+# 代码评分（pass@k summary，执行超时 5 秒）
 python ./llmeval/evaluator.py \
     --input_path "./output/humaneval.jsonl" \
     --cache_path "./output/humaneval_scores.jsonl" \
@@ -248,8 +248,8 @@ python ./llmeval/evaluator.py \
 |------|--------|----------|
 | 数学 | `math_opensource/aime24` `aime25` `aime26` `gsm8k` `math500` `math` `hmmt25` | math-verify |
 | 科学 | `math_opensource/gpqa_diamond` `hle_full` | math-verify |
-| 代码 | `code_opensource/humaneval` `mbpp` `humaneval_plus` `mbpp_plus` | pass@1 沙箱执行 |
-| MC | `mc_opensource/mmlu` `mmlu_pro` `ceval` | loglikelihood |
+| 代码 | `code_opensource/humaneval` `mbpp` `humaneval_plus` `mbpp_plus` | pass@k 沙箱执行 |
+| MC | `mc_opensource/mmlu` `mmlu_pro` `ceval` | 答案 token loglikelihood |
 
 详见 [docs/benchmark.md](docs/benchmark.md)。
 

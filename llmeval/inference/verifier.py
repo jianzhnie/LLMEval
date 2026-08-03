@@ -9,6 +9,8 @@ functionality, and robust error handling.
 from __future__ import annotations
 
 import collections
+import copy
+import hashlib
 import json
 import logging
 import os
@@ -25,7 +27,7 @@ from transformers import AutoTokenizer, HfArgumentParser
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
-from llmeval.inference.common import expand_data_with_resume, load_jsonl
+from llmeval.inference.common import load_jsonl
 from llmeval.utils.config import VerifierInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.verifier_prompts import VERIFY_PROMPT_FACTORY
@@ -44,6 +46,7 @@ _PAREN_LETTER_RE: re.Pattern[str] = re.compile(r"\(([A-D])\)", re.IGNORECASE)
 _STANDALONE_LETTER_RE: re.Pattern[str] = re.compile(
     r"(?<![A-Za-z])([A-D])(?![A-Za-z])", re.IGNORECASE
 )
+_VERIFIER_RESUME_KEY = "llmeval_verifier_id"
 
 
 def _last_n_strs(text: str, n: int) -> str:
@@ -263,21 +266,27 @@ class VerifierOfflineInferenceRunner:
 
             # Initialize vLLM engine
             logger.info("Loading vLLM engine...")
-            llm = LLM(
-                model=self.args.model_name_or_path,
-                tensor_parallel_size=self.args.tensor_parallel_size,
-                pipeline_parallel_size=self.args.pipeline_parallel_size,
-                gpu_memory_utilization=self.args.gpu_memory_utilization,
-                enable_chunked_prefill=self.args.enable_chunked_prefill,
-                enable_prefix_caching=self.args.enable_prefix_caching,
-                enforce_eager=self.args.enforce_eager,
-                max_num_seqs=self.args.max_num_seqs,
-                max_model_len=self.args.max_model_len,
-                hf_overrides=hf_overrides,
-                seed=self.args.seed,
-                trust_remote_code=self.args.trust_remote_code,
-                dtype=self.args.dtype,
-            )
+            llm_kwargs: dict[str, Any] = {
+                "model": self.args.model_name_or_path,
+                "tensor_parallel_size": self.args.tensor_parallel_size,
+                "pipeline_parallel_size": self.args.pipeline_parallel_size,
+                "gpu_memory_utilization": self.args.gpu_memory_utilization,
+                "enable_chunked_prefill": self.args.enable_chunked_prefill,
+                "enable_prefix_caching": self.args.enable_prefix_caching,
+                "enforce_eager": self.args.enforce_eager,
+                "max_num_seqs": self.args.max_num_seqs,
+                "max_model_len": self.args.max_model_len,
+                "hf_overrides": hf_overrides,
+                "seed": self.args.seed,
+                "trust_remote_code": self.args.trust_remote_code,
+                "dtype": self.args.dtype,
+                "device": self.args.device,
+            }
+            if self.args.max_num_batched_tokens is not None:
+                llm_kwargs["max_num_batched_tokens"] = self.args.max_num_batched_tokens
+            if self.args.quantization is not None:
+                llm_kwargs["quantization"] = self.args.quantization
+            llm = LLM(**llm_kwargs)
             logger.info("✅ vLLM engine loaded successfully")
 
         except Exception as e:
@@ -320,6 +329,22 @@ class VerifierOfflineInferenceRunner:
         label_key = self.args.label_key
         response_key = self.args.response_key
         return input_key, label_key, response_key
+
+    def _resume_id(self, item: dict[str, Any]) -> str:
+        """Build a stable id for verifier resume across compacted outputs."""
+        existing = item.get(_VERIFIER_RESUME_KEY)
+        if existing:
+            return str(existing)
+
+        input_key, label_key, response_key = self._effective_keys()
+        payload = {
+            "prompt": item.get(input_key) or item.get("prompt"),
+            "gold": item.get(label_key),
+            "response": item.get(response_key),
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        digest = hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()
+        return f"verifier:{digest}"
 
     def convert_to_compass_verifier_format(self, item: dict[str, Any]) -> str | None:
         """
@@ -488,6 +513,7 @@ class VerifierOfflineInferenceRunner:
             Processed result item ready for JSON serialization.
         """
         result = original_item.copy()
+        result[_VERIFIER_RESUME_KEY] = self._resume_id(original_item)
         result["Verifier_response"] = model_response
 
         # Optionally strip original large fields to reduce output size
@@ -534,7 +560,11 @@ class VerifierOfflineInferenceRunner:
                 for line_num, line in enumerate(f, 1):
                     try:
                         item = json.loads(line.strip())
-                        prompt_key = item.get(self.args.input_key) or item.get("prompt")
+                        prompt_key = (
+                            item.get(_VERIFIER_RESUME_KEY)
+                            or item.get(self.args.input_key)
+                            or item.get("prompt")
+                        )
 
                         # Each written line represents a single completed judgment.
                         # Only count entries that contain a non-empty 'Verifier_judgment'.
@@ -578,10 +608,21 @@ class VerifierOfflineInferenceRunner:
         if total_completed > 0:
             logger.info(f"Found {total_completed} completed samples from previous run")
 
-        # Expand data according to n_samples and resume functionality
-        expanded_data = expand_data_with_resume(
-            raw_data, completed_counts, self.args.input_key, self.args.n_samples
-        )
+        expanded_data: list[dict[str, Any]] = []
+        skipped_items = 0
+        for item in raw_data:
+            if not isinstance(item, dict):
+                skipped_items += 1
+                continue
+            resume_id = self._resume_id(item)
+            completed = completed_counts.get(resume_id, 0)
+            remaining = max(0, self.args.n_samples - completed)
+            for _ in range(remaining):
+                expanded_item = copy.deepcopy(item)
+                expanded_item[_VERIFIER_RESUME_KEY] = resume_id
+                expanded_data.append(expanded_item)
+        if skipped_items > 0:
+            logger.warning(f"Skipped {skipped_items} non-dict item(s)")
         if not expanded_data:
             logger.warning("No data to process after expansion")
 

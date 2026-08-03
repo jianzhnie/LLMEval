@@ -247,6 +247,22 @@ class TestGetContent:
         assert client.client.chat.completions.create.call_count == 2
 
 
+class TestInferenceClientInit:
+    def test_api_key_argument_takes_priority(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llmeval.inference import online as online_mod
+        from llmeval.inference.online import InferenceClient
+
+        fake_openai = MagicMock()
+        monkeypatch.setattr(online_mod.openai, "OpenAI", fake_openai)
+        monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+
+        InferenceClient("http://example.com/v1", 5, api_key="cli-key")
+
+        assert fake_openai.call_args.kwargs["api_key"] == "cli-key"
+
+
 class TestGetContents:
     def test_n_parameter_sent_and_list_returned(self) -> None:
         client = _make_client()

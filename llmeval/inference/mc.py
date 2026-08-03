@@ -1,4 +1,4 @@
-"""Multiple-choice inference: loglikelihood and generation modes.
+"""Multiple-choice inference: answer-token loglikelihood and generation modes.
 
 This module mirrors llmeval/inference/online.py in structure, naming, and
 documentation style so the two can be reviewed side by side with a file diff:
@@ -10,7 +10,7 @@ Shared utilities (ClientError, retry classification, backoff) live in
 llmeval/utils/retry.py; data-loading / resume helpers live in
 llmeval/inference/common.py; the configuration dataclass lives in
 llmeval/utils/config.py (MCInferConfig).
-MC-specific pieces (kept deliberately): FewShotFormatter, batched choice
+MC-specific pieces (kept deliberately): FewShotFormatter, answer-token
 logprobs via the completions API, and per-mode worker methods.
 """
 
@@ -115,7 +115,7 @@ class FewShotFormatter:
 
 
 class MCLoglikelihoodClient:
-    """Client for computing choice log-probabilities via the completions API.
+    """Client for computing answer-token log-probabilities via completions.
 
     Mirrors InferenceClient in online.py: same initialization, masked
     API-key logging, and classified retry policy. The MC-specific part is that
@@ -161,7 +161,7 @@ class MCLoglikelihoodClient:
         )
 
     def get_choices_logprobs(self, prompt: str, choice_texts: list[str]) -> list[float]:
-        """Compute per-choice log-probabilities from first-token top_logprobs.
+        """Compute per-answer-token log-probabilities from first-token top_logprobs.
 
         Uses echo=False + max_tokens=1 + logprobs=20 to obtain the model's top
         predicted tokens after the prompt. For each target choice, we look up
@@ -169,7 +169,7 @@ class MCLoglikelihoodClient:
         P(target_token | prompt) without the token-alignment issues that arise
         from echo=True (where prompt tokenization can shift across continuations).
 
-        The target choices (typically "A"/"B"/"C"/"D") are looked up in several
+        The target tokens (typically "A"/"B"/"C"/"D") are looked up in several
         common tokenizer forms: with/without leading space, upper/lower case.
 
         Args:
@@ -482,7 +482,8 @@ class MCRunner:
         if not choices:
             return None
 
-        logprobs = self.client.get_choices_logprobs(prompt, choices)
+        choice_tokens = self._choice_tokens(item, len(choices))
+        logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)
         if all(lp == float("-inf") for lp in logprobs):
             raise RuntimeError("Logprob request failed for all choices")
 
@@ -490,12 +491,35 @@ class MCRunner:
         is_correct = pred == gold
         return {
             self.config.input_key: prompt,
-            "choices": choices,  # mc_score 的 acc_norm 需要选项文本做长度归一
+            "choices": choices,
+            "choice_tokens": choice_tokens,
             "gold": gold,
             "logprobs": logprobs,
             "pred": pred,
             "correct": is_correct,
         }
+
+    @staticmethod
+    def _choice_tokens(item: dict[str, Any], num_choices: int) -> list[str]:
+        """Resolve answer tokens used by first-token loglikelihood scoring."""
+        explicit = item.get("choice_tokens")
+        if isinstance(explicit, list) and len(explicit) == num_choices:
+            return [str(token) for token in explicit]
+
+        choices = item.get("choices", [])
+        if isinstance(choices, list) and len(choices) == num_choices:
+            as_strings = [str(choice).strip() for choice in choices]
+            if all(
+                len(choice) == 1 and "A" <= choice.upper() <= "J"
+                for choice in as_strings
+            ):
+                return [choice.upper() for choice in as_strings]
+
+        if num_choices > 10:
+            raise ValueError(
+                f"Too many choices for letter-token scoring: {num_choices}"
+            )
+        return [chr(ord("A") + i) for i in range(num_choices)]
 
     # ------------------------------------------------------------------
     # Generate mode
