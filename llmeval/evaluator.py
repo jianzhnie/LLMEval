@@ -17,7 +17,7 @@ Features:
     - Robust error handling
 
 Example:
-    $ python eval.py --input_path data.jsonl --task_name math_opensource/aime24 --cache_path cache/
+    $ python llmeval/evaluator.py --input_path data.jsonl --task_name math_opensource/aime24 --cache_path cache/
 
 Author: jianzhnie
 Date: 2025
@@ -305,7 +305,7 @@ def main() -> int:
         # Load and validate input data
         try:
             with open(args.input_path, encoding="utf-8") as f:
-                data = [json.loads(line) for line in f]
+                data = [json.loads(line) for line in f if line.strip()]
         except FileNotFoundError:
             logger.error(f"❌ Input file not found: '{args.input_path}'")
             return 1

@@ -5,12 +5,11 @@ Package structure::
 
     llmeval/
     ├── evaluator.py       # Main orchestrator (dispatches to task scorers)
-    ├── executor.py        # Code sandbox (aliased from tasks/code_eval/execute.py)
+    ├── inference/         # Inference backends (online API / offline vLLM / MC)
     ├── tasks/             # Task-specific scoring
     │   ├── code_eval/     #   Code generation (HumanEval / MBPP / pass@k)
     │   ├── math_eval/     #   Math reasoning (math-verify)
     │   └── mc_eval/       #   Multiple choice (accuracy)
-    ├── vllm/              # Inference backends (online API / offline vLLM)
     └── utils/             # Shared config, logging, retry, prompts
 
 Quick-start::

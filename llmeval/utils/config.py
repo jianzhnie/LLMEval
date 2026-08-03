@@ -175,7 +175,7 @@ class PromptArguments:
         )
         logger.info(
             "If you want to customize the system prompt, please modify the "
-            "SYSTEM_PROMPT_FACTORY in llmeval/utils/template.py"
+            "SYSTEM_PROMPT_FACTORY in llmeval/utils/prompts.py"
         )
 
 
@@ -598,7 +598,7 @@ class VerifierInferArguments(
         )
         logger.info(
             "If you want to customize the verifier prompt, please modify the "
-            "VERIFY_PROMPT_FACTORY in llmeval/utils/verifier_template.py"
+            "VERIFY_PROMPT_FACTORY in llmeval/utils/verifier_prompts.py"
         )
 
 
