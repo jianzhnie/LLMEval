@@ -3,8 +3,11 @@ Main evaluation orchestrator — dispatches to math / code / mc scorers
 
 This script provides functionality to evaluate language model outputs for various tasks.
 It processes input data in JSONL format and computes performance metrics based on the
-specified task type. Currently supports evaluation for 'math_opensource' tasks with
-extensibility for additional task types.
+specified task type. Supported task families:
+
+    - ``math_opensource``  — math answer verification via math-verify
+    - ``mc_opensource``    — multiple-choice, loglikelihood or generation based
+    - ``code_opensource``  — code generation, sandboxed pass@1 execution
 
 Features:
     - JSONL input file processing
@@ -14,7 +17,7 @@ Features:
     - Robust error handling
 
 Example:
-    $ python eval.py --input_path data.jsonl --task_name math_opensource --cache_path cache/
+    $ python eval.py --input_path data.jsonl --task_name math_opensource/aime24 --cache_path cache/
 
 Author: jianzhnie
 Date: 2025
@@ -40,8 +43,8 @@ from llmeval.tasks.mc_eval.mc_score import (
 from llmeval.utils.config import EvalTaskArguments
 from llmeval.utils.log import init_logger
 
-# Initialize logger for the evaluation module
-logger = init_logger("math_eval")
+# Initialize logger for the evaluation orchestrator
+logger = init_logger("evaluator")
 
 # Precompiled regex for think-tag stripping (used by _get_after_think).
 _ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
@@ -166,9 +169,12 @@ def evaluate_task(
     """
     Evaluate model outputs against ground truth data for a specific task.
 
-    This function handles the evaluation process for different types of tasks.
-    Currently supports 'math_opensource' tasks, but is designed to be extensible
-    for additional task types.
+    Dispatches on the task family (the part before ``/`` in *task_name*):
+
+    - ``math_opensource`` → :func:`compute_scores` (math-verify)
+    - ``mc_opensource``   → :func:`score_loglikelihood` when items carry
+      ``logprobs``, otherwise :func:`score_generate`
+    - ``code_opensource`` → :func:`score_code` (sandboxed pass@1)
 
     Args:
         eval_dataset: List of dictionaries containing the evaluation data
@@ -178,6 +184,7 @@ def evaluate_task(
         cache_path: Path where evaluation results will be cached
         max_workers: Maximum number of parallel workers for processing
         timeout: Maximum time in seconds to wait for each evaluation (default: 20)
+        exec_timeout: Per-item code execution timeout in seconds (code tasks only)
 
     Returns:
         Optional[float]: Evaluation accuracy score if successful, None if evaluation fails
@@ -217,28 +224,34 @@ def evaluate_task(
             logger.error(f"❌ Evaluation failed: {e!s}", exc_info=True)
             return None
     elif dataset_source == "mc_opensource":
-        sample = eval_dataset[0] if eval_dataset else {}
-        if "logprobs" in sample:
-            accuracy = score_loglikelihood(
-                eval_dataset=eval_dataset,
-                cache_path=cache_path,
-                max_workers=max_workers,
-                timeout=timeout,
-            )
-            logger.info(
-                f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}"
-            )
-        else:
-            accuracy = score_generate(
-                eval_dataset=eval_dataset,
-                label_key=label_key,
-                response_key=response_key,
-                cache_path=cache_path,
-                max_workers=max_workers,
-                timeout=timeout,
-            )
-            logger.info(f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}")
-        return accuracy
+        try:
+            sample = eval_dataset[0] if eval_dataset else {}
+            if "logprobs" in sample:
+                accuracy = score_loglikelihood(
+                    eval_dataset=eval_dataset,
+                    cache_path=cache_path,
+                    max_workers=max_workers,
+                    timeout=timeout,
+                )
+                logger.info(
+                    f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}"
+                )
+            else:
+                accuracy = score_generate(
+                    eval_dataset=eval_dataset,
+                    label_key=label_key,
+                    response_key=response_key,
+                    cache_path=cache_path,
+                    max_workers=max_workers,
+                    timeout=timeout,
+                )
+                logger.info(
+                    f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}"
+                )
+            return accuracy
+        except Exception as e:
+            logger.error(f"❌ Evaluation failed: {e!s}", exc_info=True)
+            return None
     elif dataset_source == "code_opensource":
         try:
             accuracy = score_code(

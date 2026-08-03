@@ -331,7 +331,9 @@ def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:
         IOError: If the cache file cannot be written
     """
     try:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        cache_dir = os.path.dirname(cache_path)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
         with open(cache_path, "w", encoding="utf-8") as f:
             for dataset in eval_dataset:
                 f.write(json.dumps(dataset, ensure_ascii=False) + "\n")

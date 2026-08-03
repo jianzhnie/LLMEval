@@ -83,7 +83,13 @@ Both online and offline inference support resume. The runner reads the existing 
 
 ### Supported Task Names
 
-`math_opensource/math500`, `math_opensource/math`, `math_opensource/gsm8k`, `math_opensource/aime24`, `math_opensource/aime25`, `math_opensource/hmmt25`, `livecodebench`, `ifeval`
+Three task families, dispatched on the prefix before `/`:
+
+- **Math** (`math_opensource/*`, math-verify scoring): `math500`, `math`, `gsm8k`, `aime24`, `aime25`, `aime26`, `hmmt25`, `gpqa_diamond`, `hle_full`
+- **Multiple-choice** (`mc_opensource/*`, loglikelihood or generation scoring): `mmlu`, `mmlu_pro`, `ceval`
+- **Code** (`code_opensource/*`, sandboxed pass@1): `humaneval`, `mbpp`, `humaneval_plus`, `mbpp_plus`
+
+The authoritative list is `valid_tasks` in `EvalTaskArguments.__post_init__` (`llmeval/utils/config.py`).
 
 ## Key Dependencies
 
