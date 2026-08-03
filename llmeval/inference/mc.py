@@ -31,7 +31,6 @@ import openai
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
-from llmeval.tasks.mc_eval.mc_score import argmax
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
@@ -530,7 +529,7 @@ class MCRunner:
         if all(lp == float("-inf") for lp in logprobs):
             raise RuntimeError("Logprob request failed for all choices")
 
-        pred = argmax(logprobs) if logprobs else -1
+        pred = max(range(len(logprobs)), key=logprobs.__getitem__) if logprobs else -1
         is_correct = pred == gold
         return {
             self.config.input_key: prompt,

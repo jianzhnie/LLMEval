@@ -45,7 +45,7 @@ if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
 class TestMCExtractAnswer:
     """Test answer letter extraction from generated text."""
 
-    def testextract_answer_pattern(self) -> None:
+    def test_extract_answer_pattern(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import extract_answer
 
         assert extract_answer("Some text\nAnswer: B") == "B"
@@ -288,13 +288,36 @@ class TestFewShotFormatter:
             Path(tmp).unlink(missing_ok=True)
 
 
-class TestArgmax:
-    def test_basic(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import argmax
+class TestScoreLoglikelihoodItem:
+    """Per-item loglikelihood scoring: argmax, gold parsing, guards."""
 
-        assert argmax([1.0, 3.0, 2.0]) == 1
-        assert argmax([5.0]) == 0
-        assert argmax([-1.0, -0.5, -2.0]) == 1
+    def test_argmax_picks_highest(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
+
+        rec = score_loglikelihood_item({"gold": 1, "logprobs": [1.0, 3.0, 2.0]})
+        assert rec["pred"] == 1
+        assert rec["correct"] is True
+
+    def test_single_choice(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
+
+        rec = score_loglikelihood_item({"gold": 0, "logprobs": [5.0]})
+        assert rec["pred"] == 0
+        assert rec["correct"] is True
+
+    def test_argmax_over_negative_logprobs(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
+
+        rec = score_loglikelihood_item({"gold": 1, "logprobs": [-1.0, -0.5, -2.0]})
+        assert rec["pred"] == 1
+        assert rec["correct"] is True
+
+    def test_string_gold_coerced(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
+
+        rec = score_loglikelihood_item({"gold": "1", "logprobs": [-1.0, -0.5]})
+        assert rec["gold"] == 1
+        assert rec["correct"] is True
 
 
 # ===========================================================================
@@ -310,21 +333,6 @@ def _make_api_error(message: str = "", status_code: int | None = None) -> Except
     err.message = message
     err.status_code = status_code
     return err
-
-
-def _fake_logprob_resp(token_lps_list: list[list[float | None]]) -> MagicMock:
-    """Completions response whose choices carry the given token_logprobs.
-
-    Used by tests that still rely on the echo=True path (if any remain).
-    """
-    resp = MagicMock()
-    choices = []
-    for lps in token_lps_list:
-        choice = MagicMock()
-        choice.logprobs.token_logprobs = lps
-        choices.append(choice)
-    resp.choices = choices
-    return resp
 
 
 def _fake_top_probs_resp(top_probs: dict[str, float]) -> MagicMock:
@@ -505,7 +513,7 @@ class TestMCRunnerEndToEnd:
             def __init__(self, **kwargs):
                 pass
 
-            def get_choices_logprobs(self, prompt, choice_texts):
+            def get_choices_logprobs(self, _prompt, choice_texts):
                 return [-1.0 if i == 1 else -5.0 for i in range(len(choice_texts))]
 
         inp = tmp_path / "in.jsonl"
@@ -539,7 +547,7 @@ class TestMCRunnerEndToEnd:
             def __init__(self, **kwargs):
                 pass
 
-            def get_choices_logprobs(self, prompt, choice_texts):
+            def get_choices_logprobs(self, _prompt, choice_texts):
                 return [float("-inf")] * len(choice_texts)
 
         inp = tmp_path / "in.jsonl"
@@ -586,13 +594,14 @@ class TestMCScoreEdgeCases:
 
     def test_acc_norm_uses_choices_when_present(self, tmp_path: Path) -> None:
         """Length normalization flips the argmax when choices differ in length."""
-        from llmeval.tasks.mc_eval.mc_score import compute_loglikelihood_metrics
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
 
         # raw argmax → index 1; normalized: -2.0/4=-0.5 vs -1.0/1=-1.0 → index 0
         items = [{"gold": 0, "logprobs": [-2.0, -1.0], "choices": ["aaaa", "b"]}]
-        metrics = compute_loglikelihood_metrics(items)
-        assert metrics.acc == 0.0
-        assert metrics.acc_norm == 1.0
+        acc = score_loglikelihood(items, tmp_path / "c.jsonl")
+        assert acc == 0.0
+        summary = json.loads((tmp_path / "c.summary.json").read_text())
+        assert summary["acc_norm"] == 1.0
 
     def test_extract_lowercase_letter(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import extract_answer

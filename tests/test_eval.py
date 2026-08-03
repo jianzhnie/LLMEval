@@ -47,7 +47,60 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
     _tf.HfArgumentParser = MagicMock
     sys.modules["transformers"] = _tf
 
-from llmeval.evaluator import _process_item, evaluate_task
+from llmeval.evaluator import (
+    _get_after_think,
+    _process_item,
+    evaluate_task,
+    preprocess_answers,
+)
+
+
+class TestGetAfterThink:
+    def test_answer_tag_preferred(self) -> None:
+        text = "<think>reasoning</think>junk <answer>42</answer> tail"
+        assert _get_after_think(text) == "42"
+
+    def test_answer_tag_content_stripped(self) -> None:
+        assert _get_after_think("<answer>  42  </answer>") == "42"
+
+    def test_think_tag_fallback(self) -> None:
+        assert _get_after_think("reasoning</think>The answer is 5") == "The answer is 5"
+
+    def test_think_tag_with_space_and_newlines(self) -> None:
+        assert _get_after_think("reasoning</think >\n\nresult") == "result"
+
+    def test_empty_tail_after_think_returns_original(self) -> None:
+        text = "only reasoning</think>  "
+        assert _get_after_think(text) == text
+
+    def test_plain_text_passthrough(self) -> None:
+        assert _get_after_think("no tags here") == "no tags here"
+
+    def test_empty_and_non_string(self) -> None:
+        assert _get_after_think("") == ""
+        assert _get_after_think(None) == ""
+
+
+class TestPreprocessAnswers:
+    def test_strips_think_tags_from_list(self) -> None:
+        data = [{"gen": ["<think>r</think>answer A", "<answer>B</answer>"]}]
+        preprocess_answers(data, "gen")
+        assert data[0]["gen"] == ["answer A", "B"]
+
+    def test_handles_bare_string_gen(self) -> None:
+        data = [{"gen": "reasoning</think>final"}]
+        preprocess_answers(data, "gen")
+        assert data[0]["gen"] == "final"
+
+    def test_missing_response_key_becomes_empty_list(self) -> None:
+        data = [{"answer": "5"}]
+        preprocess_answers(data, "gen")
+        assert data[0]["gen"] == []
+
+    def test_plain_responses_unchanged(self) -> None:
+        data = [{"gen": ["plain one", "plain two"]}]
+        preprocess_answers(data, "gen")
+        assert data[0]["gen"] == ["plain one", "plain two"]
 
 
 class TestProcessItem:
@@ -96,3 +149,121 @@ class TestEvaluateTask:
             data, "unsupported/task", "answer", "gen", str(tmp_path / "cache"), 4
         )
         assert result is None
+
+    def test_mc_loglikelihood_dispatch(self, tmp_path: Path) -> None:
+        """Items with 'logprobs' route to score_loglikelihood."""
+        data = [
+            {
+                "gold": 1,
+                "logprobs": [-1.0, -0.5, -2.0],
+                "choices": ["a", "b", "c"],
+                "task": "mc_opensource/mmlu",
+            }
+        ]
+        acc = evaluate_task(
+            data, "mc_opensource/mmlu", "answer", "gen", tmp_path / "mc.jsonl", 1
+        )
+        assert acc == 1.0
+        assert (tmp_path / "mc.summary.json").exists()
+
+    def test_mc_generate_dispatch(self, tmp_path: Path) -> None:
+        """Items without 'logprobs' route to score_generate."""
+        data = [{"answer": "B", "gen": ["Answer: B"], "task": "mc_opensource/mmlu"}]
+        acc = evaluate_task(
+            data, "mc_opensource/mmlu", "answer", "gen", tmp_path / "mc.jsonl", 1
+        )
+        assert acc == 1.0
+
+    def test_mc_error_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A scorer exception is caught and reported as None."""
+        import llmeval.evaluator as ev
+
+        def _boom(**_: object) -> float:
+            raise RuntimeError("scorer exploded")
+
+        monkeypatch.setattr(ev, "score_generate", _boom)
+        data = [{"answer": "B", "gen": ["Answer: B"], "task": "mc_opensource/mmlu"}]
+        acc = evaluate_task(
+            data, "mc_opensource/mmlu", "answer", "gen", tmp_path / "mc.jsonl", 1
+        )
+        assert acc is None
+
+    def test_code_dispatch(self, tmp_path: Path) -> None:
+        data = [
+            {
+                "task_id": "t0",
+                "prompt": "def add(a, b):\n",
+                "answer": "\nassert add(1, 2) == 3\n",
+                "gen": ["    return a + b"],
+                "task": "code_opensource/humaneval",
+            }
+        ]
+        acc = evaluate_task(
+            data,
+            "code_opensource/humaneval",
+            "answer",
+            "gen",
+            tmp_path / "code.jsonl",
+            1,  # max_workers=1 → serial path
+        )
+        assert acc == 1.0
+
+    def test_code_error_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.evaluator as ev
+
+        def _boom(**_: object) -> float:
+            raise RuntimeError("scorer exploded")
+
+        monkeypatch.setattr(ev, "score_code", _boom)
+        data = [
+            {
+                "prompt": "def f():\n",
+                "answer": "\nassert f() == 1\n",
+                "gen": ["    return 1"],
+                "task": "code_opensource/humaneval",
+            }
+        ]
+        acc = evaluate_task(
+            data, "code_opensource/humaneval", "answer", "gen", tmp_path / "c.jsonl", 1
+        )
+        assert acc is None
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("math_verify"),
+        reason="math-verify not installed",
+    )
+    def test_math_dispatch(self, tmp_path: Path) -> None:
+        data = [
+            {
+                "answer": "5",
+                "gen": ["The answer is $\\boxed{5}$"],
+                "task": "math_opensource/aime24",
+            }
+        ]
+        acc = evaluate_task(
+            data, "math_opensource/aime24", "answer", "gen", tmp_path / "m.jsonl", 2
+        )
+        assert acc == 1.0
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("math_verify"),
+        reason="math-verify not installed",
+    )
+    def test_math_error_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.evaluator as ev
+
+        def _boom(**_: object) -> float:
+            raise RuntimeError("scorer exploded")
+
+        monkeypatch.setattr(ev, "compute_scores", _boom)
+        data = [{"answer": "5", "gen": ["5"], "task": "math_opensource/aime24"}]
+        acc = evaluate_task(
+            data, "math_opensource/aime24", "answer", "gen", tmp_path / "m.jsonl", 1
+        )
+        assert acc is None

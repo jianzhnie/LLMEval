@@ -29,13 +29,19 @@ if "pebble" not in sys.modules and not importlib.util.find_spec("pebble"):
 from llmeval.tasks.code_eval.code_score import (
     CodeScoreResult,
     _failure_code_record,
+    _strip_think_tags,
     estimate_pass_at_k,
     extract_code,
     score_code,
     write_cache,
 )
 from llmeval.tasks.code_eval.execute import (
+    TimeoutException,
     check_correctness,
+    reliability_guard,
+    reliability_restore,
+    swallow_io,
+    time_limit,
     unsafe_execute,
 )
 
@@ -311,6 +317,125 @@ class TestCodeScoreResult:
     def test_populated(self) -> None:
         csr = CodeScoreResult(pass_at_1=0.5, total=4, correct=2, per_item=[])
         assert csr.pass_at_1 == 0.5
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _strip_think_tags
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestStripThinkTags:
+    def test_answer_tag_preferred(self) -> None:
+        text = "<think>plan</think>junk <answer>def f():\n    return 1</answer> tail"
+        assert _strip_think_tags(text) == "def f():\n    return 1"
+
+    def test_think_tag_fallback(self) -> None:
+        assert _strip_think_tags("reasoning</think>code here") == "code here"
+
+    def test_plain_text_unchanged(self) -> None:
+        assert _strip_think_tags("def f(): pass") == "def f(): pass"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# reliability_guard / reliability_restore
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestReliabilityGuard:
+    def test_guard_disables_and_restore_reenables(self) -> None:
+        import builtins
+        import os
+
+        original_system = os.system
+        original_exit = builtins.exit
+        try:
+            reliability_guard()
+            assert os.system is None
+            assert builtins.exit is None
+        finally:
+            reliability_restore()
+        assert os.system is original_system
+        assert builtins.exit is original_exit
+
+    def test_blocked_modules_raise_import_error(self) -> None:
+        import sys
+
+        try:
+            reliability_guard()
+            assert sys.modules["subprocess"] is None
+            with pytest.raises(ImportError):
+                import subprocess
+        finally:
+            reliability_restore()
+        import subprocess  # real import works again
+
+        assert subprocess is sys.modules["subprocess"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# swallow_io / time_limit
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestSwallowIO:
+    def test_stdout_captured_and_restored(self, capsys: pytest.CaptureFixture) -> None:
+        import sys
+
+        with swallow_io():
+            print("hidden output")
+            assert sys.stdout.getvalue() == "hidden output\n"
+        # After the block, stdout works normally again
+        print("visible")
+        assert "visible" in capsys.readouterr().out
+
+
+class TestTimeLimit:
+    def test_timeout_fires(self) -> None:
+        import time
+
+        with pytest.raises(TimeoutException), time_limit(0.2):
+            time.sleep(2)
+
+    def test_fast_code_not_interrupted(self) -> None:
+        with time_limit(5.0):
+            pass  # no exception
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# score_code with reasoning-model wrappers
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestScoreCodeThinkTags:
+    def test_think_wrapped_generation_passes(self, tmp_path: Path) -> None:
+        items = [
+            {
+                "task_id": "t0",
+                "prompt": "def add(a, b):\n",
+                "answer": "\nassert add(1, 2) == 3\n",
+                "gen": [
+                    "<think>I should add them</think>\n```python\n    return a + b\n```"
+                ],
+            }
+        ]
+        acc = score_code(
+            items, "answer", "gen", tmp_path / "cache.jsonl", max_workers=0
+        )
+        assert acc == 1.0
+
+    def test_answer_tag_wrapped_generation_passes(self, tmp_path: Path) -> None:
+        items = [
+            {
+                "task_id": "t1",
+                "prompt": "def add(a, b):\n",
+                "answer": "\nassert add(1, 2) == 3\n",
+                "gen": ["<answer>```python\n    return a + b\n```</answer>"],
+            }
+        ]
+        acc = score_code(
+            items, "answer", "gen", tmp_path / "cache.jsonl", max_workers=0
+        )
+        assert acc == 1.0
 
 
 # ═══════════════════════════════════════════════════════════════════════
