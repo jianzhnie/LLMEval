@@ -606,13 +606,13 @@ validate_config() {
 stop_service_on_node() {
     local node="$1"
     local port="${2:-}"
-    local search_pattern="vllm.entrypoints.openai.api_server"
+    local search_pattern="vllm serve"
 
     log_info "🛑 正在停止节点 ${node} 上的 vLLM 服务..."
 
     # 如果指定了端口，则精确停止该端口的服务
     if [[ -n "$port" ]]; then
-        search_pattern="vllm.entrypoints.openai.api_server.*--port ${port}"
+        search_pattern="vllm serve.*--port ${port}"
     fi
 
     # 优雅关闭：先发送 SIGTERM
@@ -648,7 +648,7 @@ stop_service_on_node() {
 stop_services() {
     log_info "🛑 脚本退出，正在停止所有远程模型服务..."
 
-    local search_pattern="vllm.entrypoints.openai.api_server"
+    local search_pattern="vllm serve"
     local pids=()
 
     # 遍历当前已知的节点列表 (可能已被 main 函数更新为 available_nodes)
@@ -702,7 +702,7 @@ check_remote_port_free() {
     if [[ "${used:-0}" -gt 0 ]]; then
         log_warn "节点 ${node} 端口 ${port} 已被占用，尝试清理旧 vLLM 进程..."
         # 尝试通过匹配端口的 vLLM 进程杀掉旧服务
-        ssh_run "$node" "pkill -f 'vllm.entrypoints.openai.api_server.*--port ${port}' || true" >/dev/null 2>&1 || true
+        ssh_run "$node" "pkill -f 'vllm serve.*--port ${port}' || true" >/dev/null 2>&1 || true
         sleep 1
     fi
 }
@@ -832,10 +832,15 @@ deploy_model_service() {
     #   --gpu-memory-utilization    控制显存水位（避免 OOM）
     #   --max-model-len             控制上下文长度
     # 提示：如需开启混合精度/强制 eager，可在 EXTRA_ENGINE_ARGS 中追加
+    # DISABLE_LOG_REQUESTS 为 True/1/true 时追加 --disable-log-requests
+    local log_requests_flag=""
+    case "${DISABLE_LOG_REQUESTS}" in
+        1 | [Tt][Rr][Uu][Ee]) log_requests_flag="--disable-log-requests" ;;
+    esac
     local vllm_cmd="cd '${PROJECT_DIR}' && \
         source '${SET_ENV_SCRIPT}' && \
         export ASCEND_RT_VISIBLE_DEVICES='${devices}' && \
-        nohup python -m vllm.entrypoints.openai.api_server \
+        nohup vllm serve \
             --model '${MODEL_PATH}' \
             --trust-remote-code \
             --enforce-eager \
@@ -845,6 +850,8 @@ deploy_model_service() {
             --max-model-len ${MAX_MODEL_LEN} \
             --max-num-seqs ${MAX_NUM_SEQS} \
             --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
+            ${log_requests_flag} \
+            ${EXTRA_ENGINE_ARGS} \
             --port ${port} \
             > '${log_file}' 2>&1 &"
 
@@ -876,7 +883,7 @@ check_service_ready() {
     fi
 
     # 1. 检查服务进程是否存在
-    if ! ssh_run "$node" "pgrep -f 'vllm.entrypoints.openai.api_server.*--port ${port}' > /dev/null"; then
+    if ! ssh_run "$node" "pgrep -f 'vllm serve.*--port ${port}' > /dev/null"; then
         log_warn "⚠️ 节点 ${node}/port${port}/instance-${instance_id} 上的服务进程未运行或已退出"
         return 1
     fi
