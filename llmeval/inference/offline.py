@@ -12,11 +12,8 @@ The output schema appends generations into a `gen` list for each input record.
 
 from __future__ import annotations
 
-import collections
-import copy
 import json
 import logging
-import os
 import sys
 import threading
 from collections.abc import Sequence
@@ -29,6 +26,11 @@ from transformers import HfArgumentParser
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
+from llmeval.inference.common import (
+    count_completed_samples,
+    expand_data_with_resume,
+    load_jsonl,
+)
 from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
@@ -296,47 +298,6 @@ class OfflineInferenceRunner:
             logger.warning(f"Failed to extract response from output: {e}")
             return ""
 
-    def count_completed_samples(self) -> dict[str, int]:
-        """Count completed samples for resume functionality.
-
-        This method scans the output file to determine how many samples have
-        already been processed for each unique question, enabling resume
-        functionality for interrupted runs.
-
-        The method handles:
-        - File existence and size checks
-        - JSON parsing with error recovery
-        - Prompt key resolution with fallbacks
-        - Comprehensive error handling
-
-        Returns:
-            Dictionary mapping question content to count of completed samples.
-        """
-        completed_counts: dict[str, int] = collections.defaultdict(int)
-
-        if not os.path.exists(self.args.output_file):
-            return completed_counts
-
-        if os.path.getsize(self.args.output_file) == 0:
-            return completed_counts
-
-        try:
-            with open(self.args.output_file, encoding="utf-8") as f:
-                for line_num, line in enumerate(f, 1):
-                    try:
-                        item: dict[str, Any] = json.loads(line.strip())
-                        prompt_key: Any = item.get(self.args.input_key, "")
-                        gen_count: int = len(item.get(self.args.response_key, []))
-                        if prompt_key is not None:
-                            completed_counts[str(prompt_key)] += gen_count
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON on line {line_num}: {e}")
-                        continue
-        except Exception as e:
-            logger.error(f"Error reading output file for resume check: {e}")
-
-        return completed_counts
-
     def load_data(self) -> list[dict[str, Any]]:
         """Load and expand the dataset, handling resume functionality per prompt.
 
@@ -358,98 +319,27 @@ class OfflineInferenceRunner:
         logger.info(f"Loading data from: {self.args.input_file}")
 
         # Load raw data
-        raw_data: list[dict[str, Any]] = self._load_raw_data()
+        raw_data: list[dict[str, Any]] = load_jsonl(self.args.input_file)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
         # Check for completed samples
-        completed_counts: dict[str, int] = self.count_completed_samples()
+        completed_counts: dict[str, int] = count_completed_samples(
+            self.args.output_file, self.args.input_key, self.args.response_key
+        )
         total_completed: int = sum(completed_counts.values())
 
         if total_completed > 0:
             logger.info(f"Found {total_completed} completed samples from previous run")
 
         # Expand data according to n_samples and resume functionality
-        expanded_data: list[dict[str, Any]] = self._expand_data_with_resume(
-            raw_data, completed_counts
+        expanded_data: list[dict[str, Any]] = expand_data_with_resume(
+            raw_data, completed_counts, self.args.input_key, self.args.n_samples
         )
 
         if not expanded_data:
             logger.warning("No data to process after expansion")
 
         logger.info(f"Total remaining samples to process: {len(expanded_data)}")
-        return expanded_data
-
-    def _load_raw_data(self) -> list[dict[str, Any]]:
-        """Load raw data from input file.
-
-        This method handles the loading of raw JSONL data from the input file
-        with comprehensive error handling.
-
-        Returns:
-            List of raw data items.
-
-        Raises:
-            FileNotFoundError: If the input file does not exist.
-            json.JSONDecodeError: If an input line is not valid JSON.
-        """
-        try:
-            with open(self.args.input_file, encoding="utf-8") as f:
-                data: list[dict[str, Any]] = [
-                    json.loads(line) for line in f if line.strip()
-                ]
-        except FileNotFoundError as e:
-            logger.critical(f"Input file not found: {self.args.input_file}, {e}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.critical(f"Invalid JSON in input file: {e}")
-            raise
-
-        return data
-
-    def _expand_data_with_resume(
-        self, raw_data: list[dict[str, Any]], completed_counts: dict[str, int]
-    ) -> list[dict[str, Any]]:
-        """Expand data according to n_samples and resume functionality.
-
-        This method processes the raw data and expands it based on the number
-        of samples needed per prompt, taking into account already completed
-        samples for resume functionality.
-
-        Args:
-            raw_data: Raw data loaded from input file.
-            completed_counts: Count of completed samples per prompt.
-
-        Returns:
-            Expanded dataset with remaining samples to process.
-        """
-        expanded_data: list[dict[str, Any]] = []
-        skipped_items: int = 0
-
-        for item in raw_data:
-            prompt_val: Any = item.get(self.args.input_key) or item.get("prompt")
-            prompt: str = str(prompt_val) if prompt_val is not None else ""
-
-            if not prompt.strip():
-                logger.warning(
-                    f"No valid prompt found under keys [{self.args.input_key!r}, "
-                    f'"prompt"] for item with keys: {list(item.keys())}'
-                )
-                skipped_items += 1
-                continue
-
-            completed: int = completed_counts.get(prompt, 0)
-            remaining: int = max(0, self.args.n_samples - completed)
-
-            for _ in range(remaining):
-                # deepcopy prevents shared mutable references (e.g. gen list)
-                # across expanded copies of the same raw item.
-                expanded_data.append(copy.deepcopy(item))
-
-        if skipped_items > 0:
-            logger.warning(
-                f"Skipped {skipped_items} items due to missing or empty prompt"
-            )
-
         return expanded_data
 
     def process_and_write_batch(self, batch_data: Sequence[dict[str, Any]]) -> None:

@@ -1,13 +1,14 @@
 """Multiple-choice inference: loglikelihood and generation modes.
 
-This module mirrors llmeval/inference/online_server.py in structure, naming, and
+This module mirrors llmeval/inference/online.py in structure, naming, and
 documentation style so the two can be reviewed side by side with a file diff:
 - MCLoglikelihoodClient  ~  InferenceClient
 - MCRunner               ~  InferenceRunner
 - main() (HfArgumentParser) ~  main()
 
 Shared utilities (ClientError, retry classification, backoff) live in
-llmeval/utils/api_retry.py; the configuration dataclass lives in
+llmeval/utils/retry.py; data-loading / resume helpers live in
+llmeval/inference/common.py; the configuration dataclass lives in
 llmeval/utils/config.py (MCInferConfig).
 MC-specific pieces (kept deliberately): FewShotFormatter, batched choice
 logprobs via the completions API, and per-mode worker methods.
@@ -31,6 +32,7 @@ import openai
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
+from llmeval.inference.common import load_jsonl, save_failed_items
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
@@ -65,7 +67,7 @@ class FewShotFormatter:
 
         source = self.few_shot_file or input_file
         try:
-            items = self._load_items(source)
+            items = load_jsonl(source)
         except Exception:
             logger.warning(f"Failed to load few-shot from {source}")
             return
@@ -106,16 +108,6 @@ class FewShotFormatter:
         # prompt already ends with "Answer:", append the answer
         return f"{prompt} {answer}"
 
-    @staticmethod
-    def _load_items(filepath: str) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        with open(filepath, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    items.append(json.loads(line))
-        return items
-
 
 # ===========================================================================
 # Loglikelihood Client
@@ -125,7 +117,7 @@ class FewShotFormatter:
 class MCLoglikelihoodClient:
     """Client for computing choice log-probabilities via the completions API.
 
-    Mirrors InferenceClient in online_server.py: same initialization, masked
+    Mirrors InferenceClient in online.py: same initialization, masked
     API-key logging, and classified retry policy. The MC-specific part is that
     one request carries ALL choices of an item (batched prompt list).
     """
@@ -244,7 +236,7 @@ class MCLoglikelihoodClient:
 class MCRunner:
     """Orchestrates MC inference with resume, threading, and stats.
 
-    Mirrors InferenceRunner in online_server.py: same pipeline stages
+    Mirrors InferenceRunner in online.py: same pipeline stages
     (load → resume filter → concurrent processing → report), the same
     thread-safety primitives, and the same failed-item persistence.
     """
@@ -352,7 +344,7 @@ class MCRunner:
             FileNotFoundError: If the input file does not exist
             json.JSONDecodeError: If the input file contains invalid JSON
         """
-        raw_data = self._load_raw_data()
+        raw_data = load_jsonl(self.config.input_file)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
         # Resume: skip items whose (few-shot prefixed) prompt is already written.
@@ -367,29 +359,6 @@ class MCRunner:
 
         logger.info(f"Total remaining samples to process: {len(remaining)}")
         return remaining
-
-    def _load_raw_data(self) -> list[dict[str, Any]]:
-        """Load raw data from the input file.
-
-        Returns:
-            List of raw data items.
-
-        Raises:
-            FileNotFoundError: If the input file does not exist
-            json.JSONDecodeError: If an input line is not valid JSON
-        """
-        try:
-            with open(self.config.input_file, encoding="utf-8") as f:
-                data: list[dict[str, Any]] = [
-                    json.loads(line) for line in f if line.strip()
-                ]
-        except FileNotFoundError as e:
-            logger.critical(f"Input file not found: {self.config.input_file}, {e}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.critical(f"Invalid JSON in input file: {e}")
-            raise
-        return data
 
     def build_prompt(self, item: dict[str, Any]) -> str:
         """Assemble the full prompt (few-shot prefix + raw prompt).
@@ -455,17 +424,7 @@ class MCRunner:
 
         if failed_items:
             logger.warning(f"Total failed tasks: {len(failed_items)}")
-            # Save failed items next to the output file. NOTE: splitext, not
-            # str.replace — a non-.jsonl output name must not collapse onto
-            # the output file itself ("w" mode would truncate it).
-            failed_file = os.path.splitext(self.config.output_file)[0] + "_failed.jsonl"
-            try:
-                with open(failed_file, "w", encoding="utf-8") as f:
-                    for entry in failed_items:
-                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                logger.info(f"Failed items saved to: {failed_file}")
-            except OSError as e:
-                logger.error(f"Failed to save failed items to file: {e}")
+            save_failed_items(self.config.output_file, failed_items)
 
     def _write_result(self, result: dict[str, Any]) -> None:
         """Write result to output file in a thread-safe manner.
@@ -554,6 +513,7 @@ class MCRunner:
         gen_client: openai.OpenAI = openai.OpenAI(
             api_key=self.config.api_key,
             base_url=self.config.base_url,
+            timeout=httpx.Timeout(self.config.request_timeout),
         )
 
         base_messages: list[dict[str, str]] = []
@@ -738,7 +698,7 @@ class MCRunner:
 def main() -> None:
     """Main entry point for the MC inference CLI.
 
-    Mirrors main() in online_server.py: HfArgumentParser builds MCInferConfig
+    Mirrors main() in online.py: HfArgumentParser builds MCInferConfig
     directly from the dataclass (field names == CLI flags), then the runner
     executes with standardized exit-code handling.
 

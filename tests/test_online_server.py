@@ -1,11 +1,13 @@
 """Tests for llmeval.inference.online.
 
-Focuses on data-loading, resume logic, and thread-safe writing --
-all testable without a live vLLM server.
+Focuses on request behavior, thread-safe writing, and concurrent grouping --
+all testable without a live vLLM server.  The shared data-loading / resume
+helpers are covered by tests/test_inference_common.py.
 """
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import json
 import sys
@@ -18,16 +20,28 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ── Mock heavy dependencies ──
-for mod_name in ("openai", "httpx"):
-    if mod_name not in sys.modules:
-        sys.modules[mod_name] = types.ModuleType(mod_name)
 
-# Provide stubs for openai exceptions used at module level
-_openai_mod = sys.modules["openai"]
-_openai_mod.APIConnectionError = type("APIConnectionError", (Exception,), {})
-_openai_mod.APIError = type("APIError", (Exception,), {})
-_openai_mod.RateLimitError = type("RateLimitError", (Exception,), {})
+# ── Mock heavy dependencies ──
+# Only stub modules that are genuinely absent — a bare ModuleType stub has
+# __spec__ = None, which crashes importlib.util.find_spec (called inside the
+# transformers import chain) with "ValueError: <pkg>.__spec__ is None".
+def _make_stub(name: str) -> types.ModuleType:
+    mod = types.ModuleType(name)
+    mod.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+    return mod
+
+
+for mod_name in ("openai", "httpx"):
+    if mod_name not in sys.modules and not importlib.util.find_spec(mod_name):
+        sys.modules[mod_name] = _make_stub(mod_name)
+
+# Provide stubs for openai exceptions used at module level (real openai
+# already has them; only the stub needs patching)
+_openai_mod = sys.modules.get("openai")
+if _openai_mod is not None:
+    for _exc in ("APIConnectionError", "APIError", "RateLimitError"):
+        if not hasattr(_openai_mod, _exc):
+            setattr(_openai_mod, _exc, type(_exc, (Exception,), {}))
 
 # Only stub transformers if genuinely absent — a partial stub (just
 # HfArgumentParser) would pollute sys.modules for other test modules needing
@@ -43,6 +57,7 @@ if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
     _tqdm.tqdm = MagicMock
     sys.modules["tqdm"] = _tqdm
 
+from llmeval.inference.common import expand_data_with_resume
 from llmeval.inference.online import (
     InferenceRunner,
 )
@@ -88,88 +103,6 @@ def _make_runner(tmp_path: Path, **overrides: Any) -> InferenceRunner:
     runner._stats_lock = threading.Lock()
     runner._stats = {"processed": 0, "failed": 0, "skipped": 0}
     return runner
-
-
-# ── InferenceRunner.count_completed_samples ───────────────────────
-
-
-class TestCountCompletedSamples:
-    def test_no_output_file(self, tmp_path: Path) -> None:
-        runner = _make_runner(tmp_path, output_file=str(tmp_path / "nope.jsonl"))
-        counts = runner.count_completed_samples()
-        assert counts == {}
-
-    def test_counts_existing_gen_entries(self, tmp_path: Path) -> None:
-        out = tmp_path / "output.jsonl"
-        with open(out, "w") as f:
-            f.write(json.dumps({"prompt": "q1", "gen": ["a1", "a2"]}) + "\n")
-            f.write(json.dumps({"prompt": "q2", "gen": ["b1"]}) + "\n")
-
-        runner = _make_runner(tmp_path)
-        counts = runner.count_completed_samples()
-        assert counts["q1"] == 2
-        assert counts["q2"] == 1
-
-    def test_handles_malformed_json(self, tmp_path: Path) -> None:
-        out = tmp_path / "output.jsonl"
-        with open(out, "w") as f:
-            f.write("bad json\n")
-            f.write(json.dumps({"prompt": "q1", "gen": ["a1"]}) + "\n")
-
-        runner = _make_runner(tmp_path)
-        counts = runner.count_completed_samples()
-        assert counts["q1"] == 1
-
-    def test_empty_output_file(self, tmp_path: Path) -> None:
-        out = tmp_path / "output.jsonl"
-        out.write_text("")
-        runner = _make_runner(tmp_path, output_file=str(out))
-        counts = runner.count_completed_samples()
-        assert counts == {}
-
-
-# ── InferenceRunner._expand_data_with_resume ─────────────────────
-
-
-class TestExpandDataWithResume:
-    def test_expands_by_n_samples(self, tmp_path: Path) -> None:
-        runner = _make_runner(tmp_path, n_samples=3)
-        raw = [{"prompt": "q1", "answer": "a1"}]
-        expanded = runner._expand_data_with_resume(raw, {})
-        assert len(expanded) == 3
-        for item in expanded:
-            assert item["prompt"] == "q1"
-
-    def test_subtracts_completed(self, tmp_path: Path) -> None:
-        runner = _make_runner(tmp_path, n_samples=4)
-        raw = [{"prompt": "q1", "answer": "a1"}]
-        expanded = runner._expand_data_with_resume(raw, {"q1": 2})
-        assert len(expanded) == 2
-
-    def test_skips_empty_prompt(self, tmp_path: Path) -> None:
-        runner = _make_runner(tmp_path, n_samples=1)
-        raw = [{"prompt": "", "answer": "a1"}]
-        expanded = runner._expand_data_with_resume(raw, {})
-        assert len(expanded) == 0
-
-    def test_all_completed_skips_all(self, tmp_path: Path) -> None:
-        runner = _make_runner(tmp_path, n_samples=2)
-        raw = [{"prompt": "q1", "answer": "a1"}]
-        expanded = runner._expand_data_with_resume(raw, {"q1": 2})
-        assert len(expanded) == 0
-
-    def test_shallow_copy_independence(self, tmp_path: Path) -> None:
-        """Verify that expanding creates independent items."""
-        runner = _make_runner(tmp_path, n_samples=2)
-        raw = [{"prompt": "q1", "answer": "a1", "gen": ["existing"]}]
-        expanded = runner._expand_data_with_resume(raw, {})
-        assert len(expanded) == 2
-        # Modify one expanded item's gen list
-        expanded[0]["gen"].append("new")
-        # The other expanded item should NOT be affected
-        # (gen lists may be shared since we use shallow copy)
-        # This is expected: the caller (process_item) handles isolation
-        # via item.copy() + new gen_list
 
 
 # ── InferenceRunner._write_result ────────────────────────────────
@@ -415,7 +348,9 @@ class TestConcurrentGrouping:
         runner.client = MagicMock()
         runner.client.get_contents.return_value = ["s1", "s2", "s3"]
 
-        expanded = runner._expand_data_with_resume([{"prompt": "q", "answer": "a"}], {})
+        expanded = expand_data_with_resume(
+            [{"prompt": "q", "answer": "a"}], {}, "prompt", 3
+        )
         assert len(expanded) == 3
         runner._process_concurrently(expanded)
 

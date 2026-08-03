@@ -8,9 +8,7 @@ inference tasks.
 
 from __future__ import annotations
 
-import collections
 import concurrent.futures
-import copy
 import dataclasses
 import json
 import logging
@@ -27,6 +25,12 @@ from openai import APIConnectionError, APIError, RateLimitError
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
+from llmeval.inference.common import (
+    count_completed_samples,
+    expand_data_with_resume,
+    load_jsonl,
+    save_failed_items,
+)
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
@@ -333,6 +337,12 @@ class InferenceClient:
 
         Shared by get_content (single sample) and get_contents (n samples).
 
+        Error classification per attempt:
+        - context-length rejection → return None (prompt can never fit)
+        - non-retryable 4xx → raise immediately (retrying cannot succeed)
+        - connection / rate-limit / 5xx / malformed response → backoff + retry
+        - retries exhausted → raise ClientError with the last error message
+
         Args:
             call_args: Keyword arguments for client.chat.completions.create
 
@@ -343,7 +353,9 @@ class InferenceClient:
         Raises:
             ClientError: For non-retryable API issues or exhausted retries
         """
-        last_exception: ClientError | None = None
+        last_message = "Unknown error occurred"
+        last_error: Exception | None = None
+
         for attempt in range(self.max_retries + 1):
             completion = None
             try:
@@ -351,25 +363,11 @@ class InferenceClient:
                 # Probe the structure so malformed responses hit the handler below
                 _ = completion.choices[0].message
                 return completion
-            except (IndexError, AttributeError) as e:
-                # Handle missing choices, message attributes in completion response
-                err_msg = self._describe_completion(completion, e)
-                last_exception = ClientError(err_msg, e)
-                if attempt < self.max_retries:
-                    retry_backoff(
-                        attempt, self.max_retries, f"{type(e).__name__}: {err_msg}"
-                    )
-                else:
-                    raise ClientError(f"Max retries exceeded: {err_msg}", e) from e
             except (APIConnectionError, RateLimitError) as e:
-                # Handle retryable errors with exponential backoff
-                last_exception = ClientError(str(e), e)
-                if attempt < self.max_retries:
-                    retry_backoff(
-                        attempt, self.max_retries, f"{type(e).__name__}: {e!s}"
-                    )
-                else:
-                    raise ClientError(f"Max retries exceeded: {e!s}", e) from e
+                # Retryable transport / throttling errors
+                last_message = str(e)
+                last_error = e
+                reason = f"{type(e).__name__}: {e!s}"
             except APIError as e:
                 # Context length: prompt can never fit, return empty result
                 if is_context_length_error(e):
@@ -377,39 +375,32 @@ class InferenceClient:
                         "Max context length exceeded, returning empty result"
                     )
                     return None
-                # 4xx 客户端错误（除 408/429）重试无意义，直接失败；
-                # 429 已由上面的 RateLimitError 分支处理
+                # 4xx (except 408/429): retrying can never succeed — fail fast;
+                # 429 is a RateLimitError subclass handled by the branch above.
                 non_retryable = non_retryable_client_error(e)
                 if non_retryable:
                     raise ClientError(non_retryable, e) from e
-                err_message = getattr(e, "message", None) or str(e)
-                logger.error(f"API error: {err_message}")
-                last_exception = ClientError(err_message, e)
-                if attempt < self.max_retries:
-                    retry_backoff(
-                        attempt, self.max_retries, f"API error: {err_message}"
-                    )
-                else:
-                    raise ClientError(err_message, e) from e
+                last_message = getattr(e, "message", None) or str(e)
+                last_error = e
+                logger.error(f"API error: {last_message}")
+                reason = f"API error: {last_message}"
+            except (IndexError, AttributeError) as e:
+                # Malformed completion (missing choices / message attributes)
+                last_message = self._describe_completion(completion, e)
+                last_error = e
+                reason = f"{type(e).__name__}: {last_message}"
             except Exception as e:
-                # Handle any other unexpected exceptions
+                # Any other unexpected exception
                 logger.error(f"Unexpected error: {e!s}", exc_info=True)
-                last_exception = ClientError(str(e), e)
-                if attempt < self.max_retries:
-                    retry_backoff(
-                        attempt,
-                        self.max_retries,
-                        f"Unexpected {type(e).__name__}: {e!s}",
-                    )
-                else:
-                    raise ClientError(
-                        f"Max retries exceeded with unexpected error: {e!s}", e
-                    ) from e
+                last_message = str(e)
+                last_error = e
+                reason = f"Unexpected {type(e).__name__}: {e!s}"
 
-        # If we've exhausted retries, raise the last exception
-        raise (
-            last_exception if last_exception else ClientError("Unknown error occurred")
-        )
+            if attempt >= self.max_retries:
+                break
+            retry_backoff(attempt, self.max_retries, reason)
+
+        raise ClientError(f"Max retries exceeded: {last_message}", last_error)
 
 
 class InferenceRunner:
@@ -480,54 +471,6 @@ class InferenceRunner:
         self._stats: dict[str, int] = {"processed": 0, "failed": 0, "skipped": 0}
         self._stats_lock: threading.Lock = threading.Lock()  # Dedicated lock for stats
 
-    def count_completed_samples(self) -> dict[str, int]:
-        """Count completed samples for resume functionality.
-
-        This method scans the output file to determine how many samples have
-        already been processed for each unique question, enabling resume
-        functionality for interrupted runs.
-
-        The method handles:
-        - File existence and size checks
-        - JSON parsing with error recovery
-        - Prompt key resolution with fallbacks
-        - Comprehensive error handling
-
-        Returns:
-            Dictionary mapping question content to count of completed samples.
-        """
-        completed_counts: dict[str, int] = collections.defaultdict(int)
-
-        if not os.path.exists(self.args.output_file):
-            return completed_counts
-
-        if os.path.getsize(self.args.output_file) == 0:
-            return completed_counts
-
-        try:
-            with open(self.args.output_file, encoding="utf-8") as f:
-                for line_num, line in enumerate(f, 1):
-                    try:
-                        item: dict[str, Any] = json.loads(line.strip())
-                        prompt: Any = item.get(self.args.input_key) or item.get(
-                            "prompt"
-                        )
-                        gen_response = item.get(self.args.response_key) or item.get(
-                            "gen"
-                        )
-                        gen_count: int = (
-                            len(gen_response) if isinstance(gen_response, list) else 0
-                        )
-                        if prompt is not None:
-                            completed_counts[str(prompt)] += gen_count
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON on line {line_num}: {e}")
-                        continue
-        except Exception as e:
-            logger.error(f"Error reading output file for resume check: {e}")
-
-        return completed_counts
-
     def load_data(self) -> list[dict[str, Any]]:
         """Load and prepare the dataset, handling resume functionality.
 
@@ -550,96 +493,27 @@ class InferenceRunner:
             raise FileNotFoundError(f"Input file not found: {self.args.input_file}")
 
         # Load raw data
-        raw_data: list[dict[str, Any]] = self._load_raw_data()
+        raw_data: list[dict[str, Any]] = load_jsonl(self.args.input_file)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
         # Resume functionality handling
-        completed_counts = self.count_completed_samples()
+        completed_counts = count_completed_samples(
+            self.args.output_file, self.args.input_key, self.args.response_key
+        )
         total_completed = sum(completed_counts.values())
 
         if total_completed > 0:
             logger.info(f"Found {total_completed} completed samples from previous run.")
 
         # Expand data according to n_samples and resume functionality
-        expanded_data: list[dict[str, Any]] = self._expand_data_with_resume(
-            raw_data, completed_counts
+        expanded_data: list[dict[str, Any]] = expand_data_with_resume(
+            raw_data, completed_counts, self.args.input_key, self.args.n_samples
         )
 
         if not expanded_data:
             logger.warning("No data to process after expansion")
 
         logger.info(f"Total remaining samples to process: {len(expanded_data)}")
-        return expanded_data
-
-    def _load_raw_data(self) -> list[dict[str, Any]]:
-        """Load raw data from input file.
-
-        This method handles the loading of raw JSONL data from the input file
-        with comprehensive error handling.
-
-        Returns:
-            List of raw data items.
-
-        Raises:
-            FileNotFoundError: If the input file does not exist.
-            json.JSONDecodeError: If an input line is not valid JSON.
-        """
-        try:
-            with open(self.args.input_file, encoding="utf-8") as f:
-                data: list[dict[str, Any]] = [
-                    json.loads(line) for line in f if line.strip()
-                ]
-        except FileNotFoundError as e:
-            logger.critical(f"Input file not found: {self.args.input_file}, {e}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.critical(f"Invalid JSON in input file: {e}")
-            raise
-
-        return data
-
-    def _expand_data_with_resume(
-        self, raw_data: list[dict[str, Any]], completed_counts: dict[str, int]
-    ) -> list[dict[str, Any]]:
-        """Expand data according to n_samples and resume functionality.
-
-        This method processes the raw data and expands it based on the number
-        of samples needed per prompt, taking into account already completed
-        samples for resume functionality.
-
-        Args:
-            raw_data: Raw data loaded from input file.
-            completed_counts: Count of completed samples per prompt.
-
-        Returns:
-            Expanded dataset with remaining samples to process.
-        """
-        expanded_data: list[dict[str, Any]] = []
-        skipped_items: int = 0
-
-        for item in raw_data:
-            prompt_val: Any = item.get(self.args.input_key) or item.get("prompt")
-            prompt: str = str(prompt_val) if prompt_val is not None else ""
-
-            if not prompt.strip():
-                logger.warning(
-                    f"No valid prompt found under keys [{self.args.input_key!r}, "
-                    f'"{"prompt"}"] for item with keys: {list(item.keys())}'
-                )
-                skipped_items += 1
-                continue
-
-            completed: int = completed_counts.get(prompt, 0)
-            remaining: int = max(0, self.args.n_samples - completed)
-
-            for _ in range(remaining):
-                expanded_data.append(copy.deepcopy(item))
-
-        if skipped_items > 0:
-            logger.warning(
-                f"Skipped {skipped_items} items due to missing or empty prompt"
-            )
-
         return expanded_data
 
     def _write_result(self, result: dict[str, Any]) -> None:
@@ -657,13 +531,15 @@ class InferenceRunner:
                 logger.error(f"Error writing batch results: {e}")
                 raise OSError(f"Failed to write batch results: {e}") from e
 
-    def _extract_query(self, item: dict[str, Any]) -> str | None:
+    def _extract_query(self, item: Any) -> str | None:
         """Validate the item structure and extract the query text.
 
-        Updates failure/skip statistics when the item is unusable.
+        Updates failure/skip statistics when the item is unusable.  Takes
+        ``Any`` (not ``dict``) because malformed input lines can surface as
+        non-dict items at runtime — that is exactly what this method rejects.
 
         Args:
-            item: Raw data item (must be a dict with a prompt field)
+            item: Raw data item (expected to be a dict with a prompt field)
 
         Returns:
             The query string, or None if the item is invalid (stats updated).
@@ -909,19 +785,7 @@ class InferenceRunner:
 
         if failed_tasks:
             logger.warning(f"Total failed tasks: {len(failed_tasks)}")
-            # Optionally save failed tasks to a separate file for debugging
-            # 注意不能用 output_file.replace(".jsonl", ...)：输出文件不带 .jsonl
-            # 后缀时 replace 为空操作，会以 "w" 模式截断结果文件
-            failed_tasks_file = (
-                os.path.splitext(self.args.output_file)[0] + "_failed.jsonl"
-            )
-            try:
-                with open(failed_tasks_file, "w") as f:
-                    for task in failed_tasks:
-                        f.write(json.dumps(task) + "\n")
-                logger.info(f"Failed tasks saved to: {failed_tasks_file}")
-            except Exception as e:
-                logger.error(f"Failed to save failed tasks to file: {e}")
+            save_failed_items(self.args.output_file, failed_tasks)
 
     def run(self) -> None:
         """Execute the complete inference pipeline with monitoring and reporting.

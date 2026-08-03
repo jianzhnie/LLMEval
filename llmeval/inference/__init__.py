@@ -7,6 +7,6 @@ Usage::
 
     from llmeval.inference.online import InferenceClient
     from llmeval.inference.offline import OfflineInferenceRunner
-    from llmeval.inference.verifier import VerifierInferenceRunner
+    from llmeval.inference.verifier import VerifierOfflineInferenceRunner
     from llmeval.inference.mc import MCRunner
 """

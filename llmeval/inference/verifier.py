@@ -9,7 +9,6 @@ functionality, and robust error handling.
 from __future__ import annotations
 
 import collections
-import copy
 import json
 import logging
 import os
@@ -26,12 +25,25 @@ from transformers import AutoTokenizer, HfArgumentParser
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
+from llmeval.inference.common import expand_data_with_resume, load_jsonl
 from llmeval.utils.config import VerifierInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.verifier_prompts import VERIFY_PROMPT_FACTORY
 
 # Initialize logger
 logger = init_logger("compass_verifier_infer", logging.INFO)
+
+# Precompiled extraction patterns (compiled once at import, not per call).
+_ANSWER_TAG_RE: re.Pattern[str] = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
+_THINK_END_RE: re.Pattern[str] = re.compile(r"</think\s*>", re.IGNORECASE)
+_BOXED_CONTENT_RE: re.Pattern[str] = re.compile(
+    r"\\boxed\s*\{([^}]*)\}", re.DOTALL | re.IGNORECASE
+)
+_LETTER_IN_BOX_RE: re.Pattern[str] = re.compile(r"([A-D])", re.IGNORECASE)
+_PAREN_LETTER_RE: re.Pattern[str] = re.compile(r"\(([A-D])\)", re.IGNORECASE)
+_STANDALONE_LETTER_RE: re.Pattern[str] = re.compile(
+    r"(?<![A-Za-z])([A-D])(?![A-Za-z])", re.IGNORECASE
+)
 
 
 def _last_n_strs(text: str, n: int) -> str:
@@ -63,11 +75,9 @@ def extract_tagged_answer(response_string: str, fallback_tokens: int = 200) -> s
     if not response_string or not isinstance(response_string, str):
         return ""
 
-    # Regular expression patterns for answer extraction
     # (.*?) 是一个非贪婪捕获组，用于匹配并提取标签内的所有内容。
     # re.DOTALL 标志确保 . 也能匹配换行符，以防 answer 内容有多行。
-    pattern: re.Pattern[str] = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
-    match = pattern.search(response_string)
+    match = _ANSWER_TAG_RE.search(response_string)
     # 如果找到匹配项，返回第一个捕获组（括号内的内容），并去除首尾空格
     if match:
         content = match.group(1).strip()
@@ -75,8 +85,7 @@ def extract_tagged_answer(response_string: str, fallback_tokens: int = 200) -> s
             return content
 
     # Fallback 1: content after </think>
-    think_end_pattern = re.compile(r"</think\s*>", re.IGNORECASE)
-    match = think_end_pattern.search(response_string)
+    match = _THINK_END_RE.search(response_string)
     if match:
         tail = response_string[match.end() :].strip()
         if tail:
@@ -124,36 +133,26 @@ def process_judgment_cursor(judgment_str: str) -> str:
         return s
 
     # Strategy 2: extract the last boxed content, then find a valid letter within it.
-    boxed_content_pattern: re.Pattern[str] = re.compile(
-        r"\\boxed\s*\{([^}]*)\}", re.DOTALL | re.IGNORECASE
-    )
-    boxed_contents = boxed_content_pattern.findall(s)
+    boxed_contents = _BOXED_CONTENT_RE.findall(s)
     if boxed_contents:
-        last_box = boxed_contents[-1]
-        letter_in_box_pattern: re.Pattern[str] = re.compile(r"([A-D])", re.IGNORECASE)
-        candidates = letter_in_box_pattern.findall(last_box)
+        candidates = _LETTER_IN_BOX_RE.findall(boxed_contents[-1])
         if candidates:
             return candidates[-1].upper()
 
     # Strategy 3: "Final Judgment:" section extraction (common in English verifier prompts).
     if "Final Judgment:" in s:
         final_section = s.split("Final Judgment:")[-1]
-        paren_pattern: re.Pattern[str] = re.compile(r"\(([A-D])\)", re.IGNORECASE)
-        paren_matches = paren_pattern.findall(final_section)
+        paren_matches = _PAREN_LETTER_RE.findall(final_section)
         if paren_matches:
             return paren_matches[-1].upper()
 
     # Strategy 4: explicit parenthesized letter like (A), (b), etc.
-    paren_pattern: re.Pattern[str] = re.compile(r"\(([A-D])\)", re.IGNORECASE)
-    paren_matches = paren_pattern.findall(s)
+    paren_matches = _PAREN_LETTER_RE.findall(s)
     if paren_matches:
         return paren_matches[-1].upper()
 
     # Strategy 5: any standalone A-D letter (avoid letters embedded in words).
-    standalone_letter_pattern: re.Pattern[str] = re.compile(
-        r"(?<![A-Za-z])([A-D])(?![A-Za-z])", re.IGNORECASE
-    )
-    all_matches = standalone_letter_pattern.findall(s)
+    all_matches = _STANDALONE_LETTER_RE.findall(s)
     if all_matches:
         return all_matches[-1].upper()
 
@@ -181,7 +180,7 @@ if _missing_extractors:
         f"VERIFY_PROMPT_FACTORY keys have no entry in JUDGMENT_EXTRACTOR: "
         f"{sorted(_missing_extractors)}. "
         "Add the missing key(s) to JUDGMENT_EXTRACTOR in "
-        "llmeval/inference/verifier_offline_infer.py."
+        "llmeval/inference/verifier.py."
     )
 
 
@@ -569,7 +568,7 @@ class VerifierOfflineInferenceRunner:
         logger.info(f"Loading data from: {self.args.input_file}")
 
         # Load raw data
-        raw_data = self._load_raw_data()
+        raw_data = load_jsonl(self.args.input_file)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
         # Check for completed samples
@@ -580,73 +579,13 @@ class VerifierOfflineInferenceRunner:
             logger.info(f"Found {total_completed} completed samples from previous run")
 
         # Expand data according to n_samples and resume functionality
-        expanded_data = self._expand_data_with_resume(raw_data, completed_counts)
+        expanded_data = expand_data_with_resume(
+            raw_data, completed_counts, self.args.input_key, self.args.n_samples
+        )
         if not expanded_data:
             logger.warning("No data to process after expansion")
 
         logger.info(f"Total remaining samples to process: {len(expanded_data)}")
-        return expanded_data
-
-    def _load_raw_data(self) -> list[dict[str, Any]]:
-        """Load raw data from input file.
-
-        Returns:
-            List of raw data items.
-
-        Raises:
-            FileNotFoundError: If the input file does not exist.
-            json.JSONDecodeError: If an input line is not valid JSON.
-        """
-        try:
-            with open(self.args.input_file, encoding="utf-8") as f:
-                data = [json.loads(line) for line in f if line.strip()]
-        except FileNotFoundError as e:
-            logger.critical(f"Input file not found: {self.args.input_file}, {e}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.critical(f"Invalid JSON in input file: {e}")
-            raise
-
-        return data
-
-    def _expand_data_with_resume(
-        self, raw_data: list[dict[str, Any]], completed_counts: dict[str, int]
-    ) -> list[dict[str, Any]]:
-        """Expand data according to n_samples and resume functionality.
-
-        Args:
-            raw_data: Raw data loaded from input file.
-            completed_counts: Count of completed samples per prompt.
-
-        Returns:
-            Expanded dataset with remaining samples to process.
-        """
-        expanded_data: list[dict[str, Any]] = []
-        skipped_items = 0
-
-        for item in raw_data:
-            prompt_val = item.get(self.args.input_key) or item.get("prompt")
-            prompt = str(prompt_val) if prompt_val is not None else ""
-
-            if not prompt.strip():
-                logger.warning(
-                    f"No valid prompt found under keys [{self.args.input_key!r}, "
-                    f'{self.args.input_key!r}"] for item with keys: {list(item.keys())}'
-                )
-                skipped_items += 1
-                continue
-
-            completed = completed_counts.get(prompt, 0)
-            remaining = max(0, self.args.n_samples - completed)
-
-            for _ in range(remaining):
-                expanded_data.append(copy.deepcopy(item))
-
-        if skipped_items > 0:
-            logger.warning(
-                f"Skipped {skipped_items} items due to missing or empty prompt"
-            )
-
         return expanded_data
 
     def process_and_write_batch(self, batch_data: list[dict[str, Any]]) -> None:

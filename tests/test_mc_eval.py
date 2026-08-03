@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import json
 import sys
@@ -12,16 +13,28 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
 # ── Mock heavy dependencies ──
+# Only stub modules that are genuinely absent — a bare ModuleType stub has
+# __spec__ = None, which crashes importlib.util.find_spec (called inside the
+# transformers import chain) with "ValueError: <pkg>.__spec__ is None".
+def _make_stub(name: str) -> types.ModuleType:
+    mod = types.ModuleType(name)
+    mod.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+    return mod
+
+
 for mod_name in ("openai", "httpx"):
-    if mod_name not in sys.modules:
-        sys.modules[mod_name] = types.ModuleType(mod_name)
+    if mod_name not in sys.modules and not importlib.util.find_spec(mod_name):
+        sys.modules[mod_name] = _make_stub(mod_name)
 
 # Provide stubs for openai exceptions used at module level in mc_infer
-_openai_mod = sys.modules["openai"]
-for _exc in ("APIConnectionError", "APIError", "RateLimitError"):
-    if not hasattr(_openai_mod, _exc):
-        setattr(_openai_mod, _exc, type(_exc, (Exception,), {}))
+# (real openai already has them; only the stub needs patching)
+_openai_mod = sys.modules.get("openai")
+if _openai_mod is not None:
+    for _exc in ("APIConnectionError", "APIError", "RateLimitError"):
+        if not hasattr(_openai_mod, _exc):
+            setattr(_openai_mod, _exc, type(_exc, (Exception,), {}))
 
 # mc_infer imports HfArgumentParser/tqdm at module level; stub only if absent.
 # A partial transformers stub would pollute sys.modules for other test modules
