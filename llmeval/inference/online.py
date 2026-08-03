@@ -21,7 +21,6 @@ from typing import Any
 
 import httpx
 import openai
-from openai import APIConnectionError, APIError, RateLimitError
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
@@ -34,12 +33,7 @@ from llmeval.inference.common import (
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
-from llmeval.utils.retry import (
-    ClientError,
-    is_context_length_error,
-    non_retryable_client_error,
-    retry_backoff,
-)
+from llmeval.utils.retry import call_with_retry
 
 logger = init_logger("online_vllm_server", logging.INFO)
 
@@ -138,26 +132,6 @@ class InferenceClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": query})
         return messages
-
-    @staticmethod
-    def _describe_completion(completion: Any, error: Exception) -> str:
-        """Extract a diagnostic message from a malformed completion response.
-
-        Args:
-            completion: The completion object that failed to parse (may be None)
-            error: The original parsing exception, used as fallback description
-
-        Returns:
-            A human-readable description of what the response contained.
-        """
-        if completion is None:
-            return str(error)
-        try:
-            if not completion.choices:
-                return "(empty choices)"
-            return completion.choices[0].message.content or "(null content)"
-        except (IndexError, AttributeError):
-            return "(invalid completion structure)"
 
     def get_content(
         self,
@@ -333,74 +307,33 @@ class InferenceClient:
         return call_args
 
     def _request_with_retry(self, call_args: dict[str, Any]) -> Any | None:
-        """Execute a chat.completions call with classified retry logic.
+        """Execute a chat.completions call under the shared retry policy.
 
         Shared by get_content (single sample) and get_contents (n samples).
-
-        Error classification per attempt:
-        - context-length rejection → return None (prompt can never fit)
-        - non-retryable 4xx → raise immediately (retrying cannot succeed)
-        - connection / rate-limit / 5xx / malformed response → backoff + retry
-        - retries exhausted → raise ClientError with the last error message
+        The attempt loop and classification policy live in
+        :func:`llmeval.utils.retry.call_with_retry` (same as mc.py); only the
+        request itself — plus a structure probe so malformed responses are
+        retried instead of crashing later at content extraction — is defined
+        here.
 
         Args:
             call_args: Keyword arguments for client.chat.completions.create
 
         Returns:
-            The raw completion object, or None when the prompt exceeds the
-            model's maximum context length (callers map this to empty results).
+            The raw completion object, or None on context-length rejection
+            (callers map this to empty results).
 
         Raises:
             ClientError: For non-retryable API issues or exhausted retries
         """
-        last_message = "Unknown error occurred"
-        last_error: Exception | None = None
 
-        for attempt in range(self.max_retries + 1):
-            completion = None
-            try:
-                completion = self.client.chat.completions.create(**call_args)
-                # Probe the structure so malformed responses hit the handler below
-                _ = completion.choices[0].message
-                return completion
-            except (APIConnectionError, RateLimitError) as e:
-                # Retryable transport / throttling errors
-                last_message = str(e)
-                last_error = e
-                reason = f"{type(e).__name__}: {e!s}"
-            except APIError as e:
-                # Context length: prompt can never fit, return empty result
-                if is_context_length_error(e):
-                    logger.warning(
-                        "Max context length exceeded, returning empty result"
-                    )
-                    return None
-                # 4xx (except 408/429): retrying can never succeed — fail fast;
-                # 429 is a RateLimitError subclass handled by the branch above.
-                non_retryable = non_retryable_client_error(e)
-                if non_retryable:
-                    raise ClientError(non_retryable, e) from e
-                last_message = getattr(e, "message", None) or str(e)
-                last_error = e
-                logger.error(f"API error: {last_message}")
-                reason = f"API error: {last_message}"
-            except (IndexError, AttributeError) as e:
-                # Malformed completion (missing choices / message attributes)
-                last_message = self._describe_completion(completion, e)
-                last_error = e
-                reason = f"{type(e).__name__}: {last_message}"
-            except Exception as e:
-                # Any other unexpected exception
-                logger.error(f"Unexpected error: {e!s}", exc_info=True)
-                last_message = str(e)
-                last_error = e
-                reason = f"Unexpected {type(e).__name__}: {e!s}"
+        def do_request() -> Any:
+            completion = self.client.chat.completions.create(**call_args)
+            # Probe the structure so malformed responses are retried too
+            _ = completion.choices[0].message
+            return completion
 
-            if attempt >= self.max_retries:
-                break
-            retry_backoff(attempt, self.max_retries, reason)
-
-        raise ClientError(f"Max retries exceeded: {last_message}", last_error)
+        return call_with_retry(do_request, self.max_retries)
 
 
 class InferenceRunner:

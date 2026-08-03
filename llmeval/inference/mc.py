@@ -36,7 +36,7 @@ from llmeval.inference.common import load_jsonl, save_failed_items
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
-from llmeval.utils.retry import should_retry
+from llmeval.utils.retry import ClientError, call_with_retry
 
 logger = init_logger("mc_infer")
 
@@ -181,51 +181,49 @@ class MCLoglikelihoodClient:
             among the top predictions get float("-inf"). All -inf when the
             request fails after all retries.
         """
-        last_error: Exception | None = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                resp = self.client.completions.create(
-                    model=self.model_name,
-                    prompt=prompt,
-                    max_tokens=1,
-                    temperature=0,
-                    logprobs=20,
-                    echo=False,
-                    timeout=self.timeout,
-                )
-                top_dict: dict[str, float] = (
-                    resp.choices[0].logprobs.top_logprobs[0]
-                    if resp.choices
-                    and resp.choices[0].logprobs
-                    and resp.choices[0].logprobs.top_logprobs
-                    else {}
-                )
-                results = []
-                for target in choice_texts:
-                    best = float("-inf")
-                    for form in {
-                        target,
-                        f" {target}",
-                        target.lower(),
-                        f" {target.lower()}",
-                    }:
-                        lp = top_dict.get(form)
-                        if lp is not None and lp > best:
-                            best = lp
-                    results.append(best)
-                return results
-            except Exception as e:
-                last_error = e
-                action = should_retry(e, attempt, self.max_retries)
-                if action is False:
-                    break
-                if action is None:
-                    logger.warning(f"Unclassified error: {type(e).__name__}: {e!s}")
-                    break
-        logger.warning(
-            f"Logprob request failed after {self.max_retries + 1} attempts: {last_error}"
-        )
-        return [float("-inf")] * len(choice_texts)
+
+        def do_request() -> list[float]:
+            resp = self.client.completions.create(
+                model=self.model_name,
+                prompt=prompt,
+                max_tokens=1,
+                temperature=0,
+                logprobs=20,
+                echo=False,
+                timeout=self.timeout,
+            )
+            top_dict: dict[str, float] = (
+                resp.choices[0].logprobs.top_logprobs[0]
+                if resp.choices
+                and resp.choices[0].logprobs
+                and resp.choices[0].logprobs.top_logprobs
+                else {}
+            )
+            results = []
+            for target in choice_texts:
+                best = float("-inf")
+                for form in {
+                    target,
+                    f" {target}",
+                    target.lower(),
+                    f" {target.lower()}",
+                }:
+                    lp = top_dict.get(form)
+                    if lp is not None and lp > best:
+                        best = lp
+                results.append(best)
+            return results
+
+        try:
+            choice_logprobs = call_with_retry(do_request, self.max_retries)
+        except ClientError as e:
+            logger.warning(f"Logprob request failed: {e}")
+            choice_logprobs = None
+        if choice_logprobs is None:
+            # Request failed (4xx / exhausted retries / context length): the
+            # all-"-inf" result marks the item failed downstream, never scored.
+            return [float("-inf")] * len(choice_texts)
+        return choice_logprobs
 
 
 # ===========================================================================
@@ -556,37 +554,30 @@ class MCRunner:
         gold = item.get(self.config.label_key, "")
         messages = [*base_messages, {"role": "user", "content": prompt}]
 
-        gen_text = ""
-        last_error: Exception | None = None
-        for attempt in range(self.config.max_retries + 1):
-            try:
-                call_args: dict[str, Any] = {
-                    "model": self.config.model_name,
-                    "messages": messages,
-                    "max_tokens": self.config.max_tokens,
-                    "temperature": self.config.temperature,
-                    "timeout": self.config.request_timeout,
-                }
-                # tool_choice: only send when explicitly configured
-                if self.config.tool_choice:
-                    call_args["tool_choice"] = self.config.tool_choice
-                resp = client.chat.completions.create(**call_args)
-                # Reasoning models may return content=None (thinking exhausted
-                # max_tokens); normalize to "" — the empty result is a failure
-                gen_text = resp.choices[0].message.content or ""
-                break
-            except Exception as e:
-                last_error = e
-                action = should_retry(e, attempt, self.config.max_retries)
-                if action is False:
-                    break
-                if action is None:
-                    logger.warning(
-                        f"Generate aborted: unclassified {type(e).__name__}: {e!s}"
-                    )
-                    break
+        call_args: dict[str, Any] = {
+            "model": self.config.model_name,
+            "messages": messages,
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+            "timeout": self.config.request_timeout,
+        }
+        # tool_choice: only send when explicitly configured
+        if self.config.tool_choice:
+            call_args["tool_choice"] = self.config.tool_choice
+
+        def do_request() -> str:
+            resp = client.chat.completions.create(**call_args)
+            # Reasoning models may return content=None (thinking exhausted
+            # max_tokens); normalize to "" — the empty result is a failure
+            return resp.choices[0].message.content or ""
+
+        try:
+            gen_text = call_with_retry(do_request, self.config.max_retries)
+        except ClientError as e:
+            raise RuntimeError(f"Generate produced no usable text: {e}") from e
         if not gen_text:
-            raise RuntimeError(f"Generate produced no usable text: {last_error}")
+            # Context-length rejection (None) or null/empty content ("")
+            raise RuntimeError("Generate produced no usable text (empty response)")
 
         return {
             self.config.input_key: prompt,

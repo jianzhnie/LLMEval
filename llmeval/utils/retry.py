@@ -2,18 +2,26 @@
 
 Used by llmeval/inference/online.py and llmeval/inference/mc.py
 so both classify and back off from API failures identically.
+
+``should_retry`` holds the classification policy (the single definition);
+``call_with_retry`` runs an attempt loop under that policy so call sites
+share one loop implementation as well.
 """
 
 from __future__ import annotations
 
 import random
 import time
+from collections.abc import Callable
+from typing import TypeVar
 
-from openai import APIError
+from openai import APIConnectionError, APIError, RateLimitError
 
 from llmeval.utils.log import init_logger
 
 logger = init_logger("api_retry")
+
+T = TypeVar("T")
 
 
 class ClientError(RuntimeError):
@@ -70,33 +78,71 @@ def retry_backoff(attempt: int, max_retries: int, reason: str) -> None:
 
 
 def should_retry(exc: Exception, attempt: int, max_retries: int) -> bool | None:
-    """Decide whether *exc* is retryable after a failed API call.
+    """Classify a failed API call; back off when it is worth retrying.
+
+    This is the single retry policy shared by the online and MC clients.
 
     Returns
     -------
-    ``True`` when the caller should retry (backoff is already applied).
-    ``False`` when the error is fatal and retries should stop.
-    ``None`` when this helper cannot classify the exception (caller decides).
+    ``True``
+        The error is retryable and backoff has already been applied — the
+        caller should make another attempt.
+    ``None``
+        Context-length rejection: the prompt can never fit, so the caller
+        maps it to an empty result instead of retrying or failing.
+
+    Raises
+    ------
+    ClientError
+        Non-retryable 4xx (retrying cannot succeed — fail fast), or
+        *max_retries* exhausted.
     """
-    from openai import APIConnectionError, APIError, RateLimitError
-
-    if isinstance(exc, APIConnectionError | RateLimitError):
-        if attempt < max_retries:
-            retry_backoff(attempt, max_retries, f"{type(exc).__name__}: {exc!s}")
-            return True
-        return False
-
-    if isinstance(exc, APIError):
+    # Connection / rate-limit errors are APIError subclasses, so they must be
+    # excluded from the fatal-4xx checks (a 429 is always worth retrying).
+    if isinstance(exc, APIError) and not isinstance(
+        exc, APIConnectionError | RateLimitError
+    ):
+        if is_context_length_error(exc):
+            logger.warning("Max context length exceeded, returning empty result")
+            return None
+        # 4xx (except 408/429): retrying can never succeed.
         non_retryable = non_retryable_client_error(exc)
         if non_retryable:
-            logger.warning(f"Request aborted: {non_retryable}")
-            return False
-        if attempt < max_retries:
-            retry_backoff(attempt, max_retries, f"API error: {exc!s}")
-            return True
-        return False
+            raise ClientError(non_retryable, exc) from exc
 
-    if attempt < max_retries:
-        retry_backoff(attempt, max_retries, f"Unexpected {type(exc).__name__}: {exc!s}")
-        return True
-    return False
+    if attempt >= max_retries:
+        raise ClientError(f"Max retries exceeded: {exc!s}", exc) from exc
+
+    if isinstance(exc, APIConnectionError | RateLimitError):
+        reason = f"{type(exc).__name__}: {exc!s}"
+    elif isinstance(exc, APIError):
+        reason = f"API error: {exc!s}"
+    else:
+        reason = f"Unexpected {type(exc).__name__}: {exc!s}"
+    retry_backoff(attempt, max_retries, reason)
+    return True
+
+
+def call_with_retry(fn: Callable[[], T], max_retries: int) -> T | None:
+    """Run *fn* under the shared retry policy (see :func:`should_retry`).
+
+    This is the single attempt loop shared by the online and MC clients; the
+    per-call work (building and issuing the request) stays in *fn*.
+
+    Returns
+    -------
+    fn()'s result, or ``None`` for a context-length rejection (the prompt
+    can never fit — callers map this to an empty result).
+
+    Raises
+    ------
+    ClientError
+        Non-retryable 4xx (fail fast), or *max_retries* exhausted.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            if should_retry(e, attempt, max_retries) is None:
+                return None  # context-length rejection → empty result
+    return None  # unreachable: should_retry raises once retries are exhausted
