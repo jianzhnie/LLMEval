@@ -154,6 +154,7 @@ MBPP 增强版。
 | aime26 | 数学 | 30 | math-verify pass@32 | [math-ai/aime26](https://huggingface.co/datasets/math-ai/aime26) |
 | hmmt25 | 数学 | 30 | math-verify | [MathArena/hmmt_feb_2025](https://huggingface.co/datasets/MathArena/hmmt_feb_2025) |
 | gpqa_diamond | 科学 | 198 | math-verify | [lightonai/gpqa_diamond_multilingual](https://huggingface.co/datasets/lightonai/gpqa_diamond_multilingual) |
+| hle_full | 科学 | ~2,700 | math-verify | [cais/hle](https://huggingface.co/datasets/cais/hle) (gated, 需 HF_TOKEN) |
 | mmlu | MC | ~14,000 | loglikelihood | [cais/mmlu](https://huggingface.co/datasets/cais/mmlu) |
 | mmlu_pro | MC | ~12,000 | loglikelihood | [TIGER-Lab/MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro) |
 | ceval | MC | ~5,500 | loglikelihood | [ceval/ceval-exam](https://huggingface.co/datasets/ceval/ceval-exam) |

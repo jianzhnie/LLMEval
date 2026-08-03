@@ -108,12 +108,12 @@ python setup.py install
 First, start the vLLM server with the following command:
 
 ```bash
-model_path="Qwen/QwQ-32B"  # or model to the path where the model is located
+model_path="Qwen/QwQ-32B"  # or the path where the model is located
 model_name="Qwen/QwQ-32B"
 
 num_gpus=8
-max_model_len=32768  # ✅ 支持 32k 上下文
-gpu_memory_utilization=0.9  # ✅ 提高内存利用率
+max_model_len=32768  # ✅ supports 32k context
+gpu_memory_utilization=0.9  # ✅ improves memory utilization
 
 python -m vllm.entrypoints.openai.api_server \
     --model $model_path \
@@ -126,16 +126,16 @@ python -m vllm.entrypoints.openai.api_server \
     --port 8090
 ```
 
-Adjust the `tensor_parallel_size` parameter based on your available devices. Please refer to the [script](./scripts/model_server.sh) for more details.
+Adjust the `tensor_parallel_size` parameter based on your available devices. Please refer to the [script](./examples/QwQ/model_server.sh) for more details.
 
-Optional, Start SGLang server/router.Since the evaluation could takes days, we also suggest using SGLang with data parallelism to accelerate the evaluation. Refer to [SGLang documentation](https://docs.sglang.ai/router/router.html) for more details.
+Optionally, start an SGLang server/router. Since the evaluation can take days, we also suggest using SGLang with data parallelism to accelerate it. Refer to the [SGLang documentation](https://docs.sglang.ai/router/router.html) for more details.
 
 ```bash
 # Use router to support better data parallelism
 python -m sglang_router.launch_server --model-path Qwen/QwQ-32B --dp-size 4 --host=0.0.0.0 --port=30000
 ```
 
-Adjust the `dp_size` parameter based on your available devices. Also adjust the port in following commands.
+Adjust the `dp_size` parameter based on your available devices. Also adjust the port in the following commands.
 
 
 ### Step 2: Run Inference
@@ -174,7 +174,7 @@ python ./llmeval/inference/online.py \
     --max_workers 8
 ```
 
-Please refer to the [script](./scripts/longcat-flash/online_infer.sh) for more details.
+Please refer to the [script](./examples/longcat-flash/online_infer.sh) for more details.
 
 **Note:** We apply repeated sampling to reduce evaluation variance, but it may take a long time to complete (more than 8 hours depending on your device).
 
@@ -184,42 +184,42 @@ Please refer to the [script](./scripts/longcat-flash/online_infer.sh) for more d
 
 ```bash
 # Full pipeline (data → inference → scoring)
-bash scripts/longcat-flash/run_all.sh
+bash examples/longcat-flash/run_all.sh
 
 # Quick test
-BENCHMARKS=QUICK bash scripts/longcat-flash/run_all.sh
+BENCHMARKS=QUICK bash examples/longcat-flash/run_all.sh
 
 # Hard problems
-BENCHMARKS=HARD bash scripts/longcat-flash/run_all.sh
+BENCHMARKS=HARD bash examples/longcat-flash/run_all.sh
 ```
 
 **Multiple-choice benchmarks** — loglikelihood comparison with acc/acc_norm:
 
 ```bash
 # 5-shot MMLU / C-Eval
-N_SHOT=5 bash scripts/longcat-flash/mc_infer.sh
-bash scripts/longcat-flash/mc_score.sh
+N_SHOT=5 bash examples/longcat-flash/mc_infer.sh
+bash examples/longcat-flash/mc_score.sh
 
 # Generate mode (alternative)
-MC_MODE=generate bash scripts/longcat-flash/mc_infer.sh
+MC_MODE=generate bash examples/longcat-flash/mc_infer.sh
 ```
 
 **Code benchmarks** — generation with sandbox execution + pass@k:
 
 ```bash
 # HumanEval + MBPP
-bash scripts/longcat-flash/code_infer.sh
-bash scripts/longcat-flash/code_score.sh
+bash examples/longcat-flash/code_infer.sh
+bash examples/longcat-flash/code_score.sh
 
 # Pass@64 (64 samples, temperature 0.2)
-N_SAMPLES=64 TEMPERATURE=0.2 bash scripts/longcat-flash/code_infer.sh
+N_SAMPLES=64 TEMPERATURE=0.2 bash examples/longcat-flash/code_infer.sh
 ```
 
 Or run each math step separately:
 
 ```bash
-bash scripts/longcat-flash/online_infer.sh   # inference
-bash scripts/longcat-flash/get_score.sh      # scoring
+bash examples/longcat-flash/online_infer.sh   # inference
+bash examples/longcat-flash/get_score.sh      # scoring
 ```
 
 ### Step 3: Scoring (CLI)
@@ -280,8 +280,8 @@ Offline mode specific:
 | Category | Task Name | Scoring |
 |----------|-----------|---------|
 | Math | `math_opensource/aime24` `math_opensource/aime25` `math_opensource/aime26` | math-verify |
-| Math | `math_opensource/gsm8k` `math_opensource/math500` `math_opensource/hmmt25` | math-verify |
-| Science | `math_opensource/gpqa_diamond` | math-verify |
+| Math | `math_opensource/gsm8k` `math_opensource/math500` `math_opensource/math` `math_opensource/hmmt25` | math-verify |
+| Science | `math_opensource/gpqa_diamond` `math_opensource/hle_full` | math-verify |
 | Code | `code_opensource/humaneval` `code_opensource/mbpp` | pass@1 sandbox |
 | Code | `code_opensource/humaneval_plus` `code_opensource/mbpp_plus` | pass@1 sandbox |
 | MC | `mc_opensource/mmlu` `mc_opensource/mmlu_pro` `mc_opensource/ceval` | loglikelihood |
@@ -341,8 +341,8 @@ LLMEval/
 │       ├── retry.py         #   API retry logic
 │       ├── prompts.py       #   System prompts
 │       └── verifier_prompts.py # Verifier prompts
-├── scripts/
-│   ├── longcat-flash/       # One-click evaluation
+├── examples/              # Model-specific evaluation pipelines
+│   ├── longcat-flash/     # One-click evaluation
 │   │   ├── run_all.sh
 │   │   ├── online_infer.sh  #   Math inference
 │   │   ├── get_score.sh     #   Math scoring
@@ -350,7 +350,10 @@ LLMEval/
 │   │   ├── code_score.sh    #   Code scoring
 │   │   ├── mc_infer.sh      #   MC inference
 │   │   └── mc_score.sh      #   MC scoring
-│   └── data_process/
+│   └── QwQ/               # QwQ-32B scripts (server, inference, scoring)
+├── scripts/
+│   ├── data_parallel_infer/ # Multi-node data parallel inference
+│   └── data_process/      # Benchmark data preparation
 │       ├── prepare_math_benchmarks.py
 │       └── prepare_code_benchmarks.py
 ├── tests/                   # Unit tests

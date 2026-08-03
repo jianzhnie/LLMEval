@@ -1,3 +1,4 @@
+# 离线推理指南
 
 ### 使用 vLLM 进行离线推理
 
@@ -40,7 +41,7 @@ python llmeval/inference/offline.py \
     --n_samples "${n_samples}"
 ```
 
-详细信息请参考[脚本](./scripts/QwQ/offline_infer.sh)。
+详细信息请参考[脚本](../examples/QwQ/offline_infer.sh)。
 
 结果格式与在线服务器模式一致，模型响应将存储在 `gen` 字段中。
 

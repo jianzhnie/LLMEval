@@ -1,4 +1,4 @@
-## 数据并行部署
+# 数据并行部署
 
 vLLM 支持**数据并行**部署，将模型权重复制到不同的实例/GPU 上，以处理独立的请求批次。
 
@@ -107,4 +107,4 @@ vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 1 \
 
 协调器进程也在此场景中运行，与 DP 节点 0 引擎位于同一位置。
 
-在上图中，每个虚线框对应于一个独立的 `vllm serve` 启动——例如，这些可以是独立的 **Kubernetes Pod**.
+在这种拓扑中，每个 DP 节点对应一个独立的 `vllm serve` 启动——例如，这些可以是独立的 **Kubernetes Pod**.

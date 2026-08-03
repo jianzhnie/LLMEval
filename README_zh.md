@@ -8,13 +8,13 @@
 
 ## 概述
 
-LLMEval 是一个用于评测大型语言模型（LLM）的综合评估系统，覆盖数学推理和通用知识 benchmark。支持在线（API）、离线（本地推理）和 MC（loglikelihood/generate）三种模式。
+LLMEval 是一个用于评测大型语言模型（LLM）的综合评估系统，覆盖数学推理、代码生成和通用知识 benchmark。支持在线（API）、离线（本地推理）和 MC（loglikelihood/generate）三种模式。
 
 ### 主要特性
 
 - **多推理后端**：vLLM (GPU/NPU)、SGLang、OpenAI API
 - **三种评测模式**：在线生成、离线本地推理、MC loglikelihood 对比
-- **10 个 Benchmark**：AIME 2024/2025/2026、MATH-500、GSM8K、GPQA-Diamond、HMMT-25、MMLU、MMLU-Pro、C-Eval
+- **14 个 Benchmark**：AIME 2024/2025/2026、MATH-500、GSM8K、GPQA-Diamond、HMMT-25、MMLU、MMLU-Pro、C-Eval、HumanEval、MBPP
 - **代码评估**: HumanEval / MBPP 沙箱执行 + pass@k 评分
 - **lm-eval 对齐**：acc/acc_norm/exact_match、few-shot 去重
 - **一键评测**：Shell 脚本端到端推理 → 评分
@@ -141,22 +141,32 @@ python -m sglang_router.launch_server \
 **数学 benchmark** — 生成式推理 + math-verify 评分：
 
 ```bash
-bash scripts/longcat-flash/run_all.sh           # 全流程
-BENCHMARKS=QUICK bash scripts/longcat-flash/run_all.sh   # 快速验证
-BENCHMARKS=HARD bash scripts/longcat-flash/run_all.sh    # 高难度
+bash examples/longcat-flash/run_all.sh           # 全流程
+BENCHMARKS=QUICK bash examples/longcat-flash/run_all.sh   # 快速验证
+BENCHMARKS=HARD bash examples/longcat-flash/run_all.sh    # 高难度
 ```
 
 **MC benchmark** — loglikelihood 选项对比 + acc/acc_norm 评分：
 
 ```bash
-N_SHOT=5 bash scripts/longcat-flash/mc_infer.sh   # 5-shot 推理
-bash scripts/longcat-flash/mc_score.sh              # 评分
+N_SHOT=5 bash examples/longcat-flash/mc_infer.sh   # 5-shot 推理
+bash examples/longcat-flash/mc_score.sh              # 评分
+```
+
+**代码 benchmark** — 代码生成 + 沙箱执行 pass@k 评分：
+
+```bash
+bash examples/longcat-flash/code_infer.sh            # HumanEval + MBPP 推理
+bash examples/longcat-flash/code_score.sh            # 评分
+
+# Pass@64（64 次采样，temperature 0.2）
+N_SAMPLES=64 TEMPERATURE=0.2 bash examples/longcat-flash/code_infer.sh
 ```
 
 或分步执行：
 ```bash
-bash scripts/longcat-flash/online_infer.sh   # 数学推理
-bash scripts/longcat-flash/get_score.sh      # 数学评分
+bash examples/longcat-flash/online_infer.sh   # 数学推理
+bash examples/longcat-flash/get_score.sh      # 数学评分
 ```
 
 ### 3. 手动推理（CLI 模式）
@@ -185,11 +195,20 @@ python llmeval/inference/offline.py \
 ### 4. 手动评分
 
 ```bash
+# 数学评分
 python ./llmeval/evaluator.py \
     --input_path "./output/aime24.jsonl" \
     --cache_path "./output/aime24_scores.jsonl" \
     --task_name "math_opensource/aime24" \
     --max_workers 16
+
+# 代码评分（pass@1，执行超时 5 秒）
+python ./llmeval/evaluator.py \
+    --input_path "./output/humaneval.jsonl" \
+    --cache_path "./output/humaneval_scores.jsonl" \
+    --task_name "code_opensource/humaneval" \
+    --max_workers 32 \
+    --exec_timeout 5.0
 ```
 
 ## 详细使用说明
@@ -227,8 +246,9 @@ python ./llmeval/evaluator.py \
 
 | 类别 | 任务名 | 评分方式 |
 |------|--------|----------|
-| 数学 | `math_opensource/aime24` `aime25` `aime26` `gsm8k` `math500` `hmmt25` | math-verify |
-| 科学 | `math_opensource/gpqa_diamond` | math-verify |
+| 数学 | `math_opensource/aime24` `aime25` `aime26` `gsm8k` `math500` `math` `hmmt25` | math-verify |
+| 科学 | `math_opensource/gpqa_diamond` `hle_full` | math-verify |
+| 代码 | `code_opensource/humaneval` `mbpp` `humaneval_plus` `mbpp_plus` | pass@1 沙箱执行 |
 | MC | `mc_opensource/mmlu` `mmlu_pro` `ceval` | loglikelihood |
 
 详见 [docs/benchmark.md](docs/benchmark.md)。
@@ -265,22 +285,29 @@ python -m sglang.launch_server \
 ```
 LLMEval/
 ├── llmeval/
-│   ├── vllm/              # 推理引擎
+│   ├── evaluator.py       # 评分编排器 (math / mc / code)
+│   ├── inference/         # 推理引擎 (online / offline / mc / verifier)
 │   ├── tasks/
 │   │   ├── math_eval/     # 数学评分 (math-verify)
+│   │   ├── code_eval/     # 代码评分 (沙箱执行 pass@k)
 │   │   └── mc_eval/       # MC 评分 (loglikelihood/generate)
 │   └── utils/             # 工具函数
-├── scripts/
+├── examples/
 │   ├── longcat-flash/     # 一键评测脚本
 │   │   ├── run_all.sh     #   数学全流程
 │   │   ├── online_infer.sh #  数学推理
 │   │   ├── get_score.sh   #  数学评分
-│   │   ├── mc_infer.sh    #   MC 推理
-│   │   └── mc_score.sh    #   MC 评分
+│   │   ├── code_infer.sh  #  代码推理
+│   │   ├── code_score.sh  #  代码评分
+│   │   ├── mc_infer.sh    #  MC 推理
+│   │   └── mc_score.sh    #  MC 评分
+│   └── QwQ/               # QwQ-32B 脚本
+├── scripts/
+│   ├── data_parallel_infer/ # 多机数据并行推理
 │   └── data_process/      # 数据准备
-├── tests/                 # 130 测试用例
-├── data/                  # 10 个 benchmark, 7000+ 题目
-└── docs/benchmark.md      # Benchmark 参考文档
+├── tests/                 # 231 个测试用例
+├── data/                  # benchmark 数据集
+└── docs/                  # 文档
 ```
 
 ## 许可证
