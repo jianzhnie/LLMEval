@@ -193,23 +193,19 @@ class OfflineInferenceRunner:
         """
         input_key: str = self.args.input_key
 
-        # Only input_key is required for inference; label is only needed at scoring time
-        if input_key not in item:
+        # Only input_key is required for inference; prompt is the canonical fallback.
+        prompt: Any = item.get(input_key) or item.get("prompt")
+        if prompt is None:
             logger.warning(
-                f"Missing required key '{input_key}' in item: {list(item.keys())}"
+                f"Missing required key '{input_key}' (or 'prompt') in item: {list(item.keys())}"
             )
             return None
 
-        # Extract required fields
-        prompt: Any = item.get(input_key)
-
         # Validate required fields
-        if not prompt:
+        prompt_str: str = str(prompt).strip()
+        if not prompt_str:
             logger.warning("Empty prompt field in item")
             return None
-
-        # Convert prompt to string for template checking
-        prompt_str: str = str(prompt).strip()
 
         # Check if chat template is already applied
         if is_chat_template_applied(prompt_str):

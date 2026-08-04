@@ -30,6 +30,9 @@ for mod_name in ("openai", "httpx"):
 _openai_mod = sys.modules.get("openai")
 if _openai_mod is not None and not hasattr(_openai_mod, "OpenAI"):
     _openai_mod.OpenAI = MagicMock  # type: ignore[attr-defined]
+    for _exc in ("APIConnectionError", "APIError", "RateLimitError"):
+        if not hasattr(_openai_mod, _exc):
+            setattr(_openai_mod, _exc, type(_exc, (Exception,), {}))
 
 _httpx_mod = sys.modules.get("httpx")
 if _httpx_mod is not None and not hasattr(_httpx_mod, "Timeout"):
@@ -114,6 +117,16 @@ class TestMCLoglikelihoodClient:
         assert call_kwargs["logprobs"] == 20
         assert call_kwargs["max_tokens"] == 1
 
+    def test_tool_choice_none_is_omitted(self) -> None:
+        client = _make_ll_client()
+        client.client.completions.create.return_value = _fake_top_probs_resp(
+            {" A": -3.0}
+        )
+
+        client.get_choices_logprobs("prompt", ["A"])
+
+        assert "tool_choice" not in client.client.completions.create.call_args.kwargs
+
     def test_failure_returns_all_neg_inf(self) -> None:
         client = _make_ll_client(max_retries=0)
         client.client.completions.create.side_effect = RuntimeError("down")
@@ -160,6 +173,16 @@ class TestProcessGenerateItem:
         )
 
         assert result["gen"] == ["ans"]
+
+    def test_tool_choice_auto_is_sent(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        runner.config.tool_choice = "auto"
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices[0].message.content = "ans"
+
+        runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
+
+        assert client.chat.completions.create.call_args.kwargs["tool_choice"] == "auto"
 
     def test_null_content_raises(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")

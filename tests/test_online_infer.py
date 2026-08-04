@@ -39,6 +39,8 @@ for mod_name in ("openai", "httpx"):
 # already has them; only the stub needs patching)
 _openai_mod = sys.modules.get("openai")
 if _openai_mod is not None:
+    if not hasattr(_openai_mod, "OpenAI"):
+        _openai_mod.OpenAI = MagicMock  # type: ignore[attr-defined]
     for _exc in ("APIConnectionError", "APIError", "RateLimitError"):
         if not hasattr(_openai_mod, _exc):
             setattr(_openai_mod, _exc, type(_exc, (Exception,), {}))
@@ -244,6 +246,23 @@ class TestGetContent:
         with pytest.raises(ClientError):
             client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
         assert client.client.chat.completions.create.call_count == 2
+
+    def test_tool_choice_none_is_omitted(self) -> None:
+        client = _make_client()
+        client.client.chat.completions.create.return_value = _fake_completion(["a"])
+
+        client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
+
+        assert "tool_choice" not in client.client.chat.completions.create.call_args.kwargs
+
+    def test_tool_choice_auto_is_sent(self) -> None:
+        client = _make_client()
+        client.tool_choice = "auto"
+        client.client.chat.completions.create.return_value = _fake_completion(["a"])
+
+        client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
+
+        assert client.client.chat.completions.create.call_args.kwargs["tool_choice"] == "auto"
 
 
 class TestInferenceClientInit:

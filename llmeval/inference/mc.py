@@ -32,7 +32,11 @@ import openai
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
-from llmeval.inference.common import load_jsonl, save_failed_items
+from llmeval.inference.common import (
+    is_explicit_tool_choice,
+    load_jsonl,
+    save_failed_items,
+)
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
@@ -586,7 +590,7 @@ class MCRunner:
             "timeout": self.config.request_timeout,
         }
         # tool_choice: only send when explicitly configured
-        if self.config.tool_choice:
+        if is_explicit_tool_choice(self.config.tool_choice):
             call_args["tool_choice"] = self.config.tool_choice
 
         def do_request() -> str:

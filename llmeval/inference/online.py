@@ -27,6 +27,7 @@ from transformers import HfArgumentParser
 from llmeval.inference.common import (
     count_completed_samples,
     expand_group_for_sampling,
+    is_explicit_tool_choice,
     load_jsonl,
     prepare_data_with_resume,
     sample_count_for_item,
@@ -306,7 +307,7 @@ class InferenceClient:
         if n > 1:
             call_args["n"] = n
         # tool_choice: only send when explicitly configured (vLLM 0.23+ supports it)
-        if self.tool_choice:
+        if is_explicit_tool_choice(self.tool_choice):
             call_args["tool_choice"] = self.tool_choice
         return call_args
 

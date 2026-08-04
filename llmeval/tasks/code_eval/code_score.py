@@ -63,6 +63,9 @@ _STOP_MARKERS: re.Pattern[str] = re.compile(
 )
 """Top-level executable markers after which the code block is considered done."""
 
+_TOP_LEVEL_PREFIXES: tuple[str, ...] = ("def ", "from ", "import ", "class ", "@")
+"""Python prefixes that can start a standalone candidate program."""
+
 _THINK_END_RE: re.Pattern[str] = re.compile(
     r"</think\s*>",
     re.IGNORECASE,
@@ -225,6 +228,55 @@ def _strip_think_tags(text: str) -> str:
     return text
 
 
+def _first_meaningful_line(text: str) -> str:
+    """Return the first non-empty, non-comment line from ``text``."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return line
+    return ""
+
+
+def _starts_with_top_level_code(text: str) -> bool:
+    """Return whether ``text`` appears to start with standalone Python code."""
+    first_line = _first_meaningful_line(text)
+    return first_line.startswith(_TOP_LEVEL_PREFIXES)
+
+
+def _prompt_is_python_prefix(prompt: str) -> bool:
+    """Return whether ``prompt`` is a Python prefix such as HumanEval's stub."""
+    return _starts_with_top_level_code(prompt)
+
+
+def _build_check_programs(
+    prompt: str, code: str, test_code: str
+) -> list[tuple[str, str]]:
+    """Build candidate programs to execute for a generated code sample.
+
+    HumanEval prompts are Python prefixes, so body completions need
+    ``prompt + code``.  MBPP prompts are natural language instructions, so the
+    prompt must not be executed.  If a HumanEval-style model returns a full
+    top-level ``def`` instead of only a body, the standalone ``code`` candidate
+    is tried as a fallback.
+    """
+    programs: list[tuple[str, str]] = []
+
+    if _prompt_is_python_prefix(prompt):
+        programs.append(("prompt_plus_code", f"{prompt.rstrip()}\n{code}\n{test_code}"))
+        if _starts_with_top_level_code(code):
+            programs.append(("code_only", f"{code.rstrip()}\n{test_code}"))
+    else:
+        programs.append(("code_only", f"{code.rstrip()}\n{test_code}"))
+
+    deduped: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for variant, program in programs:
+        if program not in seen:
+            deduped.append((variant, program))
+            seen.add(program)
+    return deduped
+
+
 # ===========================================================================
 # Per-item worker (module-level → picklable by Pebble)
 # ===========================================================================
@@ -291,10 +343,15 @@ def _process_code_item(
     # -- construct and execute --------------------------------------------------
     # extract_code() preserves leading indentation (uses .rstrip()), so bare
     # HumanEval-style function bodies (``"    return a + b"``) remain valid.
-    candidate = prompt.rstrip() + "\n" + code
-    check_program = candidate + "\n" + test_code
-
-    exec_result = check_correctness(check_program, exec_timeout, task_id)
+    exec_result: dict[str, Any] | None = None
+    for _, check_program in _build_check_programs(prompt, code, test_code):
+        exec_result = check_correctness(check_program, exec_timeout, task_id)
+        if exec_result.get("passed"):
+            break
+    if exec_result is None:
+        return idx, _failure(
+            task_id, "failed: no executable candidate", group_id, sample_index
+        )
     exec_result.setdefault("task_id", task_id)
     exec_result.setdefault("group_id", group_id)
     exec_result.setdefault("sample_index", sample_index)

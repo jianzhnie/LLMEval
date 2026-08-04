@@ -16,6 +16,7 @@ from llmeval.inference.common import (
     count_completed_samples,
     expand_data_with_resume,
     expand_group_for_sampling,
+    is_explicit_tool_choice,
     load_jsonl,
     prepare_data_with_resume,
     sample_count_for_item,
@@ -145,6 +146,16 @@ class TestSampleCountHelpers:
         assert len(expanded) == 2
         assert expanded[0] is items[0]
         assert expanded[1] is items[0]
+
+
+class TestToolChoiceHelper:
+    def test_none_is_not_explicit(self) -> None:
+        assert not is_explicit_tool_choice("none")
+        assert not is_explicit_tool_choice("")
+
+    def test_auto_is_explicit(self) -> None:
+        assert is_explicit_tool_choice("auto")
+        assert is_explicit_tool_choice("my_tool")
 
 
 class TestSaveFailedItems:

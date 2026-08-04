@@ -109,6 +109,28 @@ def preprocess_answers(data: list[dict[str, Any]], response_key: str) -> None:
     return None  # mutates in-place; callers should not rely on return value
 
 
+def _infer_mc_mode(eval_dataset: list[dict[str, Any]]) -> str:
+    """Infer the MC scoring mode from the dataset shape.
+
+    Returns:
+        ``"loglikelihood"`` when every item carries ``logprobs``.
+        ``"generate"`` when no item carries ``logprobs``.
+
+    Raises:
+        ValueError: If the dataset mixes both shapes.  Mixed inputs are a
+            schema error, not a valid evaluation batch.
+    """
+    has_logprobs = ["logprobs" in item for item in eval_dataset]
+    if all(has_logprobs):
+        return "loglikelihood"
+    if not any(has_logprobs):
+        return "generate"
+    raise ValueError(
+        "Mixed MC dataset detected: some items have 'logprobs' and others do not. "
+        "Please evaluate a single inference schema per batch."
+    )
+
+
 def _process_item(
     item: dict[str, Any],
     task_name: str,
@@ -225,8 +247,8 @@ def evaluate_task(
             return None
     elif dataset_source == "mc_opensource":
         try:
-            sample = eval_dataset[0] if eval_dataset else {}
-            if "logprobs" in sample:
+            mc_mode = _infer_mc_mode(eval_dataset)
+            if mc_mode == "loglikelihood":
                 accuracy = score_loglikelihood(
                     eval_dataset=eval_dataset,
                     cache_path=cache_path,
@@ -317,10 +339,16 @@ def main() -> int:
             logger.error("❌ Input file is empty")
             return 1
 
-        # Process data items and handle potential errors
-        # For loglikelihood MC items (have 'logprobs'), skip label/response key validation
-        is_loglikelihood = data and "logprobs" in data[0]
+        # Process data items and handle potential errors.
+        # MC inference must be a single schema per batch: all items with
+        # ``logprobs`` (loglikelihood) or none (generate).
         try:
+            if args.task_name.startswith("mc_opensource"):
+                mc_mode = _infer_mc_mode(data)
+                is_loglikelihood = mc_mode == "loglikelihood"
+            else:
+                is_loglikelihood = False
+
             if is_loglikelihood:
                 processed_data = [{**item, "task": args.task_name} for item in data]
             else:

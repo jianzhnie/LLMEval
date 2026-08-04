@@ -90,6 +90,13 @@ class TestOfflineInferenceRunner:
 
         assert messages == [{"role": "user", "content": "2+2?"}]
 
+    def test_convert_to_messages_format_falls_back_to_prompt(self, tmp_path: Path) -> None:
+        runner = _runner(tmp_path, input_key="question")
+
+        messages = runner.convert_to_messages_format({"prompt": "2+2?", "answer": "4"})
+
+        assert messages == [{"role": "user", "content": "2+2?"}]
+
     def test_convert_rejects_applied_chat_template(self, tmp_path: Path) -> None:
         runner = _runner(tmp_path)
 

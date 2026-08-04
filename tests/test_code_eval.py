@@ -455,6 +455,46 @@ class TestScoreCodeThinkTags:
         )
         assert acc == 1.0
 
+
+class TestScoreCodePromptModes:
+    def test_mbpp_natural_language_prompt_executes_code_only(
+        self, tmp_path: Path
+    ) -> None:
+        items = [
+            {
+                "task_id": "1",
+                "prompt": (
+                    "You are an expert Python programmer.\n\n"
+                    "Write a function add that returns the sum of two numbers.\n\n"
+                    "[BEGIN]\n"
+                ),
+                "answer": "\nassert add(2, 3) == 5\n",
+                "gen": ["def add(a, b):\n    return a + b"],
+            }
+        ]
+
+        acc = score_code(items, "answer", "gen", tmp_path / "mbpp.jsonl", max_workers=0)
+
+        assert acc == 1.0
+
+    def test_humaneval_full_function_definition_falls_back(
+        self, tmp_path: Path
+    ) -> None:
+        items = [
+            {
+                "task_id": "HumanEval/0",
+                "prompt": "def add(a, b):\n",
+                "answer": "\nassert add(2, 3) == 5\n",
+                "gen": ["def add(a, b):\n    return a + b"],
+            }
+        ]
+
+        acc = score_code(
+            items, "answer", "gen", tmp_path / "humaneval.jsonl", max_workers=0
+        )
+
+        assert acc == 1.0
+
     def test_answer_tag_wrapped_generation_passes(self, tmp_path: Path) -> None:
         items = [
             {

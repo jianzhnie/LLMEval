@@ -32,6 +32,7 @@ __all__ = [
     "count_completed_samples",
     "expand_data_with_resume",
     "expand_group_for_sampling",
+    "is_explicit_tool_choice",
     "load_jsonl",
     "prepare_data_with_resume",
     "sample_count_for_item",
@@ -239,6 +240,16 @@ def expand_group_for_sampling(
     for item in items:
         sample_items.extend([item] * sample_count_for_item(item, sample_count_key))
     return sample_items
+
+
+def is_explicit_tool_choice(tool_choice: str | None) -> bool:
+    """Return whether ``tool_choice`` should be sent to the API.
+
+    The CLI default ``"none"`` means "do not enable tools" for OpenAI-compatible
+    backends.  Omitting the field is more compatible than sending
+    ``tool_choice="none"`` to servers that do not implement tool calling.
+    """
+    return bool(tool_choice and tool_choice.strip().lower() != "none")
 
 
 def save_failed_items(

@@ -6,6 +6,7 @@ requiring pebble / math-verify to be installed.
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import sys
 import types
@@ -28,7 +29,9 @@ if _pebble_absent:
     sys.modules["pebble"] = types.ModuleType("pebble")
 if _math_verify_absent:
     for mod_name in ("math_verify", "math_verify.metric", "math_verify.parser"):
-        sys.modules[mod_name] = types.ModuleType(mod_name)
+        module = types.ModuleType(mod_name)
+        module.__spec__ = importlib.machinery.ModuleSpec(mod_name, loader=None)
+        sys.modules[mod_name] = module
 
 if _pebble_absent:
     sys.modules["pebble"].ProcessPool = MagicMock  # type: ignore[attr-defined]
@@ -174,6 +177,16 @@ class TestEvaluateTask:
         )
         assert acc == 1.0
 
+    def test_mc_mixed_schema_returns_none(self, tmp_path: Path) -> None:
+        data = [
+            {"gold": 1, "logprobs": [-1.0, -0.5], "task": "mc_opensource/mmlu"},
+            {"answer": "B", "gen": ["Answer: B"], "task": "mc_opensource/mmlu"},
+        ]
+        acc = evaluate_task(
+            data, "mc_opensource/mmlu", "answer", "gen", tmp_path / "mc.jsonl", 1
+        )
+        assert acc is None
+
     def test_mc_error_returns_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -232,27 +245,41 @@ class TestEvaluateTask:
         )
         assert acc is None
 
-    @pytest.mark.skipif(
-        not importlib.util.find_spec("math_verify"),
-        reason="math-verify not installed",
-    )
     def test_math_dispatch(self, tmp_path: Path) -> None:
-        data = [
-            {
-                "answer": "5",
-                "gen": ["The answer is $\\boxed{5}$"],
-                "task": "math_opensource/aime24",
-            }
-        ]
-        acc = evaluate_task(
-            data, "math_opensource/aime24", "answer", "gen", tmp_path / "m.jsonl", 2
-        )
-        assert acc == 1.0
+        import llmeval.evaluator as ev
 
-    @pytest.mark.skipif(
-        not importlib.util.find_spec("math_verify"),
-        reason="math-verify not installed",
-    )
+        called: dict[str, object] = {}
+
+        def _fake_compute_scores(**kwargs: object) -> float:
+            called.update(kwargs)
+            return 1.0
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(ev, "compute_scores", _fake_compute_scores)
+        try:
+            data = [
+                {
+                    "answer": "5",
+                    "gen": ["The answer is $\\boxed{5}$"],
+                    "task": "math_opensource/aime24",
+                }
+            ]
+            acc = evaluate_task(
+                data,
+                "math_opensource/aime24",
+                "answer",
+                "gen",
+                tmp_path / "m.jsonl",
+                2,
+            )
+        finally:
+            monkeypatch.undo()
+
+        assert acc == 1.0
+        assert called["eval_dataset"] == data
+        assert called["label_key"] == "answer"
+        assert called["response_key"] == "gen"
+
     def test_math_error_returns_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
