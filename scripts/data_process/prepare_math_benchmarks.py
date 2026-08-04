@@ -41,6 +41,7 @@ BENCHMARKS: dict[str, tuple[str, str | None, str, str, str]] = {
     # AA-LCR: not available on HuggingFace Hub.
 }
 
+
 def format_example(example: dict, question_col: str, answer_col: str) -> dict:
     question = str(example[question_col]).strip()
     answer = str(example[answer_col]).strip()

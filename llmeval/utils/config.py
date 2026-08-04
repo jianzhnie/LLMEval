@@ -798,6 +798,19 @@ class EvalTaskArguments:
             "help": "Per-item code execution timeout in seconds (code tasks only)."
         },
     )
+    seed: int = field(
+        default=0, metadata={"help": "Random seed recorded in run provenance."}
+    )
+    contamination_path: str = field(
+        default="",
+        metadata={
+            "help": "Optional local JSONL/text file used to flag exact prompt contamination."
+        },
+    )
+    contamination_min_length: int = field(
+        default=32,
+        metadata={"help": "Minimum normalized prompt length for contamination checks."},
+    )
 
     def __post_init__(self) -> None:
         """
@@ -818,6 +831,17 @@ class EvalTaskArguments:
             raise ValueError(f"timeout must be positive, got {self.timeout}")
         if self.exec_timeout <= 0:
             raise ValueError(f"exec_timeout must be positive, got {self.exec_timeout}")
+        if self.seed < 0:
+            raise ValueError(f"seed must be non-negative, got {self.seed}")
+        if self.contamination_min_length <= 0:
+            raise ValueError(
+                "contamination_min_length must be positive, "
+                f"got {self.contamination_min_length}"
+            )
+        if self.contamination_path and not Path(self.contamination_path).exists():
+            raise ValueError(
+                f"contamination_path {self.contamination_path} does not exist"
+            )
         valid_tasks = [
             # Math (math-verify scoring)
             "math_opensource/math500",

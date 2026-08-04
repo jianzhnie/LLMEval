@@ -247,6 +247,7 @@ class TestScoreCode:
             summary = json.loads(summary_path.read_text())
             assert summary["pass_at_1"] == 1.0
             assert summary["correct"] == 2
+            assert summary["provenance"]["schema_version"] == 1
         finally:
             cache_path.unlink(missing_ok=True)
             cache_path.with_suffix(".summary.json").unlink(missing_ok=True)

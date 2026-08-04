@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass
+from pathlib import Path
 from statistics import mean
 from typing import Any
 
@@ -20,6 +22,12 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
+from llmeval.tasks.postprocess import (
+    apply_text_pipeline,
+    build_text_pipeline,
+    strip_reasoning_wrappers,
+)
+from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
 from llmeval.utils.log import init_logger
 
 # Configure a dedicated logger for the math scoring module
@@ -35,6 +43,13 @@ except ImportError as e:
         "pip install math-verify>=1.0.0 pebble>=4.6.3 tqdm>=4.65.0"
     ) from e
 
+try:
+    import sympy
+    from sympy.parsing.latex import parse_latex
+except ImportError:  # pragma: no cover - optional fallback dependency
+    sympy = None
+    parse_latex = None
+
 # Pre-built metric instance — reused across all items (stateless config).
 # Both expression and LaTeX parsers are enabled for robust answer extraction.
 _verify_func = math_metric(
@@ -42,6 +57,65 @@ _verify_func = math_metric(
     pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
     aggregation_function=max,
     precision=6,
+)
+
+MATH_RESPONSE_PIPELINE = build_text_pipeline(strip_reasoning_wrappers)
+
+INVALID_ANSWER = "[invalidanswer]"
+_FINAL_ANSWER_RE = re.compile(
+    r"Final Answer:\s*The final answer is(.*?)(?:\.?\s*I hope it is correct\.)?$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_SUBSTITUTIONS: tuple[tuple[str, str], ...] = (
+    ("an ", ""),
+    ("a ", ""),
+    (".$", "$"),
+    ("\\$", ""),
+    (r"\ ", ""),
+    (" ", ""),
+    ("mbox", "text"),
+    (",\\text{and}", ","),
+    ("\\text{and}", ","),
+    ("\\text{m}", "\\text{}"),
+)
+_REMOVED_EXPRESSIONS: tuple[str, ...] = (
+    "square",
+    "ways",
+    "integers",
+    "dollars",
+    "mph",
+    "inches",
+    "ft",
+    "hours",
+    "km",
+    "units",
+    "\\ldots",
+    "points",
+    "feet",
+    "minutes",
+    "digits",
+    "cents",
+    "degrees",
+    "cm",
+    "gm",
+    "pounds",
+    "meters",
+    "meals",
+    "edges",
+    "\\text{s}",
+    "\\text{.}",
+    "\\text{}^2",
+    "\\text{}^3",
+    "\\text{}",
+    r"\mathrm{th}",
+    r"^\circ",
+    r"^{\circ}",
+    r"\;",
+    r",\!",
+    "{,}",
+    '"',
+    "\\dots",
 )
 
 
@@ -68,6 +142,116 @@ class ProcessingStats:
     def error_rate(self) -> float:
         """Calculate percentage of errors."""
         return (self.error / self.total * 100) if self.total > 0 else 0.0
+
+
+def _last_boxed_only_string(text: str) -> str:
+    """Return the last boxed/fboxed expression from a string."""
+    idx = text.rfind("\\boxed")
+    if "\\boxed " in text:
+        return "\\boxed " + text.split("\\boxed ")[-1].split("$")[0]
+    if idx < 0:
+        idx = text.rfind("\\fbox")
+        if idx < 0:
+            return INVALID_ANSWER
+
+    right_brace_idx = None
+    num_left_braces_open = 0
+    for i in range(idx, len(text)):
+        if text[i] == "{":
+            num_left_braces_open += 1
+        elif text[i] == "}":
+            num_left_braces_open -= 1
+            if num_left_braces_open == 0:
+                right_brace_idx = i
+                break
+
+    if right_brace_idx is None:
+        return INVALID_ANSWER
+    return text[idx : right_brace_idx + 1]
+
+
+def _remove_boxed(text: str) -> str:
+    """Remove a leading boxed/fboxed wrapper."""
+    if text.startswith("\\boxed "):
+        return text[len("\\boxed ") :]
+    for prefix in ("\\boxed{", "\\fbox{"):
+        if text.startswith(prefix) and text.endswith("}"):
+            return text[len(prefix) : -1]
+    return INVALID_ANSWER
+
+
+def _get_unnormalized_answer(text: str) -> str:
+    """Extract the explicit Minerva-style final answer when present."""
+    match = _FINAL_ANSWER_RE.search(text)
+    if match:
+        return match.group(1).strip()
+    return INVALID_ANSWER
+
+
+def _normalize_final_answer(final_answer: str) -> str:
+    """Normalize a final math answer using harness-style cleanup rules."""
+    final_answer = final_answer.split("=")[-1]
+
+    for before, after in _SUBSTITUTIONS:
+        final_answer = final_answer.replace(before, after)
+    for expression in _REMOVED_EXPRESSIONS:
+        final_answer = final_answer.replace(expression, "")
+
+    final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
+    final_answer = re.sub(r"(\\text\{)(.*?)(\})", "\\2", final_answer)
+    final_answer = re.sub(r"(\\textbf\{)(.*?)(\})", "\\2", final_answer)
+    final_answer = re.sub(r"(\\overline\{)(.*?)(\})", "\\2", final_answer)
+    final_answer = re.sub(r"(\\boxed\{)(.*)(\})", "\\2", final_answer)
+
+    final_answer = re.sub(r"(frac)([^{])(.)", "frac{\\2}{\\3}", final_answer)
+    final_answer = re.sub(r"(sqrt)([^{])", "sqrt{\\2}", final_answer)
+    final_answer = final_answer.replace("$", "")
+
+    if final_answer.replace(",", "").isdigit():
+        final_answer = final_answer.replace(",", "")
+
+    return final_answer.strip()
+
+
+def _normalize_math_text(text: Any) -> str:
+    """Normalize a math answer into a compact comparison string."""
+    normalized = str(text).strip()
+    if not normalized:
+        return ""
+
+    explicit_answer = _get_unnormalized_answer(normalized)
+    if explicit_answer != INVALID_ANSWER:
+        normalized = explicit_answer
+    else:
+        boxed = _last_boxed_only_string(normalized)
+        if boxed != INVALID_ANSWER:
+            unboxed = _remove_boxed(boxed)
+            if unboxed != INVALID_ANSWER:
+                normalized = unboxed
+
+    normalized = _normalize_final_answer(normalized)
+    return "" if normalized == INVALID_ANSWER else normalized
+
+
+def _math_text_equiv(gold_text: Any, pred_text: Any) -> bool:
+    """Return whether two math answers are equivalent under the fallback path."""
+    gold_norm = _normalize_math_text(gold_text)
+    pred_norm = _normalize_math_text(pred_text)
+
+    if not gold_norm or not pred_norm:
+        return False
+    if gold_norm == pred_norm:
+        return True
+
+    if sympy is None or parse_latex is None:
+        return False
+
+    try:
+        gold_expr = parse_latex(gold_norm)
+        pred_expr = parse_latex(pred_norm)
+        return bool(sympy.simplify(gold_expr - pred_expr) == 0)
+    except Exception:
+        return False
 
 
 def process_answers(
@@ -126,12 +310,17 @@ def process_answers(
     generated_text = (
         generated_text[0] if isinstance(generated_text, list) else str(generated_text)
     )
+    generated_text = apply_text_pipeline(generated_text, MATH_RESPONSE_PIPELINE)
 
     try:
         grade, extracted_answers = _verify_func([gold_answer_text], [generated_text])
 
         if not extracted_answers:
-            logger.warning(f"⚠️ No answers could be extracted for job {index}")
+            logger.warning(
+                f"⚠️ No answers could be extracted for job {index}; using fallback normalization"
+            )
+            if _math_text_equiv(gold_answer_text, generated_text):
+                return index, 1.0, generated_text, gold_answer_text
             return index, 0.0, None, None
 
         # Extract answers with validation
@@ -156,12 +345,16 @@ def process_answers(
         return index, 0.0, "Timeout", "Timeout"
     except ValueError as ve:
         logger.error(f"❌ [Value Error] Invalid input format for job {index}: {ve}")
+        if _math_text_equiv(gold_answer_text, generated_text):
+            return index, 1.0, generated_text, gold_answer_text
         return index, 0.0, f"Format Error: {ve}", None
     except Exception as e:
         logger.error(
             f"❌ [Error] An unexpected error occurred for job {index}: {e}",
             exc_info=True,
         )
+        if _math_text_equiv(gold_answer_text, generated_text):
+            return index, 1.0, generated_text, gold_answer_text
         return index, 0.0, f"Error: {e}", f"Error: {e}"
 
 
@@ -172,6 +365,8 @@ def compute_scores(
     cache_path: str,
     max_workers: int,
     timeout: int,
+    task_name: str | None = None,
+    seed: int | None = None,
 ) -> float:
     """
     Computes accuracy scores for a batch of mathematical evaluation jobs using parallel processing.
@@ -248,6 +443,11 @@ def compute_scores(
                             "accuracy": is_correct,
                             "extracted_gold": extracted_gold,
                             "extracted_answer": extracted_answer,
+                            **build_sample_provenance(
+                                eval_dataset[idx],
+                                label_key=label_key,
+                                response_key=response_key,
+                            ),
                         }
                     )
                     processed_indices.add(idx)
@@ -282,6 +482,11 @@ def compute_scores(
                     "accuracy": 0.0,
                     "extracted_gold": "Error",
                     "extracted_answer": "Error",
+                    **build_sample_provenance(
+                        eval_dataset[idx],
+                        label_key=label_key,
+                        response_key=response_key,
+                    ),
                 }
             )
             stats.error += 1
@@ -315,6 +520,18 @@ def compute_scores(
 
     # Calculate and return the average accuracy
     accuracy = mean(data["accuracy"] for data in eval_dataset)
+    save_summary(
+        accuracy=accuracy,
+        metadata=metadata,
+        provenance=build_run_provenance(
+            eval_dataset,
+            task_name=task_name,
+            label_key=label_key,
+            response_key=response_key,
+            seed=seed,
+        ),
+        cache_path=cache_path,
+    )
     logger.info(f"Final Accuracy: {accuracy:.4f}")
     return accuracy
 
@@ -341,3 +558,25 @@ def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:
     except OSError as e:
         logger.error(f"❌ Failed to save cache: {e}")
         raise
+
+
+def save_summary(
+    accuracy: float,
+    metadata: dict[str, Any],
+    provenance: dict[str, Any],
+    cache_path: str,
+) -> None:
+    """Save aggregated math metrics and provenance next to the JSONL cache."""
+    summary_path = Path(cache_path).with_suffix(".summary.json")
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "accuracy": round(accuracy, 6),
+                **metadata,
+                "provenance": provenance,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )

@@ -32,6 +32,15 @@ BENCHMARKS: dict[str, tuple[str, str | None, str]] = {
     "mbpp_plus": ("evalplus/mbppplus", None, "test"),
 }
 
+HUMANEVAL_STOP_TOKENS = [
+    "\nclass",
+    "\ndef",
+    "\n#",
+    "\nif",
+    "\nprint",
+]
+MBPP_STOP_TOKENS = ["[DONE]"]
+
 
 def prepare_humaneval(data: list[dict]) -> list[dict]:
     """Convert HumanEval-format data to LLMEval JSONL schema.
@@ -47,6 +56,8 @@ def prepare_humaneval(data: list[dict]) -> list[dict]:
                 "task_id": item["task_id"],
                 "prompt": item["prompt"],
                 "answer": "\n" + test_with_check,
+                "prompt_mode": "human_eval",
+                "stop_tokens": list(HUMANEVAL_STOP_TOKENS),
             }
         )
     return records
@@ -75,6 +86,8 @@ def prepare_mbpp(data: list[dict]) -> list[dict]:
                 "task_id": str(item.get("task_id", "")),
                 "prompt": prompt,
                 "answer": "\n" + tests,
+                "prompt_mode": "mbpp",
+                "stop_tokens": list(MBPP_STOP_TOKENS),
             }
         )
     return records

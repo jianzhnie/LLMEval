@@ -22,6 +22,12 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.code_eval.execute import check_correctness
+from llmeval.tasks.postprocess import (
+    apply_text_pipeline,
+    build_text_pipeline,
+    strip_reasoning_wrappers,
+)
+from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
 from llmeval.utils.log import init_logger
 
 logger = init_logger("code_score")
@@ -66,17 +72,20 @@ _STOP_MARKERS: re.Pattern[str] = re.compile(
 _TOP_LEVEL_PREFIXES: tuple[str, ...] = ("def ", "from ", "import ", "class ", "@")
 """Python prefixes that can start a standalone candidate program."""
 
-_THINK_END_RE: re.Pattern[str] = re.compile(
-    r"</think\s*>",
-    re.IGNORECASE,
+_HUMANEVAL_PROMPT_MODES: tuple[str, ...] = (
+    "human_eval",
+    "humaneval",
+    "human_eval_plus",
+    "humaneval_plus",
+    "human_eval_prefix",
 )
-"""Closing ``</think>`` tag (whitespace-tolerant)."""
+_MBPP_PROMPT_MODES: tuple[str, ...] = (
+    "mbpp",
+    "mbpp_plus",
+    "instruction",
+)
 
-_ANSWER_TAG_RE: re.Pattern[str] = re.compile(
-    r"<answer>(.*?)</answer>",
-    re.DOTALL | re.IGNORECASE,
-)
-"""``<answer>...</answer>`` wrapper."""
+CODE_GENERATION_PIPELINE = build_text_pipeline(strip_reasoning_wrappers)
 
 
 # ===========================================================================
@@ -194,13 +203,20 @@ class CodeScoreResult:
     per_item: list[dict[str, Any]] = field(default_factory=list)
     """Per-item execution records (``task_id``, ``passed``, ``result``, ``stderr``)."""
 
+    provenance: dict[str, Any] = field(default_factory=dict)
+    """Run-level provenance metadata written to the summary cache."""
+
 
 # ===========================================================================
 # Internal helpers
 # ===========================================================================
 
 
-def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
+def _failure_code_record(
+    item: dict[str, Any],
+    label_key: str = "answer",
+    response_key: str = "gen",
+) -> dict[str, Any]:
     """Build a placeholder record for items that could not be scored."""
     return {
         "task_id": item.get("task_id", item.get("_llmeval_group_id", "")),
@@ -209,6 +225,7 @@ def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
         "passed": False,
         "result": "scoring error",
         "stderr": "",
+        **build_sample_provenance(item, label_key=label_key, response_key=response_key),
     }
 
 
@@ -219,13 +236,7 @@ def _strip_think_tags(text: str) -> str:
     2. Fall back to text after ``</think>``.
     3. Otherwise return *text* unchanged.
     """
-    _am = _ANSWER_TAG_RE.search(text)
-    if _am:
-        return _am.group(1)
-    _tm = _THINK_END_RE.search(text)
-    if _tm:
-        return text[_tm.end() :]
-    return text
+    return strip_reasoning_wrappers(text)
 
 
 def _first_meaningful_line(text: str) -> str:
@@ -249,7 +260,7 @@ def _prompt_is_python_prefix(prompt: str) -> bool:
 
 
 def _build_check_programs(
-    prompt: str, code: str, test_code: str
+    prompt: str, code: str, test_code: str, prompt_mode: str | None = None
 ) -> list[tuple[str, str]]:
     """Build candidate programs to execute for a generated code sample.
 
@@ -260,8 +271,15 @@ def _build_check_programs(
     is tried as a fallback.
     """
     programs: list[tuple[str, str]] = []
+    prompt_mode_norm = prompt_mode.strip().lower() if prompt_mode else ""
 
-    if _prompt_is_python_prefix(prompt):
+    if prompt_mode_norm in _HUMANEVAL_PROMPT_MODES:
+        programs.append(("prompt_plus_code", f"{prompt.rstrip()}\n{code}\n{test_code}"))
+        if _starts_with_top_level_code(code):
+            programs.append(("code_only", f"{code.rstrip()}\n{test_code}"))
+    elif prompt_mode_norm in _MBPP_PROMPT_MODES:
+        programs.append(("code_only", f"{code.rstrip()}\n{test_code}"))
+    elif _prompt_is_python_prefix(prompt):
         programs.append(("prompt_plus_code", f"{prompt.rstrip()}\n{code}\n{test_code}"))
         if _starts_with_top_level_code(code):
             programs.append(("code_only", f"{code.rstrip()}\n{test_code}"))
@@ -275,6 +293,12 @@ def _build_check_programs(
             deduped.append((variant, program))
             seen.add(program)
     return deduped
+
+
+def _resolve_prompt_mode(item: dict[str, Any]) -> str:
+    """Resolve an explicit prompt mode from the prepared record."""
+    prompt_mode = item.get("prompt_mode", "")
+    return str(prompt_mode).strip().lower() if prompt_mode else ""
 
 
 # ===========================================================================
@@ -315,6 +339,10 @@ def _process_code_item(
     task_id: str = str(item.get("task_id") or group_id)
     prompt: str = str(item.get("prompt", ""))
     test_code: str = str(item.get(label_key, ""))
+    prompt_mode: str = _resolve_prompt_mode(item)
+    provenance = build_sample_provenance(
+        item, label_key=label_key, response_key=response_key
+    )
 
     # -- extract model output ---------------------------------------------------
     gen_raw = item.get(response_key)
@@ -326,35 +354,40 @@ def _process_code_item(
         gen_str = ""
 
     if not gen_str.strip():
-        return idx, _failure(
-            task_id, "failed: empty generation", group_id, sample_index
-        )
+        record = _failure(task_id, "failed: empty generation", group_id, sample_index)
+        record.update(provenance)
+        return idx, record
 
     # Strip reasoning-model wrappers before code extraction.
-    gen_str = _strip_think_tags(gen_str)
+    gen_str = apply_text_pipeline(gen_str, CODE_GENERATION_PIPELINE)
 
     # -- extract code -----------------------------------------------------------
     code = extract_code(gen_str)
     if not code.strip():
-        return idx, _failure(
-            task_id, "failed: no code extracted", group_id, sample_index
-        )
+        record = _failure(task_id, "failed: no code extracted", group_id, sample_index)
+        record.update(provenance)
+        return idx, record
 
     # -- construct and execute --------------------------------------------------
     # extract_code() preserves leading indentation (uses .rstrip()), so bare
     # HumanEval-style function bodies (``"    return a + b"``) remain valid.
     exec_result: dict[str, Any] | None = None
-    for _, check_program in _build_check_programs(prompt, code, test_code):
+    for _, check_program in _build_check_programs(
+        prompt, code, test_code, prompt_mode=prompt_mode
+    ):
         exec_result = check_correctness(check_program, exec_timeout, task_id)
         if exec_result.get("passed"):
             break
     if exec_result is None:
-        return idx, _failure(
+        record = _failure(
             task_id, "failed: no executable candidate", group_id, sample_index
         )
+        record.update(provenance)
+        return idx, record
     exec_result.setdefault("task_id", task_id)
     exec_result.setdefault("group_id", group_id)
     exec_result.setdefault("sample_index", sample_index)
+    exec_result.update(provenance)
     return idx, exec_result
 
 
@@ -462,7 +495,7 @@ def _score_items(
             pbar.update(1)
 
     return [
-        results_by_index.get(i) or _failure_code_record(item)
+        results_by_index.get(i) or _failure_code_record(item, label_key, response_key)
         for i, item in enumerate(eval_dataset)
     ]
 
@@ -541,6 +574,8 @@ def score_code(
     timeout: int = 20,
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
     k_values: tuple[int, ...] = (1, 10, 64),
+    task_name: str | None = None,
+    seed: int | None = None,
 ) -> float:
     """Score a code-generation dataset and return Pass@1 accuracy.
 
@@ -615,6 +650,13 @@ def score_code(
         correct=correct,
         problems=problems,
         per_item=records,
+        provenance=build_run_provenance(
+            eval_dataset,
+            task_name=task_name,
+            label_key=label_key,
+            response_key=response_key,
+            seed=seed,
+        ),
     )
     write_cache(result, cache_path)
 
@@ -656,6 +698,7 @@ def write_cache(result: CodeScoreResult, cache_path: str | Path) -> None:
                 "total": result.total,
                 "correct": result.correct,
                 "problems": result.problems,
+                "provenance": result.provenance,
             },
             fh,
             indent=2,

@@ -133,6 +133,14 @@ class TestProcessAnswers:
         idx, grade, _, _ = process_answers((1, item, "answer", "gen"))
         assert (idx, grade) == (1, 0.0)
 
+    def test_fallback_normalizes_final_answer_text(self) -> None:
+        from llmeval.tasks.math_eval.math_score import _math_text_equiv
+
+        assert _math_text_equiv(
+            "100000",
+            "Final Answer: The final answer is $100,000$. I hope it is correct.",
+        )
+
 
 # ===========================================================================
 # compute_scores (parallel driver)
@@ -162,6 +170,9 @@ class TestComputeScores:
         assert data[1]["accuracy"] == 0.0
         assert "extracted_gold" in data[0]
         assert "extracted_answer" in data[0]
+        summary = json.loads((tmp_path / "cache.summary.json").read_text())
+        assert summary["accuracy"] == pytest.approx(0.5)
+        assert summary["provenance"]["seed"] is None
         # Cache written as valid JSONL
         lines = cache.read_text(encoding="utf-8").strip().split("\n")
         assert len(lines) == 2

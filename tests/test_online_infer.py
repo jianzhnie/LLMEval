@@ -253,7 +253,9 @@ class TestGetContent:
 
         client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
 
-        assert "tool_choice" not in client.client.chat.completions.create.call_args.kwargs
+        assert (
+            "tool_choice" not in client.client.chat.completions.create.call_args.kwargs
+        )
 
     def test_tool_choice_auto_is_sent(self) -> None:
         client = _make_client()
@@ -262,7 +264,10 @@ class TestGetContent:
 
         client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
 
-        assert client.client.chat.completions.create.call_args.kwargs["tool_choice"] == "auto"
+        assert (
+            client.client.chat.completions.create.call_args.kwargs["tool_choice"]
+            == "auto"
+        )
 
 
 class TestInferenceClientInit:

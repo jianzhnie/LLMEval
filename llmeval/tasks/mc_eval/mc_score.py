@@ -46,6 +46,12 @@ from typing import Any, Literal
 from pebble import ProcessPool
 from tqdm import tqdm
 
+from llmeval.tasks.postprocess import (
+    apply_text_pipeline,
+    build_text_pipeline,
+    strip_reasoning_wrappers,
+)
+from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
 from llmeval.utils.log import init_logger
 
 __all__ = [
@@ -62,6 +68,8 @@ __all__ = [
 ]
 
 logger = init_logger("mc_score")
+
+MC_GENERATION_PIPELINE = build_text_pipeline(strip_reasoning_wrappers)
 
 # Precompiled answer-extraction regexes.
 _ANSWER_MARKER_RE: re.Pattern[str] = re.compile(
@@ -84,6 +92,9 @@ class MCScoreResult:
         Accuracy via length-normalized logprobs when continuation tokens are
         available. In generate mode this always equals *acc* because generate
         records carry no ``correct_norm`` field.
+    acc_bytes:
+        Accuracy via byte-length-normalized logprobs when continuation tokens
+        are available. In generate mode this always equals *acc*.
     exact_match:
         Convenience alias for *acc* in the multiple-choice context.
     total:
@@ -92,17 +103,22 @@ class MCScoreResult:
         Number of items answered correctly under *acc*.
     correct_norm:
         Number of items answered correctly under *acc_norm*.
+    correct_bytes:
+        Number of items answered correctly under *acc_bytes*.
     per_item:
         Per-item scoring records (written to the JSONL cache file).
     """
 
     acc: float = 0.0
     acc_norm: float = 0.0
+    acc_bytes: float = 0.0
     exact_match: float = 0.0
     total: int = 0
     correct: int = 0
     correct_norm: int = 0
+    correct_bytes: int = 0
     per_item: list[dict[str, Any]] = field(default_factory=list)
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 # ===========================================================================
@@ -115,6 +131,8 @@ def score_loglikelihood(
     cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
+    task_name: str | None = None,
+    seed: int | None = None,
 ) -> float:
     """Score loglikelihood-based MC results and persist cache files.
 
@@ -155,7 +173,16 @@ def score_loglikelihood(
         max_workers=max_workers,
         timeout=timeout,
     )
-    metrics = build_result(records)
+    metrics = build_result(
+        records,
+        provenance=build_run_provenance(
+            eval_dataset,
+            task_name=task_name,
+            label_key="gold",
+            response_key="logprobs",
+            seed=seed,
+        ),
+    )
     write_cache(metrics, cache_path)
     return metrics.acc
 
@@ -167,6 +194,8 @@ def score_generate(
     cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
+    task_name: str | None = None,
+    seed: int | None = None,
 ) -> float:
     """Score generation-based MC results by extracting the answer letter.
 
@@ -201,7 +230,16 @@ def score_generate(
         max_workers=max_workers,
         timeout=timeout,
     )
-    metrics = build_result(records)
+    metrics = build_result(
+        records,
+        provenance=build_run_provenance(
+            eval_dataset,
+            task_name=task_name,
+            label_key=label_key,
+            response_key=response_key,
+            seed=seed,
+        ),
+    )
     write_cache(metrics, cache_path)
     return metrics.acc
 
@@ -289,12 +327,21 @@ def score_items(
                     "pred": -1,
                     "correct": False,
                     "correct_norm": False,
+                    "correct_bytes": False,
+                    **build_sample_provenance(
+                        item, label_key="gold", response_key="logprobs"
+                    ),
                 }
             else:
                 record = {
                     "gold": str(item.get(label_key, "")).strip().upper(),
                     "pred": "",
                     "correct": False,
+                    "correct_norm": False,
+                    "correct_bytes": False,
+                    **build_sample_provenance(
+                        item, label_key=label_key, response_key=response_key
+                    ),
                 }
         records.append(record)
     return records
@@ -315,7 +362,9 @@ def process_item(
     return idx, score_generate_item(item, label_key, response_key)
 
 
-def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
+def build_result(
+    records: list[dict[str, Any]], provenance: dict[str, Any] | None = None
+) -> MCScoreResult:
     """Aggregate per-item records into :class:`MCScoreResult`.
 
     ``correct_norm`` is only present in loglikelihood records; generate-mode
@@ -324,16 +373,20 @@ def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
     total = len(records)
     n_correct = sum(1 for r in records if r["correct"])
     n_correct_norm = sum(1 for r in records if r.get("correct_norm", r["correct"]))
+    n_correct_bytes = sum(1 for r in records if r.get("correct_bytes", r["correct"]))
 
     safe_total = max(total, 1)
     return MCScoreResult(
         acc=n_correct / safe_total,
         acc_norm=n_correct_norm / safe_total,
+        acc_bytes=n_correct_bytes / safe_total,
         exact_match=n_correct / safe_total,
         total=total,
         correct=n_correct,
         correct_norm=n_correct_norm,
+        correct_bytes=n_correct_bytes,
         per_item=records,
+        provenance=provenance or {},
     )
 
 
@@ -356,6 +409,9 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
             f"Invalid gold index {item.get('gold')!r} — treating as -1 (always wrong)."
         )
         gold = -1
+    provenance = build_sample_provenance(
+        item, label_key="gold", response_key="logprobs"
+    )
     logprobs: list[float] = item.get("logprobs", [])
     choices = (
         item.get("choice_tokens") or item.get("choices") or item.get("choice_texts", [])
@@ -368,6 +424,8 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
             "pred": -1,
             "correct": False,
             "correct_norm": False,
+            "correct_bytes": False,
+            **provenance,
         }
 
     # acc — argmax over raw logprobs (ties broken by smallest index).
@@ -379,14 +437,22 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         choice_lens = [max(len(str(c)), 1) for c in choices]
         normed = [lp / cl for lp, cl in zip(logprobs, choice_lens, strict=False)]
         is_correct_norm = max(range(len(normed)), key=normed.__getitem__) == gold
+        choice_bytes = [max(len(str(c).encode("utf-8")), 1) for c in choices]
+        normed_bytes = [lp / cl for lp, cl in zip(logprobs, choice_bytes, strict=False)]
+        is_correct_bytes = (
+            max(range(len(normed_bytes)), key=normed_bytes.__getitem__) == gold
+        )
     else:
         is_correct_norm = is_correct
+        is_correct_bytes = is_correct
 
     return {
         "gold": gold,
         "pred": pred,
         "correct": is_correct,
         "correct_norm": is_correct_norm,
+        "correct_bytes": is_correct_bytes,
+        **provenance,
     }
 
 
@@ -409,11 +475,22 @@ def score_generate_item(
     else:
         pred_text = str(generations[0]) if generations else ""
 
+    provenance = build_sample_provenance(
+        item, label_key=label_key, response_key=response_key
+    )
+    pred_text = apply_text_pipeline(pred_text, MC_GENERATION_PIPELINE)
     pred = extract_answer(pred_text)
     # Both must be non-empty for a match — prevents "" == "".
     is_correct = bool(gold) and bool(pred) and pred == gold
 
-    return {"gold": gold, "pred": pred, "correct": is_correct}
+    return {
+        "gold": gold,
+        "pred": pred,
+        "correct": is_correct,
+        "correct_norm": is_correct,
+        "correct_bytes": is_correct,
+        **provenance,
+    }
 
 
 def extract_answer(text: str) -> str:
@@ -469,8 +546,10 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
             {
                 "acc": round(result.acc, 4),
                 "acc_norm": round(result.acc_norm, 4),
+                "acc_bytes": round(result.acc_bytes, 4),
                 "exact_match": round(result.exact_match, 4),
                 "total": result.total,
+                "provenance": result.provenance,
             },
             fh,
             indent=2,

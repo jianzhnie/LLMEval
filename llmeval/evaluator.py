@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,54 +39,27 @@ from llmeval.tasks.mc_eval.mc_score import (
     score_generate,
     score_loglikelihood,
 )
+from llmeval.tasks.postprocess import (
+    apply_text_pipeline,
+    build_text_pipeline,
+    strip_reasoning_wrappers,
+)
+from llmeval.tasks.provenance import (
+    annotate_dataset_contamination,
+    load_contamination_sources,
+)
 from llmeval.utils.config import EvalTaskArguments
 from llmeval.utils.log import init_logger
 
 # Initialize logger for the evaluation orchestrator
 logger = init_logger("evaluator")
 
-# Precompiled regex for think-tag stripping (used by _get_after_think).
-_ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
-_THINK_END_RE = re.compile(r"</think\s*>", re.IGNORECASE)
+MATH_RESPONSE_PIPELINE = build_text_pipeline(strip_reasoning_wrappers)
 
 
 def _get_after_think(text: str) -> str:
-    """
-    Extract the text content that appears after the '</think>' tag in the input string.
-
-    This helper function is used to process model outputs that may contain thinking steps
-    or reasoning enclosed in think tags. It handles various tag formats:
-    - ``</think>\\n\\n`` (double newline)
-    - ``</think>\\n`` (single newline)
-    - ``</think >`` (with trailing space)
-    - ``</think>`` (no whitespace)
-    - ``<answer>...</answer>`` tag extraction as fallback
-
-    Args:
-        text: The input string that may contain a '</think>' tag followed by text.
-
-    Returns:
-        str: The content after the think tag, with <answer> tag content preferred if available.
-            Returns the original text if no think tag is found.
-    """
-    if not text or not isinstance(text, str):
-        return ""
-
-    # Prefer content inside <answer>...</answer> tags
-    match = _ANSWER_TAG_RE.search(text)
-    if match:
-        # Return stripped content even if empty — empty answer is valid extraction
-        return match.group(1).strip()
-
-    # Fallback: extract content after </think> (with optional spaces and newlines)
-    match = _THINK_END_RE.search(text)
-    if match:
-        tail = text[match.end() :].strip()
-        if tail:
-            return tail
-
-    # If nothing matched, return the original text
-    return text
+    """Compatibility wrapper for the shared reasoning-text filter."""
+    return apply_text_pipeline(text, MATH_RESPONSE_PIPELINE)
 
 
 def preprocess_answers(data: list[dict[str, Any]], response_key: str) -> None:
@@ -103,9 +75,11 @@ def preprocess_answers(data: list[dict[str, Any]], response_key: str) -> None:
     for item in data:
         gen = item.get(response_key, [])
         if isinstance(gen, list):
-            item[response_key] = [_get_after_think(str(g)) for g in gen]
+            item[response_key] = [
+                apply_text_pipeline(g, MATH_RESPONSE_PIPELINE) for g in gen
+            ]
         elif isinstance(gen, str):
-            item[response_key] = _get_after_think(gen)
+            item[response_key] = apply_text_pipeline(gen, MATH_RESPONSE_PIPELINE)
     return None  # mutates in-place; callers should not rely on return value
 
 
@@ -187,6 +161,7 @@ def evaluate_task(
     max_workers: int,
     timeout: int = 20,
     exec_timeout: float = 3.0,
+    seed: int | None = None,
 ) -> float | None:
     """
     Evaluate model outputs against ground truth data for a specific task.
@@ -207,6 +182,7 @@ def evaluate_task(
         max_workers: Maximum number of parallel workers for processing
         timeout: Maximum time in seconds to wait for each evaluation (default: 20)
         exec_timeout: Per-item code execution timeout in seconds (code tasks only)
+        seed: Random seed recorded in scorer provenance summaries
 
     Returns:
         Optional[float]: Evaluation accuracy score if successful, None if evaluation fails
@@ -239,6 +215,8 @@ def evaluate_task(
                 cache_path=str(cache_path),  # compute_scores expects string path
                 max_workers=max_workers,
                 timeout=timeout,
+                task_name=task_name,
+                seed=seed,
             )
             logger.info(f"✅ Task: {task_name}, Accuracy: {accuracy:.2%}")
             return accuracy
@@ -254,6 +232,8 @@ def evaluate_task(
                     cache_path=cache_path,
                     max_workers=max_workers,
                     timeout=timeout,
+                    task_name=task_name,
+                    seed=seed,
                 )
                 logger.info(
                     f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}"
@@ -266,6 +246,8 @@ def evaluate_task(
                     cache_path=cache_path,
                     max_workers=max_workers,
                     timeout=timeout,
+                    task_name=task_name,
+                    seed=seed,
                 )
                 logger.info(
                     f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}"
@@ -284,6 +266,8 @@ def evaluate_task(
                 max_workers=max_workers,
                 timeout=timeout,
                 exec_timeout=exec_timeout,
+                task_name=task_name,
+                seed=seed,
             )
             logger.info(f"✅ Task: {task_name}, Pass@1: {accuracy:.2%}")
             return accuracy
@@ -362,6 +346,25 @@ def main() -> int:
             logger.error(f"❌ Error processing data: {e!s}")
             return 1
 
+        if args.contamination_path:
+            try:
+                contamination_sources = load_contamination_sources(
+                    args.contamination_path
+                )
+                annotate_dataset_contamination(
+                    processed_data,
+                    contamination_sources,
+                    input_key=args.input_key,
+                    min_length=args.contamination_min_length,
+                )
+                logger.info(
+                    "Loaded %d contamination reference string(s)",
+                    len(contamination_sources),
+                )
+            except Exception as e:
+                logger.error(f"❌ Error checking contamination: {e!s}", exc_info=True)
+                return 1
+
         # Strip <think> tags from model responses before scoring.
         # Models using deepseek_r1/openr1 system prompts output
         # <think>...</think><answer>...</answer> format, and math_verify
@@ -378,6 +381,7 @@ def main() -> int:
             args.max_workers,
             args.timeout,
             args.exec_timeout,
+            args.seed,
         )
 
         if accuracy is not None:

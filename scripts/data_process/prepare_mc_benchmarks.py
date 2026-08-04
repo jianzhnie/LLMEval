@@ -40,6 +40,8 @@ MC_PROMPT_TEMPLATE = {
     "mmlu_pro": "{question}\nA. {A}\nB. {B}\nC. {C}\nD. {D}\nE. {E}\nF. {F}\nG. {G}\nH. {H}\nI. {I}\nJ. {J}\nAnswer:",
     "ceval": "{question}\nA. {A}\nB. {B}\nC. {C}\nD. {D}\n答案：",
 }
+
+
 def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
     """Download and format a multiple-choice benchmark."""
     if name not in BENCHMARKS:

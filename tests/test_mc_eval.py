@@ -99,6 +99,8 @@ class TestScoreLoglikelihood:
             s = json.loads(summary_path.read_text())
             assert s["acc"] == 1.0
             assert s["acc_norm"] == 1.0
+            assert s["acc_bytes"] == 1.0
+            assert s["provenance"]["task_name"] is None
         finally:
             Path(cache).unlink(missing_ok=True)
             Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
@@ -142,6 +144,28 @@ class TestScoreLoglikelihood:
             # acc_norm: "A"(len=1) → -10/1=-10.0, "B"×10 → -10/10=-1.0
             # argmax picks index 1 (long) ≠ gold 0 → acc_norm wrong
             assert s["acc_norm"] == 0.0
+        finally:
+            Path(cache).unlink(missing_ok=True)
+            Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
+
+    def test_acc_bytes_uses_utf8_length(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+
+        items = [
+            {
+                "gold": 0,
+                "logprobs": [-10.0, -10.0],
+                "choices": ["é", "aa"],
+            }
+        ]
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            cache = f.name
+        try:
+            score_loglikelihood(items, cache)
+            summary_path = Path(cache).with_suffix(".summary.json")
+            s = json.loads(summary_path.read_text())
+            assert s["acc_norm"] == 0.0
+            assert s["acc_bytes"] == 1.0
         finally:
             Path(cache).unlink(missing_ok=True)
             Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
