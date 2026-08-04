@@ -57,7 +57,6 @@ if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
     _tqdm.tqdm = MagicMock
     sys.modules["tqdm"] = _tqdm
 
-from llmeval.inference.common import expand_data_with_resume
 from llmeval.inference.online import (
     InferenceRunner,
 )
@@ -292,6 +291,26 @@ class TestGetContents:
             client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=0)
 
 
+# ── InferenceRunner.load_data (n_samples scheduling metadata) ─────
+
+
+class TestLoadData:
+    def test_load_data_sets_remaining_n_samples(self, tmp_path: Path) -> None:
+        runner = _make_runner(tmp_path, n_samples=4)
+        Path(runner.args.input_file).write_text(
+            json.dumps({"prompt": "q", "answer": "a"}) + "\n",
+            encoding="utf-8",
+        )
+        Path(runner.args.output_file).write_text(
+            json.dumps({"prompt": "q", "gen": ["one", "two"]}) + "\n",
+            encoding="utf-8",
+        )
+
+        loaded = runner.load_data()
+
+        assert loaded == [{"prompt": "q", "answer": "a", "n_samples": 2}]
+
+
 # ── InferenceRunner.process_item_group (batched n-parameter path) ──
 
 
@@ -301,14 +320,16 @@ class TestProcessItemGroup:
         runner.client = MagicMock()
         runner.client.get_contents.return_value = ["s1", "s2", "s3"]
 
-        items = [{"prompt": "q", "answer": "a"} for _ in range(3)]
+        items = [{"prompt": "q", "answer": "a", "n_samples": 3}]
         runner.process_item_group(items)
 
         runner.client.get_contents.assert_called_once()
         assert runner.client.get_contents.call_args.kwargs["n"] == 3
         lines = (tmp_path / "output.jsonl").read_text().strip().split("\n")
         assert len(lines) == 3
-        gens = sorted(json.loads(x)["gen"][0] for x in lines)
+        parsed = [json.loads(x) for x in lines]
+        assert all("n_samples" not in item for item in parsed)
+        gens = sorted(item["gen"][0] for item in parsed)
         assert gens == ["s1", "s2", "s3"]
         assert runner._stats["processed"] == 3
 
@@ -364,13 +385,18 @@ class TestConcurrentGrouping:
         runner.client = MagicMock()
         runner.client.get_contents.return_value = ["s1", "s2", "s3"]
 
-        expanded = expand_data_with_resume(
-            [{"prompt": "q", "answer": "a"}], {}, "prompt", 3
+        Path(runner.args.input_file).write_text(
+            json.dumps({"prompt": "q", "answer": "a"}) + "\n",
+            encoding="utf-8",
         )
-        assert len(expanded) == 3
-        runner._process_concurrently(expanded)
+        loaded = runner.load_data()
+
+        assert len(loaded) == 1
+        assert loaded[0]["n_samples"] == 3
+        runner._process_concurrently(loaded)
 
         runner.client.get_contents.assert_called_once()
+        assert runner.client.get_contents.call_args.kwargs["n"] == 3
         assert runner._stats["processed"] == 3
 
     def test_non_str_prompt_does_not_crash_run(self, tmp_path: Path) -> None:

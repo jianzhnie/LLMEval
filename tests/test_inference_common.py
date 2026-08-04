@@ -15,7 +15,10 @@ import pytest
 from llmeval.inference.common import (
     count_completed_samples,
     expand_data_with_resume,
+    expand_group_for_sampling,
     load_jsonl,
+    prepare_data_with_resume,
+    sample_count_for_item,
     save_failed_items,
 )
 
@@ -111,6 +114,37 @@ class TestExpandDataWithResume:
         expanded[0]["gen"].append("new")
         assert expanded[1]["gen"] == ["existing"]
         assert raw[0]["gen"] == ["existing"]
+
+
+class TestPrepareDataWithResume:
+    def test_sets_remaining_sample_count(self) -> None:
+        raw = [{"prompt": "q1", "answer": "a1"}]
+        prepared = prepare_data_with_resume(raw, {}, "prompt", 3)
+        assert prepared == [{"prompt": "q1", "answer": "a1", "n_samples": 3}]
+
+    def test_subtracts_completed(self) -> None:
+        raw = [{"prompt": "q1", "answer": "a1"}]
+        prepared = prepare_data_with_resume(raw, {"q1": 2}, "prompt", 4)
+        assert prepared[0]["n_samples"] == 2
+
+    def test_skips_invalid_items(self) -> None:
+        raw = [{"prompt": "  "}, "bad", {"answer": "x"}]
+        assert prepare_data_with_resume(raw, {}, "prompt", 2) == []
+
+
+class TestSampleCountHelpers:
+    def test_sample_count_for_item_defaults_to_one(self) -> None:
+        assert sample_count_for_item({"prompt": "q"}) == 1
+
+    def test_sample_count_for_item_reads_n_samples(self) -> None:
+        assert sample_count_for_item({"n_samples": 4}) == 4
+
+    def test_expand_group_for_sampling_repeats_each_item(self) -> None:
+        items = [{"prompt": "q", "n_samples": 2}]
+        expanded = expand_group_for_sampling(items)
+        assert len(expanded) == 2
+        assert expanded[0] is items[0]
+        assert expanded[1] is items[0]
 
 
 class TestSaveFailedItems:

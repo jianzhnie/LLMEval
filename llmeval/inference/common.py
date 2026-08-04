@@ -11,6 +11,9 @@ Functions
 load_jsonl                 — parse a line-delimited JSON file
 count_completed_samples    — per-prompt completed-sample counts for resume
 expand_data_with_resume    — expand raw items to remaining per-sample copies
+prepare_data_with_resume   — attach remaining sample counts for batched online runs
+sample_count_for_item      — read the runtime sample count from an item
+expand_group_for_sampling   — expand grouped prompt records by sample count
 save_failed_items          — persist failure records next to the output file
 """
 
@@ -28,7 +31,10 @@ from llmeval.utils.log import init_logger
 __all__ = [
     "count_completed_samples",
     "expand_data_with_resume",
+    "expand_group_for_sampling",
     "load_jsonl",
+    "prepare_data_with_resume",
+    "sample_count_for_item",
     "save_failed_items",
 ]
 
@@ -151,6 +157,88 @@ def expand_data_with_resume(
         logger.warning(f"Skipped {skipped_items} items due to missing or empty prompt")
 
     return expanded_data
+
+
+def prepare_data_with_resume(
+    raw_data: list[dict[str, Any]],
+    completed_counts: dict[str, int],
+    input_key: str,
+    n_samples: int,
+    sample_count_key: str = "n_samples",
+) -> list[dict[str, Any]]:
+    """Prepare one prompt record per item with a remaining sample count.
+
+    This variant is used by online inference, where the remaining sample count
+    is passed directly to the API as ``n`` instead of expanding to repeated
+    copies of the same prompt.
+
+    Args:
+        raw_data: Items loaded from the input file.
+        completed_counts: Completed-sample count per prompt (resume state).
+        input_key: Prompt field name (``"prompt"`` used as fallback).
+        n_samples: Target number of samples per prompt.
+        sample_count_key: Output field name used to store the remaining sample
+            count for the prompt.
+
+    Returns:
+        Prepared dataset holding only the prompts still to process.
+    """
+    prepared_data: list[dict[str, Any]] = []
+    skipped_items = 0
+
+    for item in raw_data:
+        if not isinstance(item, dict):
+            logger.warning(f"Skipping non-dict input item: {type(item)}")
+            skipped_items += 1
+            continue
+
+        prompt_val: Any = item.get(input_key) or item.get("prompt")
+        prompt = str(prompt_val) if prompt_val is not None else ""
+
+        if not prompt.strip():
+            logger.warning(
+                f"No valid prompt found under keys [{input_key!r}, 'prompt'] "
+                f"for item with keys: {list(item.keys())}"
+            )
+            skipped_items += 1
+            continue
+
+        completed = completed_counts.get(prompt, 0)
+        remaining = max(0, n_samples - completed)
+        if remaining <= 0:
+            continue
+
+        prepared_item = copy.deepcopy(item)
+        prepared_item[sample_count_key] = remaining
+        prepared_data.append(prepared_item)
+
+    if skipped_items > 0:
+        logger.warning(f"Skipped {skipped_items} items due to missing or empty prompt")
+
+    return prepared_data
+
+
+def sample_count_for_item(
+    item: dict[str, Any], sample_count_key: str = "n_samples"
+) -> int:
+    """Return the sample count stored on a prepared item."""
+    try:
+        return max(1, int(item.get(sample_count_key, 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def expand_group_for_sampling(
+    items: list[dict[str, Any]], sample_count_key: str = "n_samples"
+) -> list[dict[str, Any]]:
+    """Expand grouped prompt records according to their stored sample counts."""
+    if not any(sample_count_key in item for item in items if isinstance(item, dict)):
+        return items
+
+    sample_items: list[dict[str, Any]] = []
+    for item in items:
+        sample_items.extend([item] * sample_count_for_item(item, sample_count_key))
+    return sample_items
 
 
 def save_failed_items(

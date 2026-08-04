@@ -18,9 +18,7 @@ _vllm_absent = importlib.util.find_spec("vllm") is None
 if _vllm_absent:
     sys.modules["vllm"] = types.ModuleType("vllm")
     sys.modules["vllm.outputs"] = types.ModuleType("vllm.outputs")
-    sys.modules["vllm"].__spec__ = importlib.machinery.ModuleSpec(
-        "vllm", loader=None
-    )
+    sys.modules["vllm"].__spec__ = importlib.machinery.ModuleSpec("vllm", loader=None)
     sys.modules["vllm.outputs"].__spec__ = importlib.machinery.ModuleSpec(
         "vllm.outputs", loader=None
     )
