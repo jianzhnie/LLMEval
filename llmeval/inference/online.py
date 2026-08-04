@@ -783,9 +783,7 @@ class InferenceRunner:
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Execute pipeline
-            total_samples = sum(
-                sample_count_for_item(item) for item in eval_dataset
-            )
+            total_samples = sum(sample_count_for_item(item) for item in eval_dataset)
             logger.info(f"⏳ Processing {total_samples} samples")
             self._process_concurrently(eval_dataset)
 
