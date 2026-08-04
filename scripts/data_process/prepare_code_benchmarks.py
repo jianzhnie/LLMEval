@@ -2,7 +2,7 @@
 """Prepare code benchmark data files in LLMEval JSONL format.
 
 Downloads HumanEval / MBPP / HumanEval+ / MBPP+ from HuggingFace and
-converts them to the unified schema: ``{"task_id": ..., "prompt": ...,
+converts them to the unified schema: ``{"doc_id": ..., "task_id": ..., "prompt": ...,
 "answer": ...}``.
 
 Usage::
@@ -18,6 +18,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from datasets import load_dataset
 
@@ -42,18 +43,22 @@ HUMANEVAL_STOP_TOKENS = [
 MBPP_STOP_TOKENS = ["[DONE]"]
 
 
-def prepare_humaneval(data: list[dict]) -> list[dict]:
+def prepare_humaneval(
+    data: list[dict[str, Any]], benchmark_name: str = "humaneval"
+) -> list[dict[str, Any]]:
     """Convert HumanEval-format data to LLMEval JSONL schema.
 
     Input fields: ``task_id``, ``prompt``, ``test``, ``entry_point``.
-    Output fields: ``task_id``, ``prompt``, ``answer`` (test + check()).
+    Output fields: ``doc_id``, ``task_id``, ``prompt``, ``answer`` (test + check()).
     """
-    records = []
-    for item in data:
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(data):
+        task_id = str(item.get("task_id", index))
         test_with_check = item["test"].rstrip() + f"\ncheck({item['entry_point']})"
         records.append(
             {
-                "task_id": item["task_id"],
+                "doc_id": f"{benchmark_name}:{task_id}",
+                "task_id": task_id,
                 "prompt": item["prompt"],
                 "answer": "\n" + test_with_check,
                 "prompt_mode": "human_eval",
@@ -63,27 +68,31 @@ def prepare_humaneval(data: list[dict]) -> list[dict]:
     return records
 
 
-def prepare_mbpp(data: list[dict]) -> list[dict]:
+def prepare_mbpp(
+    data: list[dict[str, Any]], benchmark_name: str = "mbpp"
+) -> list[dict[str, Any]]:
     """Convert MBPP-format data to LLMEval JSONL schema.
 
     MBPP ``test_list`` is a list of assert strings; we join them and
     prepend a code-generation instruction prompt.
 
     Input fields: ``task_id``, ``text``, ``test_list``, ``code``.
-    Output fields: ``task_id``, ``prompt``, ``answer``.
+    Output fields: ``doc_id``, ``task_id``, ``prompt``, ``answer``.
     """
     PROMPT_TEMPLATE = (
         "You are an expert Python programmer.  Write a function that "
         "satisfies the following description.\n\n{text}\n\n"
         "Your code should pass these tests:\n\n{tests}\n\n[BEGIN]\n"
     )
-    records = []
-    for item in data:
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(data):
+        task_id = str(item.get("task_id", index))
         tests = "\n".join(item["test_list"])
         prompt = PROMPT_TEMPLATE.format(text=item["text"], tests=tests)
         records.append(
             {
-                "task_id": str(item.get("task_id", "")),
+                "doc_id": f"{benchmark_name}:{task_id}",
+                "task_id": task_id,
                 "prompt": prompt,
                 "answer": "\n" + tests,
                 "prompt_mode": "mbpp",
@@ -134,12 +143,12 @@ def main() -> int:
             print(f"[ERROR] Failed to load {name}: {exc}")
             continue
 
-        data = [dict(item) for item in ds]
+        data: list[dict[str, Any]] = [dict(item) for item in ds]
 
         if name.startswith("humaneval"):
-            records = prepare_humaneval(data)
+            records = prepare_humaneval(data, name)
         elif name.startswith("mbpp"):
-            records = prepare_mbpp(data)
+            records = prepare_mbpp(data, name)
         else:
             print(f"[WARN]  No converter for {name}, skipping.")
             continue

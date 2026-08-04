@@ -91,7 +91,9 @@ def _make_runner(tmp_path: Path, **overrides: Any) -> InferenceRunner:
     if not inp.exists():
         inp.parent.mkdir(parents=True, exist_ok=True)
         with open(inp, "w") as f:
-            f.write(json.dumps({"prompt": "2+2", "answer": "4"}) + "\n")
+            f.write(
+                json.dumps({"doc_id": "test:0", "prompt": "2+2", "answer": "4"}) + "\n"
+            )
 
     # Bypass __init__ entirely; set attributes manually
     runner = InferenceRunner.__new__(InferenceRunner)
@@ -322,7 +324,7 @@ class TestLoadData:
     def test_load_data_sets_remaining_n_samples(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path, n_samples=4)
         Path(runner.args.input_file).write_text(
-            json.dumps({"prompt": "q", "answer": "a"}) + "\n",
+            json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "a"}) + "\n",
             encoding="utf-8",
         )
         Path(runner.args.output_file).write_text(
@@ -332,7 +334,8 @@ class TestLoadData:
 
         loaded = runner.load_data()
 
-        assert loaded == [{"prompt": "q", "answer": "a", "n_samples": 2}]
+        assert loaded[0]["doc_id"] == "test:0"
+        assert loaded[0]["n_samples"] == 2
 
 
 # ── InferenceRunner.process_item_group (batched n-parameter path) ──
@@ -410,7 +413,7 @@ class TestConcurrentGrouping:
         runner.client.get_contents.return_value = ["s1", "s2", "s3"]
 
         Path(runner.args.input_file).write_text(
-            json.dumps({"prompt": "q", "answer": "a"}) + "\n",
+            json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "a"}) + "\n",
             encoding="utf-8",
         )
         loaded = runner.load_data()

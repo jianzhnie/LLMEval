@@ -33,9 +33,12 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
+    count_completed_samples_by_identity,
     is_explicit_tool_choice,
     load_jsonl,
+    require_document_id,
     save_failed_items,
+    validate_document_ids,
 )
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.log import init_logger
@@ -229,6 +232,67 @@ class MCLoglikelihoodClient:
             return [float("-inf")] * len(choice_texts)
         return choice_logprobs
 
+    def get_choices_continuation_logprobs(
+        self, prompt: str, choice_texts: list[str]
+    ) -> list[list[float]]:
+        """Score complete choice continuations using an echo completion.
+
+        OpenAI-compatible completion APIs that support ``echo=True`` return
+        token-level log probabilities for the supplied prompt.  By sending
+        ``prompt + choice`` and selecting offsets inside the choice span, the
+        scorer obtains the complete continuation likelihood instead of only
+        looking at the first token's top-k entries.
+
+        Returns an empty list for a choice whose token-level scores cannot be
+        recovered.  A request failure returns one empty list per choice so the
+        caller can mark the item as failed rather than selecting index zero.
+        """
+
+        def do_request() -> list[list[float]]:
+            prompts = [f"{prompt}{choice}" for choice in choice_texts]
+            response = self.client.completions.create(
+                model=self.model_name,
+                prompt=prompts,
+                max_tokens=1,
+                temperature=0,
+                logprobs=20,
+                echo=True,
+                timeout=self.timeout,
+            )
+            completions = getattr(response, "choices", []) or []
+            if len(completions) != len(choice_texts):
+                return [[] for _ in choice_texts]
+
+            scores: list[list[float]] = []
+            prompt_length = len(prompt)
+            for completion, choice_text in zip(completions, choice_texts, strict=True):
+                logprobs = getattr(completion, "logprobs", None)
+                offsets = getattr(logprobs, "text_offset", None) if logprobs else None
+                token_logprobs = (
+                    getattr(logprobs, "token_logprobs", None) if logprobs else None
+                )
+                if not offsets or not token_logprobs:
+                    scores.append([])
+                    continue
+
+                choice_end = prompt_length + len(choice_text)
+                selected = [
+                    float(logprob)
+                    for offset, logprob in zip(offsets, token_logprobs, strict=False)
+                    if offset is not None
+                    and prompt_length <= offset < choice_end
+                    and logprob is not None
+                ]
+                scores.append(selected)
+            return scores
+
+        try:
+            scores = call_with_retry(do_request, self.max_retries)
+            return scores if scores is not None else [[] for _ in choice_texts]
+        except ClientError as exc:
+            logger.warning("Continuation logprob request failed: %s", exc)
+            return [[] for _ in choice_texts]
+
 
 # ===========================================================================
 # Runner
@@ -298,8 +362,20 @@ class MCRunner:
     # Resume
     # ------------------------------------------------------------------
 
+    def get_completed_identity_counts(self) -> dict[tuple[str, str], int]:
+        """Return completed counts keyed by prepared ID and rendered prompt."""
+        return count_completed_samples_by_identity(
+            self.config.output_file,
+            self.config.input_key,
+            self.config.response_key,
+        )
+
+    def get_completed_document_ids(self) -> set[str]:
+        """Return stable document IDs already written to the output file."""
+        return {document_id for document_id, _ in self.get_completed_identity_counts()}
+
     def get_completed_prompts(self) -> set[str]:
-        """Get the set of completed prompts from existing output (for resume).
+        """Get completed legacy prompts from existing output (for resume).
 
         Scans the output file and collects every written (few-shot prefixed)
         prompt, enabling resume for interrupted runs. Malformed lines are
@@ -326,6 +402,8 @@ class MCRunner:
                                 line_num,
                                 type(item).__name__,
                             )
+                            continue
+                        if item.get("doc_id"):
                             continue
                         prompt = item.get(self.config.input_key, "")
                         if prompt:
@@ -354,19 +432,46 @@ class MCRunner:
             json.JSONDecodeError: If the input file contains invalid JSON
         """
         raw_data = load_jsonl(self.config.input_file)
+        validate_document_ids(raw_data)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
-        # Resume: skip items whose (few-shot prefixed) prompt is already written.
-        # build_prompt is used on both sides so resume agrees with inference
-        # even when n_shot > 0 changes the prompt that gets written.
+        completed_counts = self.get_completed_identity_counts()
+        completed_ids = {document_id for document_id, _ in completed_counts}
         completed_prompts = self.get_completed_prompts()
-        if completed_prompts:
-            logger.info(f"Found {len(completed_prompts)} completed items.")
-        remaining = [
-            it for it in raw_data if self.build_prompt(it) not in completed_prompts
-        ]
 
-        logger.info(f"Total remaining samples to process: {len(remaining)}")
+        remaining: list[dict[str, Any]] = []
+        for index, raw_item in enumerate(raw_data):
+            item = raw_item.copy()
+            document_id = require_document_id(item, index)
+            target_samples = (
+                self.config.n_samples if self.config.mode == "generate" else 1
+            )
+            rendered_prompt = self.build_prompt(item)
+            completed = completed_counts.get((document_id, rendered_prompt), 0)
+            if completed == 0 and rendered_prompt in completed_prompts:
+                # Legacy MC output did not record per-sample counts. Treat the
+                # item as complete, matching the historical resume behavior.
+                completed = target_samples
+            is_completed = completed >= target_samples
+            if not is_completed:
+                if self.config.mode == "generate":
+                    item["_llmeval_remaining_samples"] = target_samples - completed
+                    item["_llmeval_sample_start"] = completed
+                else:
+                    item["_llmeval_sample_index"] = completed
+                remaining.append(item)
+
+        if completed_ids or completed_prompts:
+            logger.info(
+                "Found %d completed items.",
+                len(completed_ids) + len(completed_prompts),
+            )
+
+        total_remaining_samples = sum(
+            int(item.get("_llmeval_remaining_samples", 1)) for item in remaining
+        )
+        logger.info("Total remaining items to process: %d", len(remaining))
+        logger.info("Total remaining samples to process: %d", total_remaining_samples)
         return remaining
 
     def build_prompt(self, item: dict[str, Any]) -> str:
@@ -425,8 +530,15 @@ class MCRunner:
                                 self._stats["skipped"] += 1
                         else:
                             self._write_result(result)
+                            generated = result.get(self.config.response_key)
+                            processed_count = (
+                                len(generated)
+                                if self.config.mode == "generate"
+                                and isinstance(generated, list)
+                                else 1
+                            )
                             with self._stats_lock:
-                                self._stats["processed"] += 1
+                                self._stats["processed"] += processed_count
                                 if result.get("correct"):
                                     self._stats["correct"] += 1
                     pbar.update(1)
@@ -496,7 +608,38 @@ class MCRunner:
         if self.client is None:
             raise RuntimeError("Loglikelihood client is not initialized")
         choice_tokens = self._choice_tokens(item, len(choices))
-        logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)
+        scoring_mode = self.config.loglikelihood_mode
+        choice_logprobs: list[list[float]] = []
+        if scoring_mode in ("auto", "continuation"):
+            try:
+                candidate_scores = self.client.get_choices_continuation_logprobs(
+                    prompt, choice_tokens
+                )
+            except AttributeError:
+                candidate_scores = []
+            if (
+                isinstance(candidate_scores, list)
+                and len(candidate_scores) == len(choice_tokens)
+                and all(
+                    isinstance(scores, list) and scores for scores in candidate_scores
+                )
+            ):
+                choice_logprobs = candidate_scores
+                scoring_mode = "continuation"
+            elif scoring_mode == "continuation":
+                raise RuntimeError("Continuation logprob request failed")
+            else:
+                scoring_mode = "first_token"
+
+        if scoring_mode == "first_token":
+            logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)
+            choice_logprobs = [
+                [score] if score != float("-inf") else [] for score in logprobs
+            ]
+        else:
+            logprobs = [
+                sum(scores) if scores else float("-inf") for scores in choice_logprobs
+            ]
         if all(lp == float("-inf") for lp in logprobs):
             raise RuntimeError("Logprob request failed for all choices")
 
@@ -504,10 +647,24 @@ class MCRunner:
         is_correct = pred == gold
         return {
             self.config.input_key: prompt,
+            **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
+            "_llmeval_sample_index": item.get("_llmeval_sample_index", 0),
             "choices": choices,
             "choice_tokens": choice_tokens,
             "gold": gold,
             "logprobs": logprobs,
+            "choice_logprobs": choice_logprobs,
+            "scoring_mode": scoring_mode,
+            "choice_token_count": (
+                [len(scores) for scores in choice_logprobs]
+                if scoring_mode == "continuation"
+                else None
+            ),
+            "choice_byte_count": (
+                [len(token.encode("utf-8")) for token in choice_tokens]
+                if scoring_mode == "continuation"
+                else None
+            ),
             "pred": pred,
             "correct": is_correct,
         }
@@ -544,7 +701,15 @@ class MCRunner:
         Args:
             remaining: Items left after resume filtering (see load_data)
         """
-        logger.info(f"⏳ Processing {len(remaining)} samples (generate mode)")
+        total_samples = sum(
+            int(item.get("_llmeval_remaining_samples", self.config.n_samples))
+            for item in remaining
+        )
+        logger.info(
+            "⏳ Processing %d item(s), %d generation sample(s)",
+            len(remaining),
+            total_samples,
+        )
         gen_client: openai.OpenAI = openai.OpenAI(
             api_key=self.config.api_key,
             base_url=self.config.base_url,
@@ -598,28 +763,49 @@ class MCRunner:
             "temperature": self.config.temperature,
             "timeout": self.config.request_timeout,
         }
+        request_samples = int(
+            item.get("_llmeval_remaining_samples", self.config.n_samples)
+        )
+        if request_samples > 1:
+            call_args["n"] = request_samples
         # tool_choice: only send when explicitly configured
         if is_explicit_tool_choice(self.config.tool_choice):
             call_args["tool_choice"] = self.config.tool_choice
 
-        def do_request() -> str:
+        def do_request() -> list[str]:
             resp = client.chat.completions.create(**call_args)
             # Reasoning models may return content=None (thinking exhausted
-            # max_tokens); normalize to "" — the empty result is a failure
-            return resp.choices[0].message.content or ""
+            # max_tokens); discard empty choices so failed samples are not
+            # written as completed generations.
+            raw_choices = getattr(resp, "choices", []) or []
+            if not isinstance(raw_choices, (list, tuple)):
+                try:
+                    raw_choices = [raw_choices[0]]
+                except (IndexError, TypeError):
+                    raw_choices = []
+            return [
+                choice.message.content
+                for choice in raw_choices
+                if choice.message.content
+            ]
 
         try:
-            gen_text = call_with_retry(do_request, self.config.max_retries)
+            generations = call_with_retry(do_request, self.config.max_retries)
         except ClientError as e:
             raise RuntimeError(f"Generate produced no usable text: {e}") from e
-        if not gen_text:
+        if not generations:
             # Context-length rejection (None) or null/empty content ("")
             raise RuntimeError("Generate produced no usable text (empty response)")
+
+        sample_start = int(item.get("_llmeval_sample_start", 0))
+        sample_indices = list(range(sample_start, sample_start + len(generations)))
 
         return {
             self.config.input_key: prompt,
             self.config.label_key: gold,
-            self.config.response_key: [gen_text],
+            self.config.response_key: generations,
+            **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
+            "_llmeval_sample_indices": sample_indices,
         }
 
     # ------------------------------------------------------------------

@@ -369,6 +369,7 @@ def check_correctness(
     check_program: str,
     timeout: float,
     task_id: str = "",
+    allow_unsafe_code: bool = False,
 ) -> dict[str, Any]:
     """Execute *check_program* in a child process with a double safety net.
 
@@ -381,6 +382,10 @@ def check_correctness(
     IPC uses a temporary JSON file so no complex object pickling (queues,
     pipes, managers) is needed across the process boundary.
 
+    ``allow_unsafe_code`` is an explicit safety boundary.  The lower-level
+    :func:`unsafe_execute` helper remains available for trusted internal tests,
+    but production callers should use this function with an isolated runtime.
+
     The multiprocessing start method is configurable via the environment
     variable ``LLMEVAL_MP_METHOD`` (default ``"fork"`` — library-friendly,
     no ``if __name__ == "__main__"`` guard required in the caller).  Set to
@@ -391,6 +396,9 @@ def check_correctness(
     dict[str, Any]
         Keys: ``task_id``, ``passed`` (bool), ``result`` (str), ``stderr`` (str).
     """
+    if not allow_unsafe_code:
+        return _fail(task_id, "unsafe execution disabled")
+
     # -- resolve multiprocessing context ----------------------------------------
     _mp_method = os.environ.get("LLMEVAL_MP_METHOD", "fork")
     try:

@@ -14,11 +14,14 @@ import pytest
 
 from llmeval.inference.common import (
     count_completed_samples,
+    count_completed_samples_by_id,
+    count_completed_samples_by_identity,
     expand_data_with_resume,
     expand_group_for_sampling,
     is_explicit_tool_choice,
     load_jsonl,
     prepare_data_with_resume,
+    require_document_id,
     sample_count_for_item,
     save_failed_items,
 )
@@ -100,6 +103,19 @@ class TestCountCompletedSamples:
         assert counts["q1"] == 1
         assert counts["q2"] == 1  # fell back to prompt/gen
 
+    def test_legacy_only_ignores_stable_id_records(self, tmp_path: Path) -> None:
+        output = tmp_path / "out.jsonl"
+        output.write_text(
+            json.dumps({"prompt": "stable", "gen": ["a"], "doc_id": "d"})
+            + "\n"
+            + json.dumps({"prompt": "legacy", "gen": ["b"]})
+            + "\n"
+        )
+
+        assert count_completed_samples(output, "prompt", "gen", legacy_only=True) == {
+            "legacy": 1
+        }
+
 
 class TestExpandDataWithResume:
     def test_expands_to_n_samples(self) -> None:
@@ -127,6 +143,31 @@ class TestExpandDataWithResume:
         assert expanded[1]["gen"] == ["existing"]
         assert raw[0]["gen"] == ["existing"]
 
+    def test_stable_ids_are_attached_and_resume_by_id(self) -> None:
+        raw = [{"doc_id": "q1", "prompt": "same"}]
+        expanded = expand_data_with_resume(
+            raw, {("q1", "same"): 1}, "prompt", 2, stable_ids=True
+        )
+        assert len(expanded) == 1
+        assert expanded[0]["doc_id"] == "q1"
+        assert expanded[0]["_llmeval_sample_index"] == 1
+
+    def test_stable_resume_falls_back_to_legacy_prompt_count(self) -> None:
+        expanded = expand_data_with_resume(
+            [{"doc_id": "prepared:0", "prompt": "legacy"}],
+            {"legacy": 1},
+            "prompt",
+            2,
+            stable_ids=True,
+        )
+
+        assert len(expanded) == 1
+        assert expanded[0]["_llmeval_sample_index"] == 1
+
+    def test_missing_document_id_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="missing required 'doc_id'"):
+            require_document_id({"prompt": "q"}, 0)
+
 
 class TestPrepareDataWithResume:
     def test_sets_remaining_sample_count(self) -> None:
@@ -147,6 +188,13 @@ class TestPrepareDataWithResume:
         with pytest.raises(ValueError, match="n_samples must be positive"):
             prepare_data_with_resume([{"prompt": "q"}], {}, "prompt", 0)
 
+    def test_stable_ids_are_written_to_prepared_items(self) -> None:
+        prepared = prepare_data_with_resume(
+            [{"doc_id": "q1", "prompt": "q"}], {}, "prompt", 2, stable_ids=True
+        )
+        assert prepared[0]["doc_id"] == "q1"
+        assert prepared[0]["_llmeval_sample_start"] == 0
+
 
 class TestSampleCountHelpers:
     def test_sample_count_for_item_defaults_to_one(self) -> None:
@@ -156,11 +204,65 @@ class TestSampleCountHelpers:
         assert sample_count_for_item({"n_samples": 4}) == 4
 
     def test_expand_group_for_sampling_repeats_each_item(self) -> None:
-        items = [{"prompt": "q", "n_samples": 2}]
+        items = [
+            {
+                "prompt": "q",
+                "n_samples": 2,
+                "doc_id": "doc:q",
+                "_llmeval_sample_start": 3,
+            }
+        ]
         expanded = expand_group_for_sampling(items)
         assert len(expanded) == 2
-        assert expanded[0] is items[0]
-        assert expanded[1] is items[0]
+        assert expanded[0] is not items[0]
+        assert [item["_llmeval_sample_index"] for item in expanded] == [3, 4]
+
+
+class TestStableResumeCounts:
+    def test_counts_generation_list_by_document_id(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text(
+            json.dumps(
+                {
+                    "doc_id": "doc:q1",
+                    "gen": ["a", "b"],
+                }
+            )
+            + "\n"
+        )
+        assert count_completed_samples_by_id(output, "gen") == {"doc:q1": 2}
+
+    def test_loglikelihood_choices_count_as_one_sample(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text(
+            json.dumps(
+                {
+                    "doc_id": "doc:q1",
+                    "logprobs": [-3.0, -1.0, -2.0, -4.0],
+                }
+            )
+            + "\n"
+        )
+
+        assert count_completed_samples_by_id(output, "gen") == {"doc:q1": 1}
+
+    def test_identity_count_detects_prompt_changes(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text(
+            json.dumps({"doc_id": "q1", "prompt": "old", "gen": ["a"]}) + "\n"
+        )
+
+        counts = count_completed_samples_by_identity(output, "prompt", "gen")
+        remaining = expand_data_with_resume(
+            [{"doc_id": "q1", "prompt": "new"}],
+            counts,
+            "prompt",
+            1,
+            stable_ids=True,
+        )
+
+        assert counts == {("q1", "old"): 1}
+        assert len(remaining) == 1
 
 
 class TestToolChoiceHelper:

@@ -88,6 +88,22 @@ class TestVLLMEngineArguments:
         with pytest.raises(ValueError, match="GPU memory"):
             VLLMEngineArguments(gpu_memory_utilization=0.0)
 
+
+class TestMCAndEvaluationP0Config:
+    def test_mc_generation_defaults_to_one_sample_and_auto_scoring(self) -> None:
+        config = MCInferConfig()
+        assert config.n_samples == 1
+        assert config.loglikelihood_mode == "auto"
+
+    def test_invalid_mc_aggregation_raises(self, tmp_path: Path) -> None:
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text("{}\n")
+        with pytest.raises(ValueError, match="mc_aggregation"):
+            EvalTaskArguments(
+                input_path=str(input_path),
+                mc_aggregation="invalid",
+            )
+
     def test_rope_scaling_parsed(self) -> None:
         args = VLLMEngineArguments(rope_scaling='{"type": "dynamic", "factor": 2.0}')
         assert args.rope_scaling_dict == {"type": "dynamic", "factor": 2.0}

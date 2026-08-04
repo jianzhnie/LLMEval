@@ -30,16 +30,50 @@ from llmeval.utils.log import init_logger
 
 __all__ = [
     "count_completed_samples",
+    "count_completed_samples_by_id",
+    "count_completed_samples_by_identity",
     "expand_data_with_resume",
     "expand_group_for_sampling",
     "is_explicit_tool_choice",
     "load_jsonl",
     "prepare_data_with_resume",
+    "require_document_id",
     "sample_count_for_item",
     "save_failed_items",
+    "validate_document_ids",
 ]
 
 logger = init_logger("inference_common")
+
+
+def require_document_id(item: dict[str, Any], index: int | None = None) -> str:
+    """Return the dataset-provided ``doc_id`` or raise a preparation error.
+
+    Document identity is assigned once by the benchmark preparation scripts
+    and persisted in JSONL. Inference must never synthesize a replacement ID,
+    because doing so makes resume state depend on input ordering or prompts.
+    """
+    document_id = item.get("doc_id")
+    if document_id is None or not str(document_id).strip():
+        location = f" at index {index}" if index is not None else ""
+        raise ValueError(
+            f"Input record{location} is missing required 'doc_id'. "
+            "Regenerate the evaluation dataset with the data preparation script."
+        )
+    return str(document_id)
+
+
+def validate_document_ids(items: list[dict[str, Any]]) -> None:
+    """Validate that every prepared input record has a unique ``doc_id``."""
+    first_indices: dict[str, int] = {}
+    for index, item in enumerate(items):
+        document_id = require_document_id(item, index)
+        previous = first_indices.setdefault(document_id, index)
+        if previous != index:
+            raise ValueError(
+                f"Duplicate doc_id {document_id!r} at indices {previous} and {index}. "
+                "Each prepared question must have a unique ID."
+            )
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -82,6 +116,8 @@ def count_completed_samples(
     output_file: str | Path,
     input_key: str,
     response_key: str,
+    *,
+    legacy_only: bool = False,
 ) -> dict[str, int]:
     """Count completed samples per prompt for resume.
 
@@ -94,6 +130,8 @@ def count_completed_samples(
         output_file: Output JSONL from a previous (interrupted) run.
         input_key: Prompt field name (``"prompt"`` used as fallback).
         response_key: Generation-list field name (``"gen"`` used as fallback).
+        legacy_only: Ignore records carrying ``doc_id``. This is used
+            when stable-ID and legacy records coexist in one output file.
 
     Returns:
         Mapping of prompt text to its completed-sample count.
@@ -115,6 +153,8 @@ def count_completed_samples(
                             type(item).__name__,
                         )
                         continue
+                    if legacy_only and item.get("doc_id"):
+                        continue
                     prompt: Any = item.get(input_key) or item.get("prompt")
                     gen_response = item.get(response_key) or item.get("gen")
                     # Guard against a null / non-list gen field (e.g. a
@@ -132,11 +172,123 @@ def count_completed_samples(
     return completed_counts
 
 
+def count_completed_samples_by_id(
+    output_file: str | Path,
+    response_key: str,
+    id_key: str = "doc_id",
+) -> dict[str, int]:
+    """Count completed generations by stable document ID.
+
+    New output records carry ``doc_id``. A record with a generation
+    list contributes its list length; a verifier-style record with a scalar
+    response contributes one.  Records without the ID are intentionally
+    ignored so callers can explicitly choose a legacy prompt-based fallback.
+    """
+    completed_counts: dict[str, int] = collections.defaultdict(int)
+    output_path = Path(output_file)
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        return completed_counts
+
+    try:
+        with open(output_path, encoding="utf-8") as handle:
+            for line_num, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    logger.warning("Invalid JSON on output line %d: %s", line_num, exc)
+                    continue
+                if not isinstance(item, dict):
+                    logger.warning(
+                        "Skipping non-object JSON on output line %d: %s",
+                        line_num,
+                        type(item).__name__,
+                    )
+                    continue
+
+                document_id = item.get(id_key)
+                if not document_id:
+                    continue
+                response = item.get(response_key) or item.get("gen")
+                if isinstance(response, list):
+                    count = len(response)
+                elif response is not None:
+                    count = 1
+                elif item.get("logprobs") is not None or item.get("Verifier_judgment"):
+                    # One loglikelihood/verifier record represents one sample;
+                    # the logprobs list contains choices, not generations.
+                    count = 1
+                else:
+                    count = 0
+                if count:
+                    completed_counts[str(document_id)] += count
+    except OSError as exc:
+        logger.error("Error reading stable resume state from %s: %s", output_file, exc)
+
+    return completed_counts
+
+
+def count_completed_samples_by_identity(
+    output_file: str | Path,
+    input_key: str,
+    response_key: str,
+) -> dict[tuple[str, str], int]:
+    """Count completions by prepared ``doc_id`` and the rendered prompt.
+
+    ``doc_id`` remains the persistent question identifier. Including the
+    prompt in resume state prevents stale generations from being reused after
+    a prompt template or few-shot prefix changes.
+    """
+    counts: dict[tuple[str, str], int] = collections.defaultdict(int)
+    output_path = Path(output_file)
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        return counts
+
+    try:
+        with open(output_path, encoding="utf-8") as handle:
+            for line_num, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    logger.warning("Invalid JSON on output line %d: %s", line_num, exc)
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                document_id = item.get("doc_id")
+                prompt = item.get(input_key) or item.get("prompt")
+                if not document_id or prompt is None:
+                    continue
+
+                response = item.get(response_key) or item.get("gen")
+                if isinstance(response, list):
+                    count = len(response)
+                elif (
+                    response is not None
+                    or item.get("logprobs") is not None
+                    or item.get("Verifier_judgment")
+                ):
+                    count = 1
+                else:
+                    count = 0
+                if count:
+                    counts[(str(document_id), str(prompt))] += count
+    except OSError as exc:
+        logger.error(
+            "Error reading resume identity state from %s: %s", output_file, exc
+        )
+
+    return counts
+
+
 def expand_data_with_resume(
     raw_data: list[dict[str, Any]],
-    completed_counts: dict[str, int],
+    completed_counts: dict[object, int],
     input_key: str,
     n_samples: int,
+    stable_ids: bool = False,
 ) -> list[dict[str, Any]]:
     """Expand raw items into per-sample copies, minus already-completed ones.
 
@@ -148,6 +300,7 @@ def expand_data_with_resume(
         completed_counts: Completed-sample count per prompt (resume state).
         input_key: Prompt field name (``"prompt"`` used as fallback).
         n_samples: Target number of samples per prompt.
+        stable_ids: Require dataset-provided ``doc_id`` and use it as the resume key.
 
     Returns:
         Expanded dataset holding only the samples still to process.
@@ -155,7 +308,10 @@ def expand_data_with_resume(
     expanded_data: list[dict[str, Any]] = []
     skipped_items = 0
 
-    for item in raw_data:
+    if stable_ids:
+        validate_document_ids(raw_data)
+
+    for index, item in enumerate(raw_data):
         if not isinstance(item, dict):
             logger.warning("Skipping non-dict input item: %s", type(item).__name__)
             skipped_items += 1
@@ -171,11 +327,18 @@ def expand_data_with_resume(
             skipped_items += 1
             continue
 
-        completed = completed_counts.get(prompt, 0)
-        remaining = max(0, n_samples - completed)
-
-        for _ in range(remaining):
-            expanded_data.append(copy.deepcopy(item))
+        document_id = require_document_id(item, index) if stable_ids else prompt
+        resume_key: object = (document_id, prompt) if stable_ids else document_id
+        completed = completed_counts.get(resume_key, 0)
+        if stable_ids and completed == 0:
+            # A prompt-keyed entry is only present when the caller detected
+            # legacy output.  Stable IDs remain the primary identity.
+            completed = completed_counts.get(prompt, 0)
+        for sample_index in range(completed, n_samples):
+            expanded_item = copy.deepcopy(item)
+            if stable_ids:
+                expanded_item["_llmeval_sample_index"] = sample_index
+            expanded_data.append(expanded_item)
 
     if skipped_items > 0:
         logger.warning(f"Skipped {skipped_items} items due to missing or empty prompt")
@@ -185,10 +348,11 @@ def expand_data_with_resume(
 
 def prepare_data_with_resume(
     raw_data: list[dict[str, Any]],
-    completed_counts: dict[str, int],
+    completed_counts: dict[object, int],
     input_key: str,
     n_samples: int,
     sample_count_key: str = "n_samples",
+    stable_ids: bool = False,
 ) -> list[dict[str, Any]]:
     """Prepare one prompt record per item with a remaining sample count.
 
@@ -203,6 +367,7 @@ def prepare_data_with_resume(
         n_samples: Target number of samples per prompt.
         sample_count_key: Output field name used to store the remaining sample
             count for the prompt.
+        stable_ids: Require dataset-provided ``doc_id`` and use it as the resume key.
 
     Returns:
         Prepared dataset holding only the prompts still to process.
@@ -218,7 +383,10 @@ def prepare_data_with_resume(
     prepared_data: list[dict[str, Any]] = []
     skipped_items = 0
 
-    for item in raw_data:
+    if stable_ids:
+        validate_document_ids(raw_data)
+
+    for index, item in enumerate(raw_data):
         if not isinstance(item, dict):
             logger.warning(f"Skipping non-dict input item: {type(item)}")
             skipped_items += 1
@@ -235,13 +403,19 @@ def prepare_data_with_resume(
             skipped_items += 1
             continue
 
-        completed = completed_counts.get(prompt, 0)
+        document_id = require_document_id(item, index) if stable_ids else prompt
+        resume_key: object = (document_id, prompt) if stable_ids else document_id
+        completed = completed_counts.get(resume_key, 0)
+        if stable_ids and completed == 0:
+            completed = completed_counts.get(prompt, 0)
         remaining = max(0, n_samples - completed)
         if remaining <= 0:
             continue
 
         prepared_item = copy.deepcopy(item)
         prepared_item[sample_count_key] = remaining
+        if stable_ids:
+            prepared_item["_llmeval_sample_start"] = completed
         prepared_data.append(prepared_item)
 
     if skipped_items > 0:
@@ -269,7 +443,13 @@ def expand_group_for_sampling(
 
     sample_items: list[dict[str, Any]] = []
     for item in items:
-        sample_items.extend([item] * sample_count_for_item(item, sample_count_key))
+        sample_count = sample_count_for_item(item, sample_count_key)
+        sample_start = int(item.get("_llmeval_sample_start", 0))
+        for offset in range(sample_count):
+            sample_item = item.copy()
+            if "doc_id" in item:
+                sample_item["_llmeval_sample_index"] = sample_start + offset
+            sample_items.append(sample_item)
     return sample_items
 
 

@@ -218,6 +218,36 @@ class TestScoreGenerate:
             Path(cache).unlink(missing_ok=True)
             Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
 
+    @pytest.mark.parametrize(
+        ("aggregation", "expected"),
+        [("first", 0.0), ("majority_vote", 1.0), ("any_correct", 1.0)],
+    )
+    def test_multiple_generation_aggregation(
+        self, aggregation: str, expected: float, tmp_path: Path
+    ) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate
+
+        cache = tmp_path / f"{aggregation}.jsonl"
+        items = [{"answer": "B", "gen": ["Answer: A", "Answer: B", "Answer: B"]}]
+        assert (
+            score_generate(items, "answer", "gen", cache, aggregation=aggregation)
+            == expected
+        )
+
+    def test_per_sample_aggregation_uses_sample_denominator(
+        self, tmp_path: Path
+    ) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate
+
+        cache = tmp_path / "per_sample.jsonl"
+        items = [{"answer": "B", "gen": ["Answer: A", "Answer: B"]}]
+        assert (
+            score_generate(items, "answer", "gen", cache, aggregation="per_sample")
+            == 0.5
+        )
+        summary = json.loads(cache.with_suffix(".summary.json").read_text())
+        assert summary["total"] == 2
+
 
 # ===========================================================================
 # mc_infer tests
@@ -480,6 +510,43 @@ class TestMCLoglikelihoodClient:
             float("-inf"),
         ]
 
+    def test_complete_continuation_uses_choice_offsets(self) -> None:
+        client = _make_ll_client()
+        response = MagicMock()
+        response.choices = []
+        for values in ([-1.0, -2.0], [-0.5]):
+            choice = MagicMock()
+            choice.logprobs.text_offset = [0, 2, 3]
+            choice.logprobs.token_logprobs = [None, *values]
+            response.choices.append(choice)
+        client.client.completions.create.return_value = response
+
+        result = client.get_choices_continuation_logprobs("Q:", ["AB", "C"])
+
+        assert result == [[-1.0, -2.0], [-0.5]]
+        kwargs = client.client.completions.create.call_args.kwargs
+        assert kwargs["prompt"] == ["Q:AB", "Q:C"]
+        assert kwargs["echo"] is True
+
+
+class TestContinuationScoring:
+    def test_acc_norm_uses_continuation_token_counts(self, tmp_path: Path) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+
+        items = [
+            {
+                "gold": 1,
+                "logprobs": [-1.0, -2.0],
+                "choice_logprobs": [[-1.0], [-0.5, -0.5, -0.5, -0.5]],
+                "choice_token_count": [1, 4],
+                "choice_byte_count": [1, 4],
+            }
+        ]
+        cache = tmp_path / "continuation.jsonl"
+        assert score_loglikelihood(items, cache) == 0.0
+        summary = json.loads(cache.with_suffix(".summary.json").read_text())
+        assert summary["acc_norm"] == 1.0
+
 
 class TestProcessLoglikelihoodItem:
     def test_all_neg_inf_raises(self, tmp_path: Path) -> None:
@@ -545,8 +612,18 @@ class TestMCRunnerEndToEnd:
 
     def _write_input(self, path: Path) -> None:
         items = [
-            {"prompt": "Q1?\nA. x\nB. y\nAnswer:", "choices": ["x", "y"], "gold": 1},
-            {"prompt": "Q2?\nA. p\nB. q\nAnswer:", "choices": ["p", "q"], "gold": 0},
+            {
+                "doc_id": "test:0",
+                "prompt": "Q1?\nA. x\nB. y\nAnswer:",
+                "choices": ["x", "y"],
+                "gold": 1,
+            },
+            {
+                "doc_id": "test:1",
+                "prompt": "Q2?\nA. p\nB. q\nAnswer:",
+                "choices": ["p", "q"],
+                "gold": 0,
+            },
         ]
         with open(path, "w", encoding="utf-8") as f:
             for it in items:

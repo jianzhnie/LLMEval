@@ -12,6 +12,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from datasets import get_dataset_config_names, load_dataset
 
@@ -54,9 +55,11 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
     configs = info["configs"]
     output_file = output_dir / f"{name}.jsonl"
 
-    if output_file.exists():
+    if output_file.exists() and _has_valid_doc_ids(output_file):
         print(f"[SKIP] {name}: already exists")
         return str(output_file)
+    if output_file.exists():
+        print(f"[REBUILD] {name}: existing file has no valid unique doc_id values")
 
     all_rows = []
     if configs == "all":
@@ -69,15 +72,17 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
         for cfg in subject_configs:
             try:
                 ds = load_dataset(hf_path, cfg, split=hf_split)
-                for ex in ds:
-                    all_rows.append(_format_mc_row(name, ex))
+                for index, ex in enumerate(ds):
+                    all_rows.append(
+                        _format_mc_row(name, ex, source_id=f"{cfg}:{index}")
+                    )
             except Exception as e:
                 print(f"  [WARN] {cfg}: {e}")
     else:
         print(f"[LOAD] {name}: {hf_path}")
         ds = load_dataset(hf_path, split=hf_split)
-        for ex in ds:
-            all_rows.append(_format_mc_row(name, ex))
+        for index, ex in enumerate(ds):
+            all_rows.append(_format_mc_row(name, ex, source_id=f"{hf_split}:{index}"))
 
     with open(output_file, "w", encoding="utf-8") as f:
         for row in all_rows:
@@ -86,10 +91,13 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
     return str(output_file)
 
 
-def _format_mc_row(name: str, example: dict) -> dict:
+def _format_mc_row(
+    name: str, example: dict[str, Any], source_id: str
+) -> dict[str, Any]:
     """Format MC example into {prompt, answer, choices, gold}, aligned with lm-eval.
 
     Returns fields:
+        doc_id:  persistent benchmark-scoped question identifier
         prompt:  question text only (for loglikelihood mode)
         answer:  correct answer letter (A/B/C/...)
         choices: list of choice texts (for loglikelihood mode)
@@ -142,6 +150,7 @@ def _format_mc_row(name: str, example: dict) -> dict:
 
     prompt = template.format(**fmt)
     return {
+        "doc_id": f"{name}:{source_id}",
         "prompt": prompt,
         "answer": answer,
         "choices": letters[
@@ -149,6 +158,24 @@ def _format_mc_row(name: str, example: dict) -> dict:
         ],  # answer letters (A/B/C/...), loglikelihood targets
         "gold": answer_idx,
     }
+
+
+def _has_valid_doc_ids(path: Path) -> bool:
+    """Return whether an existing JSONL file has a unique ID on every row."""
+    ids: set[str] = set()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                document_id = item.get("doc_id") if isinstance(item, dict) else None
+                if not document_id or str(document_id) in ids:
+                    return False
+                ids.add(str(document_id))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(ids)
 
 
 def main() -> None:

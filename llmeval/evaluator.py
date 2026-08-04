@@ -158,6 +158,8 @@ def evaluate_task(
     timeout: int = 20,
     exec_timeout: float = 3.0,
     seed: int | None = None,
+    mc_aggregation: str = "first",
+    allow_unsafe_code: bool = False,
 ) -> float | None:
     """
     Evaluate model outputs against ground truth data for a specific task.
@@ -179,6 +181,8 @@ def evaluate_task(
         timeout: Maximum time in seconds to wait for each evaluation (default: 20)
         exec_timeout: Per-item code execution timeout in seconds (code tasks only)
         seed: Random seed recorded in scorer provenance summaries
+        mc_aggregation: Generate-mode MC aggregation strategy.
+        allow_unsafe_code: Explicit opt-in required for code execution.
 
     Returns:
         Optional[float]: Evaluation accuracy score if successful, None if evaluation fails
@@ -244,6 +248,7 @@ def evaluate_task(
                     timeout=timeout,
                     task_name=task_name,
                     seed=seed,
+                    aggregation=mc_aggregation,
                 )
                 logger.info(
                     f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}"
@@ -264,6 +269,7 @@ def evaluate_task(
                 exec_timeout=exec_timeout,
                 task_name=task_name,
                 seed=seed,
+                allow_unsafe_code=allow_unsafe_code,
             )
             logger.info(f"✅ Task: {task_name}, Pass@1: {accuracy:.2%}")
             return accuracy
@@ -363,12 +369,6 @@ def main() -> int:
                 logger.error(f"❌ Error checking contamination: {e!s}", exc_info=True)
                 return 1
 
-        # Strip <think> tags from model responses before scoring.
-        # Models using deepseek_r1/openr1 system prompts output
-        # <think>...</think><answer>...</answer> format, and math_verify
-        # may fail to extract answers from raw think-tagged text.
-        preprocess_answers(processed_data, args.response_key)
-
         # Run evaluation and get results
         accuracy = evaluate_task(
             processed_data,
@@ -380,6 +380,8 @@ def main() -> int:
             args.timeout,
             args.exec_timeout,
             args.seed,
+            args.mc_aggregation,
+            args.allow_unsafe_code,
         )
 
         if accuracy is not None:

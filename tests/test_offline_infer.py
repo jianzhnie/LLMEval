@@ -108,7 +108,10 @@ class TestOfflineInferenceRunner:
     def test_load_data_applies_resume(self, tmp_path: Path) -> None:
         args = _args(tmp_path, n_samples=2)
         Path(args.input_file).write_text(
-            json.dumps({"prompt": "q", "answer": "a"}, ensure_ascii=False) + "\n",
+            json.dumps(
+                {"doc_id": "test:0", "prompt": "q", "answer": "a"}, ensure_ascii=False
+            )
+            + "\n",
             encoding="utf-8",
         )
         Path(args.output_file).write_text(

@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,6 +69,8 @@ __all__ = [
 ]
 
 logger = init_logger("mc_score")
+
+_MC_AGGREGATIONS = frozenset({"first", "majority_vote", "any_correct", "per_sample"})
 
 MC_GENERATION_PIPELINE = build_text_pipeline(strip_reasoning_wrappers)
 
@@ -196,10 +199,14 @@ def score_generate(
     timeout: int = 60,
     task_name: str | None = None,
     seed: int | None = None,
+    aggregation: str = "first",
 ) -> float:
     """Score generation-based MC results by extracting the answer letter.
 
-    Only the **first** sample of each generation list is evaluated.
+    The ``aggregation`` argument controls how multiple generations are
+    evaluated.  ``first`` preserves the historical behavior; ``majority_vote``
+    and ``any_correct`` aggregate at question level, while ``per_sample``
+    reports accuracy over every generated sample.
 
     Parameters
     ----------
@@ -216,12 +223,20 @@ def score_generate(
         Maximum process-pool workers (capped by dataset size and CPU count).
     timeout:
         Per-item scoring timeout in seconds.
+    aggregation:
+        Multiple-generation aggregation strategy.
 
     Returns
     -------
     float
         Accuracy (also reported as *acc_norm* / *exact_match* in the summary).
     """
+    if aggregation not in _MC_AGGREGATIONS:
+        raise ValueError(
+            f"Unsupported MC aggregation {aggregation!r}; "
+            f"expected one of {sorted(_MC_AGGREGATIONS)}"
+        )
+
     records = score_items(
         eval_dataset,
         mode="generate",
@@ -229,6 +244,7 @@ def score_generate(
         response_key=response_key,
         max_workers=max_workers,
         timeout=timeout,
+        aggregation=aggregation,
     )
     metrics = build_result(
         records,
@@ -240,6 +256,7 @@ def score_generate(
             seed=seed,
         ),
     )
+    metrics.provenance["mc_aggregation"] = aggregation
     write_cache(metrics, cache_path)
     return metrics.acc
 
@@ -256,6 +273,7 @@ def score_items(
     response_key: str,
     max_workers: int,
     timeout: int,
+    aggregation: str = "first",
 ) -> list[dict[str, Any]]:
     """Score every item, preserving input order.
 
@@ -272,7 +290,7 @@ def score_items(
     if max_workers <= 1 or total == 1:
         # Serial path — avoids pool startup cost for tiny workloads.
         return [
-            process_item((i, item, mode, label_key, response_key))[1]
+            process_item((i, item, mode, label_key, response_key, aggregation))[1]
             for i, item in enumerate(eval_dataset)
         ]
 
@@ -286,7 +304,7 @@ def score_items(
         ProcessPool(max_workers=optimal_workers) as pool,
     ):
         iterable = [
-            (i, item, mode, label_key, response_key)
+            (i, item, mode, label_key, response_key, aggregation)
             for i, item in enumerate(eval_dataset)
         ]
         future = pool.map(process_item, iterable, timeout=timeout)
@@ -328,6 +346,7 @@ def score_items(
                     "correct": False,
                     "correct_norm": False,
                     "correct_bytes": False,
+                    "aggregation": aggregation,
                     **build_sample_provenance(
                         item, label_key="gold", response_key="logprobs"
                     ),
@@ -339,6 +358,7 @@ def score_items(
                     "correct": False,
                     "correct_norm": False,
                     "correct_bytes": False,
+                    "aggregation": aggregation,
                     **build_sample_provenance(
                         item, label_key=label_key, response_key=response_key
                     ),
@@ -348,18 +368,25 @@ def score_items(
 
 
 def process_item(
-    args: tuple[int, dict[str, Any], Literal["loglikelihood", "generate"], str, str],
+    args: tuple[
+        int,
+        dict[str, Any],
+        Literal["loglikelihood", "generate"],
+        str,
+        str,
+        str,
+    ],
 ) -> tuple[int, dict[str, Any]]:
     """Pool-worker entry point — **must** be module-level for pickling.
 
-    Takes an ``(index, item, mode, label_key, response_key)`` tuple and returns
+    Takes an ``(index, item, mode, label_key, response_key, aggregation)`` tuple and returns
     ``(original_index, scored_record)`` so results can be re-ordered after
     parallel execution.
     """
-    idx, item, mode, label_key, response_key = args
+    idx, item, mode, label_key, response_key, aggregation = args
     if mode == "loglikelihood":
         return idx, score_loglikelihood_item(item)
-    return idx, score_generate_item(item, label_key, response_key)
+    return idx, score_generate_item(item, label_key, response_key, aggregation)
 
 
 def build_result(
@@ -370,10 +397,25 @@ def build_result(
     ``correct_norm`` is only present in loglikelihood records; generate-mode
     records fall back to ``correct`` so that ``acc_norm == acc``.
     """
-    total = len(records)
-    n_correct = sum(1 for r in records if r["correct"])
-    n_correct_norm = sum(1 for r in records if r.get("correct_norm", r["correct"]))
-    n_correct_bytes = sum(1 for r in records if r.get("correct_bytes", r["correct"]))
+    per_sample = bool(records) and all(
+        r.get("aggregation") == "per_sample" for r in records
+    )
+    if per_sample:
+        total = sum(int(r.get("sample_total", 0)) for r in records)
+        n_correct = sum(int(r.get("sample_correct_count", 0)) for r in records)
+        n_correct_norm = sum(
+            int(r.get("sample_correct_norm_count", 0)) for r in records
+        )
+        n_correct_bytes = sum(
+            int(r.get("sample_correct_bytes_count", 0)) for r in records
+        )
+    else:
+        total = len(records)
+        n_correct = sum(1 for r in records if r["correct"])
+        n_correct_norm = sum(1 for r in records if r.get("correct_norm", r["correct"]))
+        n_correct_bytes = sum(
+            1 for r in records if r.get("correct_bytes", r["correct"])
+        )
 
     safe_total = max(total, 1)
     return MCScoreResult(
@@ -413,6 +455,19 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         item, label_key="gold", response_key="logprobs"
     )
     logprobs: list[float] = item.get("logprobs", [])
+    choice_logprobs = item.get("choice_logprobs")
+    if isinstance(choice_logprobs, list) and len(choice_logprobs) == len(logprobs):
+        # Complete continuation scores are preferred when inference recorded
+        # them. Empty per-choice lists remain -inf and cannot become a false
+        # positive through argmax.
+        try:
+            logprobs = [
+                sum(float(score) for score in scores) if scores else float("-inf")
+                for scores in choice_logprobs
+            ]
+        except (TypeError, ValueError):
+            logger.warning("Invalid choice_logprobs; using aggregate logprobs")
+            choice_logprobs = None
     choices = (
         item.get("choice_tokens") or item.get("choices") or item.get("choice_texts", [])
     )
@@ -433,12 +488,36 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     is_correct = pred == gold
 
     # acc_norm — length-normalised logprobs (lm-eval convention).
-    if choices and len(choices) == len(logprobs):
+    token_counts = item.get("choice_token_count")
+    byte_counts = item.get("choice_byte_count")
+    token_count_values = token_counts if isinstance(token_counts, list) else []
+    byte_count_values = byte_counts if isinstance(byte_counts, list) else []
+    has_token_counts = len(token_count_values) == len(logprobs) and all(
+        isinstance(count, int | float) and count > 0 for count in token_count_values
+    )
+    has_byte_counts = len(byte_count_values) == len(logprobs) and all(
+        isinstance(count, int | float) and count > 0 for count in byte_count_values
+    )
+    if has_token_counts and has_byte_counts:
+        normed = [
+            lp / float(count)
+            for lp, count in zip(logprobs, token_count_values, strict=True)
+        ]
+        is_correct_norm = max(range(len(normed)), key=normed.__getitem__) == gold
+        normed_bytes = [
+            lp / float(count)
+            for lp, count in zip(logprobs, byte_count_values, strict=True)
+        ]
+        is_correct_bytes = (
+            max(range(len(normed_bytes)), key=normed_bytes.__getitem__) == gold
+        )
+    elif choices and len(choices) == len(logprobs):
+        # Legacy first-token records do not carry continuation lengths.
         choice_lens = [max(len(str(c)), 1) for c in choices]
-        normed = [lp / cl for lp, cl in zip(logprobs, choice_lens, strict=False)]
+        normed = [lp / cl for lp, cl in zip(logprobs, choice_lens, strict=True)]
         is_correct_norm = max(range(len(normed)), key=normed.__getitem__) == gold
         choice_bytes = [max(len(str(c).encode("utf-8")), 1) for c in choices]
-        normed_bytes = [lp / cl for lp, cl in zip(logprobs, choice_bytes, strict=False)]
+        normed_bytes = [lp / cl for lp, cl in zip(logprobs, choice_bytes, strict=True)]
         is_correct_bytes = (
             max(range(len(normed_bytes)), key=normed_bytes.__getitem__) == gold
         )
@@ -460,6 +539,7 @@ def score_generate_item(
     item: dict[str, Any],
     label_key: str,
     response_key: str,
+    aggregation: str = "first",
 ) -> dict[str, Any]:
     """Score a single generate-mode item by extracting the answer letter.
 
@@ -467,21 +547,52 @@ def score_generate_item(
     always counted wrong (otherwise ``"" == ""`` would inflate accuracy);
     bare-string ``gen`` fields are tolerated (the schema expects a list).
     """
+    if aggregation not in _MC_AGGREGATIONS:
+        raise ValueError(f"Unsupported MC aggregation: {aggregation}")
+
     gold = str(item.get(label_key, "")).strip().upper()
     generations: Any = item.get(response_key, [])
 
     if isinstance(generations, str):
-        pred_text = generations
+        generation_texts = [generations]
+    elif isinstance(generations, list):
+        generation_texts = [str(generation) for generation in generations]
     else:
-        pred_text = str(generations[0]) if generations else ""
+        generation_texts = []
+
+    predictions = [
+        extract_answer(apply_text_pipeline(text, MC_GENERATION_PIPELINE))
+        for text in generation_texts
+    ]
+    sample_correct = [bool(gold) and prediction == gold for prediction in predictions]
+
+    if aggregation == "majority_vote":
+        non_empty = [prediction for prediction in predictions if prediction]
+        counts = Counter(non_empty)
+        if counts:
+            max_count = max(counts.values())
+            pred = next(
+                prediction
+                for prediction in non_empty
+                if counts[prediction] == max_count
+            )
+        else:
+            pred = ""
+        is_correct = bool(gold) and pred == gold
+    elif aggregation == "any_correct":
+        is_correct = any(sample_correct)
+        pred = (
+            gold
+            if is_correct
+            else next((prediction for prediction in predictions if prediction), "")
+        )
+    else:
+        pred = predictions[0] if predictions else ""
+        is_correct = bool(gold) and bool(pred) and pred == gold
 
     provenance = build_sample_provenance(
         item, label_key=label_key, response_key=response_key
     )
-    pred_text = apply_text_pipeline(pred_text, MC_GENERATION_PIPELINE)
-    pred = extract_answer(pred_text)
-    # Both must be non-empty for a match — prevents "" == "".
-    is_correct = bool(gold) and bool(pred) and pred == gold
 
     return {
         "gold": gold,
@@ -489,6 +600,13 @@ def score_generate_item(
         "correct": is_correct,
         "correct_norm": is_correct,
         "correct_bytes": is_correct,
+        "aggregation": aggregation,
+        "predictions": predictions,
+        "sample_correct": sample_correct,
+        "sample_total": len(predictions),
+        "sample_correct_count": sum(sample_correct),
+        "sample_correct_norm_count": sum(sample_correct),
+        "sample_correct_bytes_count": sum(sample_correct),
         **provenance,
     }
 

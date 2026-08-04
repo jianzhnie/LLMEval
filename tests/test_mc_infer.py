@@ -93,8 +93,18 @@ def _make_mc_runner(
 
 def _write_input(path: Path) -> None:
     items = [
-        {"prompt": "Q1?\nA. x\nB. y\nAnswer:", "choices": ["x", "y"], "gold": 1},
-        {"prompt": "Q2?\nA. p\nB. q\nAnswer:", "choices": ["p", "q"], "gold": 0},
+        {
+            "doc_id": "test:0",
+            "prompt": "Q1?\nA. x\nB. y\nAnswer:",
+            "choices": ["x", "y"],
+            "gold": 1,
+        },
+        {
+            "doc_id": "test:1",
+            "prompt": "Q2?\nA. p\nB. q\nAnswer:",
+            "choices": ["p", "q"],
+            "gold": 0,
+        },
     ]
     with open(path, "w", encoding="utf-8") as f:
         for item in items:
@@ -136,6 +146,20 @@ class TestMCLoglikelihoodClient:
             float("-inf"),
         ]
 
+    def test_continuation_returns_only_choice_token_scores(self) -> None:
+        client = _make_ll_client()
+        first = MagicMock()
+        first.logprobs.text_offset = [0, 6, 8]
+        first.logprobs.token_logprobs = [None, -0.2, -9.0]
+        second = MagicMock()
+        second.logprobs.text_offset = [0, 6, 8]
+        second.logprobs.token_logprobs = [None, -1.3, -9.0]
+        client.client.completions.create.return_value.choices = [first, second]
+
+        result = client.get_choices_continuation_logprobs("prompt", [" A", " B"])
+
+        assert result == [[-0.2], [-1.3]]
+
 
 class TestProcessLoglikelihoodItem:
     def test_all_neg_inf_raises(self, tmp_path: Path) -> None:
@@ -160,6 +184,21 @@ class TestProcessLoglikelihoodItem:
         assert result["pred"] == 1
         assert result["correct"] is True
         assert result["choice_tokens"] == ["A", "B"]
+
+    def test_auto_falls_back_when_any_continuation_is_incomplete(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.client = MagicMock()
+        runner.client.get_choices_continuation_logprobs.return_value = [[], [-0.1]]
+        runner.client.get_choices_logprobs.return_value = [-0.2, -1.0]
+
+        result = runner.process_loglikelihood_item(
+            {"prompt": "q", "choices": ["a", "b"], "gold": 0}
+        )
+
+        assert result["scoring_mode"] == "first_token"
+        assert result["logprobs"] == [-0.2, -1.0]
 
 
 class TestProcessGenerateItem:
@@ -191,6 +230,98 @@ class TestProcessGenerateItem:
 
         with pytest.raises(RuntimeError, match="no usable text"):
             runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
+
+    def test_multiple_samples_are_requested_and_preserved(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        runner.config.n_samples = 3
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content=text)) for text in ("a", "b", "c")
+        ]
+
+        result = runner.process_generate_item(
+            {"prompt": "q", "answer": "A"}, client, []
+        )
+
+        assert result["gen"] == ["a", "b", "c"]
+        assert result["_llmeval_sample_indices"] == [0, 1, 2]
+
+    def test_empty_middle_sample_is_compacted_for_resume(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        runner.config.n_samples = 3
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="a")),
+            MagicMock(message=MagicMock(content="")),
+            MagicMock(message=MagicMock(content="c")),
+        ]
+
+        result = runner.process_generate_item(
+            {"prompt": "q", "answer": "A", "_llmeval_sample_start": 0},
+            client,
+            [],
+        )
+
+        assert result["gen"] == ["a", "c"]
+        assert result["_llmeval_sample_indices"] == [0, 1]
+        assert client.chat.completions.create.call_args.kwargs["n"] == 3
+
+
+class TestMCStableResume:
+    def test_generate_resume_requests_only_missing_samples(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        runner.config.n_samples = 3
+        Path(runner.config.input_file).write_text(
+            json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "A"}) + "\n"
+        )
+
+        first = runner.load_data()
+        document_id = first[0]["doc_id"]
+        Path(runner.config.output_file).write_text(
+            json.dumps(
+                {
+                    "doc_id": document_id,
+                    "prompt": "q",
+                    "answer": "A",
+                    "gen": ["a", "b"],
+                }
+            )
+            + "\n"
+        )
+
+        remaining = runner.load_data()
+
+        assert len(remaining) == 1
+        assert remaining[0]["_llmeval_remaining_samples"] == 1
+        assert remaining[0]["_llmeval_sample_start"] == 2
+
+    def test_mixed_stable_and_legacy_output_both_resume(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        input_rows = [
+            {"doc_id": "test:0", "prompt": "first", "answer": "A"},
+            {"doc_id": "test:1", "prompt": "second", "answer": "B"},
+        ]
+        Path(runner.config.input_file).write_text(
+            "".join(json.dumps(row) + "\n" for row in input_rows)
+        )
+        first_load = runner.load_data()
+        stable_id = first_load[0]["doc_id"]
+        Path(runner.config.output_file).write_text(
+            json.dumps(
+                {
+                    "doc_id": stable_id,
+                    "prompt": "first",
+                    "gen": ["A"],
+                }
+            )
+            + "\n"
+            + json.dumps({"prompt": "second", "gen": ["B"]})
+            + "\n"
+        )
+
+        assert runner.load_data() == []
 
 
 class TestMCRunnerEndToEnd:

@@ -193,6 +193,7 @@ class TestEvaluateTask:
             "gen",
             tmp_path / "code.jsonl",
             1,  # max_workers=1 → serial path
+            allow_unsafe_code=True,
         )
         assert acc == 1.0
 

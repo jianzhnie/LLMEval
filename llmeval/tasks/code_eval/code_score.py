@@ -307,14 +307,14 @@ def _resolve_prompt_mode(item: dict[str, Any]) -> str:
 
 
 def _process_code_item(
-    args: tuple[int, dict[str, Any], str, str, float],
+    args: tuple[int, dict[str, Any], str, str, float, bool],
 ) -> tuple[int, dict[str, Any]]:
     """Score a single code-generation item.
 
     Parameters
     ----------
     args : tuple
-        ``(index, item_dict, label_key, response_key, exec_timeout)``.
+        ``(index, item_dict, label_key, response_key, exec_timeout, allow_unsafe_code)``.
 
         * **index** — position in the original dataset (for result ordering).
         * **item_dict** — must contain ``"prompt"``, *label_key*, and
@@ -329,7 +329,7 @@ def _process_code_item(
         ``(index, record)`` where *record* has keys ``task_id``, ``passed``,
         ``result``, ``stderr``.
     """
-    idx, item, label_key, response_key, exec_timeout = args
+    idx, item, label_key, response_key, exec_timeout, allow_unsafe_code = args
 
     # -- resolve identifiers ----------------------------------------------------
     group_id: str = str(
@@ -375,7 +375,12 @@ def _process_code_item(
     for _, check_program in _build_check_programs(
         prompt, code, test_code, prompt_mode=prompt_mode
     ):
-        exec_result = check_correctness(check_program, exec_timeout, task_id)
+        exec_result = check_correctness(
+            check_program,
+            exec_timeout,
+            task_id,
+            allow_unsafe_code=allow_unsafe_code,
+        )
         if exec_result.get("passed"):
             break
     if exec_result is None:
@@ -420,6 +425,7 @@ def _score_items(
     exec_timeout: float,
     max_workers: int,
     timeout: int,
+    allow_unsafe_code: bool,
 ) -> list[dict[str, Any]]:
     """Score every item, preserving input order.
 
@@ -453,7 +459,7 @@ def _score_items(
         records: list[dict[str, Any]] = []
         for i, item in enumerate(eval_dataset):
             _, rec = _process_code_item(
-                (i, item, label_key, response_key, exec_timeout),
+                (i, item, label_key, response_key, exec_timeout, allow_unsafe_code),
             )
             records.append(rec)
         return records
@@ -464,7 +470,7 @@ def _score_items(
     results_by_index: dict[int, dict[str, Any]] = {}
 
     iterable = [
-        (i, item, label_key, response_key, exec_timeout)
+        (i, item, label_key, response_key, exec_timeout, allow_unsafe_code)
         for i, item in enumerate(eval_dataset)
     ]
 
@@ -576,6 +582,7 @@ def score_code(
     k_values: tuple[int, ...] = (1, 10, 64),
     task_name: str | None = None,
     seed: int | None = None,
+    allow_unsafe_code: bool = False,
 ) -> float:
     """Score a code-generation dataset and return Pass@1 accuracy.
 
@@ -600,6 +607,9 @@ def score_code(
         Per-item code execution timeout in seconds (default 3.0).
     k_values : tuple[int, ...]
         pass@k values to include in the summary when enough samples exist.
+    allow_unsafe_code : bool
+        Explicitly allow execution of generated code.  The CLI defaults to
+        ``False`` and should only enable this in a trusted or isolated runtime.
 
     Returns
     -------
@@ -609,6 +619,12 @@ def score_code(
     if not eval_dataset:
         logger.warning("Empty dataset — returning 0.0")
         return 0.0
+    if not allow_unsafe_code:
+        raise PermissionError(
+            "Code evaluation executes generated code. Pass "
+            "allow_unsafe_code=True (or the CLI --allow_unsafe_code flag) "
+            "only when the execution environment is trusted."
+        )
     # ``k_values`` is a scorer-level option rather than an inference config
     # field, so validate it at the public scoring boundary.
     if any(k <= 0 for k in k_values):
@@ -633,6 +649,7 @@ def score_code(
         exec_timeout,
         max_workers,
         timeout,
+        allow_unsafe_code,
     )
 
     correct = sum(1 for r in records if r.get("passed"))

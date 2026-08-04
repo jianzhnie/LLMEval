@@ -621,6 +621,8 @@ class MCInferConfig:
         request_timeout (int): Per-request timeout in seconds.
         max_retries (int): Maximum number of retries for transient failures.
         max_tokens (int): Maximum number of tokens to generate (generate mode).
+        n_samples (int): Number of generations per MC prompt in generate mode.
+        loglikelihood_mode (str): ``auto``, ``continuation`` or ``first_token``.
         temperature (float): Sampling temperature (0.0 = deterministic).
         system_prompt_type (str): System prompt template key ("empty" disables).
         tool_choice (str): Tool calling mode: "none", "auto", or a tool name.
@@ -664,6 +666,14 @@ class MCInferConfig:
     max_tokens: int = field(
         default=2048,
         metadata={"help": "Maximum number of tokens to generate (generate mode)."},
+    )
+    n_samples: int = field(
+        default=1,
+        metadata={"help": "Number of generations per prompt in generate mode."},
+    )
+    loglikelihood_mode: str = field(
+        default="auto",
+        metadata={"help": "MC scoring mode: auto, continuation, or first_token."},
     )
     temperature: float = field(
         default=0.0, metadata={"help": "Sampling temperature (0.0 = deterministic)."}
@@ -732,6 +742,13 @@ class MCInferConfig:
             )
         if self.max_tokens <= 0:
             raise ValueError(f"max_tokens must be positive, got: {self.max_tokens}")
+        if self.n_samples <= 0:
+            raise ValueError(f"n_samples must be positive, got: {self.n_samples}")
+        if self.loglikelihood_mode not in ("auto", "continuation", "first_token"):
+            raise ValueError(
+                "loglikelihood_mode must be one of ('auto', 'continuation', "
+                f"'first_token'), got: {self.loglikelihood_mode!r}"
+            )
         if not (0.0 <= self.temperature <= 2.0):
             raise ValueError(
                 f"Temperature must be between 0.0 and 2.0, got: {self.temperature}"
@@ -779,6 +796,18 @@ class EvalTaskArguments:
     )
     response_key: str = field(
         default="gen", metadata={"help": "Key for model generated text."}
+    )
+    mc_aggregation: str = field(
+        default="first",
+        metadata={
+            "help": "MC generate aggregation: first, majority_vote, any_correct, or per_sample."
+        },
+    )
+    allow_unsafe_code: bool = field(
+        default=False,
+        metadata={
+            "help": "Explicitly allow execution of generated code during evaluation."
+        },
     )
 
     cache_path: str = field(
@@ -833,6 +862,16 @@ class EvalTaskArguments:
             raise ValueError(f"exec_timeout must be positive, got {self.exec_timeout}")
         if self.seed < 0:
             raise ValueError(f"seed must be non-negative, got {self.seed}")
+        if self.mc_aggregation not in (
+            "first",
+            "majority_vote",
+            "any_correct",
+            "per_sample",
+        ):
+            raise ValueError(
+                "mc_aggregation must be one of ('first', 'majority_vote', "
+                f"'any_correct', 'per_sample'), got: {self.mc_aggregation!r}"
+            )
         if self.contamination_min_length <= 0:
             raise ValueError(
                 "contamination_min_length must be positive, "

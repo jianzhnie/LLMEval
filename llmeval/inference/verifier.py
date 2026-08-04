@@ -351,7 +351,15 @@ class VerifierOfflineInferenceRunner:
         return input_key, label_key, response_key
 
     def _resume_id(self, item: dict[str, Any]) -> str:
-        """Build a stable id for verifier resume across compacted outputs."""
+        """Resolve the prepared dataset ID for verifier resume.
+
+        New benchmark files carry ``doc_id`` from the preparation stage. The
+        hash fallback is retained only for legacy verifier inputs that predate
+        the dataset ID field.
+        """
+        document_id = item.get("doc_id")
+        if document_id:
+            return str(document_id)
         existing = item.get(_VERIFIER_RESUME_KEY)
         if existing:
             return str(existing)

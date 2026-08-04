@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import openai
@@ -26,6 +26,7 @@ from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
     count_completed_samples,
+    count_completed_samples_by_identity,
     expand_group_for_sampling,
     is_explicit_tool_choice,
     load_jsonl,
@@ -437,9 +438,24 @@ class InferenceRunner:
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
         # Resume functionality handling
-        completed_counts = count_completed_samples(
-            self.args.output_file, self.args.input_key, self.args.response_key
+        completed_counts = cast(
+            dict[object, int],
+            count_completed_samples_by_identity(
+                self.args.output_file,
+                self.args.input_key,
+                self.args.response_key,
+            ),
         )
+        legacy_counts = count_completed_samples(
+            self.args.output_file,
+            self.args.input_key,
+            self.args.response_key,
+            legacy_only=True,
+        )
+        if legacy_counts:
+            # Preserve prompt-based resume for legacy records while allowing
+            # stable-ID records in the same file to remain independently keyed.
+            completed_counts.update(legacy_counts)
         total_completed = sum(completed_counts.values())
 
         if total_completed > 0:
@@ -450,6 +466,7 @@ class InferenceRunner:
             completed_counts,
             self.args.input_key,
             self.args.n_samples,
+            stable_ids=True,
         )
         total_remaining = sum(sample_count_for_item(item) for item in prepared_data)
 
@@ -526,6 +543,7 @@ class InferenceRunner:
 
         result = item.copy()
         result.pop("n_samples", None)
+        result.pop("_llmeval_sample_start", None)
         gen_list = list(result.get(self.args.response_key, []))
         gen_list.append(response)
         result[self.args.response_key] = gen_list
@@ -678,18 +696,22 @@ class InferenceRunner:
         )
         failed_tasks: list[dict[str, Any]] = []
 
-        # Group expanded copies by prompt for batched (n-parameter) sampling.
-        # Only non-empty STRING prompts are groupable (hashable and valid as a
-        # query); anything else (non-dict items, empty or non-str prompts) gets
-        # a unique key so each forms a singleton group and is validated/failed
-        # via the regular per-item path instead of crashing the whole run.
+        # Group by stable document ID for batched (n-parameter) sampling.
+        # Using the prompt as the key would merge distinct records that happen
+        # to contain the same text and would corrupt their resume counts.
         groups: dict[Any, list[dict[str, Any]]] = {}
         for idx, item in enumerate(expanded_data):
             key: Any = None
             if isinstance(item, dict):
-                candidate = item.get(self.args.input_key) or item.get("prompt")
+                candidate = item.get("doc_id")
                 if isinstance(candidate, str) and candidate:
                     key = candidate
+                else:
+                    # Direct callers and legacy in-memory inputs may not carry
+                    # an ID yet; preserve the old prompt grouping in that case.
+                    prompt = item.get(self.args.input_key) or item.get("prompt")
+                    if isinstance(prompt, str) and prompt:
+                        key = prompt
             if key is None:
                 key = ("__invalid__", idx)
             groups.setdefault(key, []).append(item)

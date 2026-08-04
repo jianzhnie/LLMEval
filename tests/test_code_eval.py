@@ -159,40 +159,46 @@ def _check_wrapper_program() -> str:
 
 class TestCheckCorrectness:
     def test_passing_program(self) -> None:
-        result = check_correctness(_add_program(), 3.0, "t1")
+        result = check_correctness(_add_program(), 3.0, "t1", allow_unsafe_code=True)
         assert result["passed"] is True
         assert result["result"] == "passed"
 
     def test_failing_program(self) -> None:
         program = "def add(a, b):\n    return a * b\n\nassert add(2, 3) == 5\n"
-        result = check_correctness(program, 3.0, "t2")
+        result = check_correctness(program, 3.0, "t2", allow_unsafe_code=True)
         assert result["passed"] is False
         assert "AssertionError" in result["result"]
 
     def test_syntax_error(self) -> None:
-        result = check_correctness("def add(:\n    return", 3.0, "t3")
+        result = check_correctness(
+            "def add(:\n    return", 3.0, "t3", allow_unsafe_code=True
+        )
         assert result["passed"] is False
         assert "SyntaxError" in result["result"]
 
     def test_name_error(self) -> None:
-        result = check_correctness("assert foo(1) == 2\n", 3.0, "t4")
+        result = check_correctness(
+            "assert foo(1) == 2\n", 3.0, "t4", allow_unsafe_code=True
+        )
         assert result["passed"] is False
         assert "NameError" in result["result"]
 
     def test_timeout(self) -> None:
         program = "import time\ntime.sleep(5)\n"
-        result = check_correctness(program, 1.0, "t5")
+        result = check_correctness(program, 1.0, "t5", allow_unsafe_code=True)
         assert result["passed"] is False
         assert result["result"] == "timed out"
 
     def test_long_timeout_still_fires(self) -> None:
         """A long timeout still works correctly for normal code."""
-        result = check_correctness(_add_program(), 30.0, "t6")
+        result = check_correctness(_add_program(), 30.0, "t6", allow_unsafe_code=True)
         assert result["passed"] is True
 
     def test_with_check_wrapper(self) -> None:
         """HumanEval-style check(candidate) convention."""
-        result = check_correctness(_check_wrapper_program(), 3.0, "t7")
+        result = check_correctness(
+            _check_wrapper_program(), 3.0, "t7", allow_unsafe_code=True
+        )
         assert result["passed"] is True
 
 
@@ -219,6 +225,22 @@ class TestUnsafeExecute:
 
 
 class TestScoreCode:
+    def test_execution_requires_explicit_opt_in(self, tmp_path: Path) -> None:
+        with pytest.raises(PermissionError, match="executes generated code"):
+            score_code(
+                [
+                    {
+                        "prompt": "def f():\n",
+                        "answer": "\nassert f() == 1\n",
+                        "gen": ["    return 1"],
+                    }
+                ],
+                "answer",
+                "gen",
+                tmp_path / "blocked.jsonl",
+                max_workers=0,
+            )
+
     def test_all_pass(self) -> None:
         items = [
             {
@@ -236,7 +258,13 @@ class TestScoreCode:
             cache_path = Path(tf.name)
         try:
             acc = score_code(
-                items, "answer", "gen", cache_path, max_workers=0, exec_timeout=3.0
+                items,
+                "answer",
+                "gen",
+                cache_path,
+                max_workers=0,
+                exec_timeout=3.0,
+                allow_unsafe_code=True,
             )
             assert acc == 1.0
 
@@ -269,7 +297,13 @@ class TestScoreCode:
             cache_path = Path(tf.name)
         try:
             acc = score_code(
-                items, "answer", "gen", cache_path, max_workers=0, exec_timeout=3.0
+                items,
+                "answer",
+                "gen",
+                cache_path,
+                max_workers=0,
+                exec_timeout=3.0,
+                allow_unsafe_code=True,
             )
             assert acc == 0.5
         finally:
@@ -293,7 +327,14 @@ class TestScoreCode:
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
             cache_path = Path(tf.name)
         try:
-            acc = score_code(items, "answer", "gen", cache_path, max_workers=0)
+            acc = score_code(
+                items,
+                "answer",
+                "gen",
+                cache_path,
+                max_workers=0,
+                allow_unsafe_code=True,
+            )
             assert acc == 0.0
         finally:
             cache_path.unlink(missing_ok=True)
@@ -317,6 +358,7 @@ class TestScoreCode:
             max_workers=0,
             exec_timeout=3.0,
             k_values=(1, 2),
+            allow_unsafe_code=True,
         )
 
         summary = json.loads(cache_path.with_suffix(".summary.json").read_text())
@@ -452,7 +494,12 @@ class TestScoreCodeThinkTags:
             }
         ]
         acc = score_code(
-            items, "answer", "gen", tmp_path / "cache.jsonl", max_workers=0
+            items,
+            "answer",
+            "gen",
+            tmp_path / "cache.jsonl",
+            max_workers=0,
+            allow_unsafe_code=True,
         )
         assert acc == 1.0
 
@@ -474,7 +521,14 @@ class TestScoreCodePromptModes:
             }
         ]
 
-        acc = score_code(items, "answer", "gen", tmp_path / "mbpp.jsonl", max_workers=0)
+        acc = score_code(
+            items,
+            "answer",
+            "gen",
+            tmp_path / "mbpp.jsonl",
+            max_workers=0,
+            allow_unsafe_code=True,
+        )
 
         assert acc == 1.0
 
@@ -491,7 +545,12 @@ class TestScoreCodePromptModes:
         ]
 
         acc = score_code(
-            items, "answer", "gen", tmp_path / "humaneval.jsonl", max_workers=0
+            items,
+            "answer",
+            "gen",
+            tmp_path / "humaneval.jsonl",
+            max_workers=0,
+            allow_unsafe_code=True,
         )
 
         assert acc == 1.0
@@ -506,7 +565,12 @@ class TestScoreCodePromptModes:
             }
         ]
         acc = score_code(
-            items, "answer", "gen", tmp_path / "cache.jsonl", max_workers=0
+            items,
+            "answer",
+            "gen",
+            tmp_path / "cache.jsonl",
+            max_workers=0,
+            allow_unsafe_code=True,
         )
         assert acc == 1.0
 
