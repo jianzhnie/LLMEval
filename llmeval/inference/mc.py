@@ -320,6 +320,13 @@ class MCRunner:
                         continue
                     try:
                         item = json.loads(line)
+                        if not isinstance(item, dict):
+                            logger.warning(
+                                "Skipping non-object JSON on output line %d: %s",
+                                line_num,
+                                type(item).__name__,
+                            )
+                            continue
                         prompt = item.get(self.config.input_key, "")
                         if prompt:
                             completed.add(prompt)
@@ -486,6 +493,8 @@ class MCRunner:
         if not choices:
             return None
 
+        if self.client is None:
+            raise RuntimeError("Loglikelihood client is not initialized")
         choice_tokens = self._choice_tokens(item, len(choices))
         logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)
         if all(lp == float("-inf") for lp in logprobs):
@@ -727,7 +736,7 @@ def main() -> None:
     start_time = time.perf_counter()
     try:
         # Parse command line arguments into a strongly typed dataclass
-        parser = HfArgumentParser(MCInferConfig)
+        parser = HfArgumentParser(MCInferConfig)  # type: ignore[arg-type]
         (config,) = parser.parse_args_into_dataclasses()
 
         # Log initialization with formatted argument display

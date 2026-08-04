@@ -40,6 +40,12 @@ class TestLoadJsonl:
         with pytest.raises(json.JSONDecodeError):
             load_jsonl(f)
 
+    def test_non_object_json_raises_value_error(self, tmp_path: Path) -> None:
+        f = tmp_path / "scalar.jsonl"
+        f.write_text("[1, 2, 3]\n")
+        with pytest.raises(ValueError, match="must contain an object"):
+            load_jsonl(f)
+
 
 class TestCountCompletedSamples:
     def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
@@ -78,6 +84,11 @@ class TestCountCompletedSamples:
         with open(f, "w") as fh:
             fh.write("bad json\n")
             fh.write(json.dumps({"prompt": "q1", "gen": ["a"]}) + "\n")
+        assert count_completed_samples(f, "prompt", "gen")["q1"] == 1
+
+    def test_non_object_line_skipped(self, tmp_path: Path) -> None:
+        f = tmp_path / "out.jsonl"
+        f.write_text("[1, 2]\n" + json.dumps({"prompt": "q1", "gen": ["a"]}) + "\n")
         assert count_completed_samples(f, "prompt", "gen")["q1"] == 1
 
     def test_custom_keys_with_fallback(self, tmp_path: Path) -> None:
@@ -131,6 +142,10 @@ class TestPrepareDataWithResume:
     def test_skips_invalid_items(self) -> None:
         raw = [{"prompt": "  "}, "bad", {"answer": "x"}]
         assert prepare_data_with_resume(raw, {}, "prompt", 2) == []
+
+    def test_rejects_non_positive_sample_count(self) -> None:
+        with pytest.raises(ValueError, match="n_samples must be positive"):
+            prepare_data_with_resume([{"prompt": "q"}], {}, "prompt", 0)
 
 
 class TestSampleCountHelpers:

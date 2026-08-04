@@ -434,45 +434,48 @@ def compute_scores(
         while True:
             try:
                 result = next(iterator)
-                if result is not None:
-                    idx, is_correct, extracted_answer, extracted_gold = result
-
-                    # Update results atomically
-                    eval_dataset[idx].update(
-                        {
-                            "accuracy": is_correct,
-                            "extracted_gold": extracted_gold,
-                            "extracted_answer": extracted_answer,
-                            **build_sample_provenance(
-                                eval_dataset[idx],
-                                label_key=label_key,
-                                response_key=response_key,
-                            ),
-                        }
-                    )
-                    processed_indices.add(idx)
-
-                    # Update statistics
-                    if is_correct == 1.0:
-                        stats.correct += 1
-                    elif extracted_answer == "Timeout":
-                        stats.timeout += 1
-                    elif isinstance(
-                        extracted_answer, str
-                    ) and extracted_answer.startswith("Error"):
-                        stats.error += 1
             except StopIteration:
                 break
             except TimeoutError:
                 # Handle timeout for individual task — skip and continue
                 logger.warning("Individual task timed out, skipping and continuing")
+                pbar.update(1)
                 continue
             except Exception as e:
                 # Catch exceptions from the iterator, e.g., if a worker fails.
                 logger.error(f"❌ An error occurred while retrieving a result: {e}")
                 # We can't identify the specific job, so we continue.
-            finally:
                 pbar.update(1)
+                continue
+
+            pbar.update(1)
+            if result is not None:
+                idx, is_correct, extracted_answer, extracted_gold = result
+
+                # Update results atomically
+                eval_dataset[idx].update(
+                    {
+                        "accuracy": is_correct,
+                        "extracted_gold": extracted_gold,
+                        "extracted_answer": extracted_answer,
+                        **build_sample_provenance(
+                            eval_dataset[idx],
+                            label_key=label_key,
+                            response_key=response_key,
+                        ),
+                    }
+                )
+                processed_indices.add(idx)
+
+                # Update statistics
+                if is_correct == 1.0:
+                    stats.correct += 1
+                elif extracted_answer == "Timeout":
+                    stats.timeout += 1
+                elif isinstance(extracted_answer, str) and extracted_answer.startswith(
+                    "Error"
+                ):
+                    stats.error += 1
 
     # Handle any jobs that were not processed (e.g., due to a process crash or other unforeseen error).
     for idx in range(total):

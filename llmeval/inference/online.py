@@ -833,7 +833,7 @@ def main() -> None:
     start_time = time.perf_counter()
     try:
         # Parse command line arguments into a strongly typed dataclass
-        parser = HfArgumentParser(OnlineInferArguments)
+        parser = HfArgumentParser(OnlineInferArguments)  # type: ignore[arg-type]
         (eval_args,) = parser.parse_args_into_dataclasses()
 
         # Log initialization with formatted argument display

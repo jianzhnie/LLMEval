@@ -33,6 +33,7 @@ from typing import Any
 
 from transformers import HfArgumentParser
 
+from llmeval.inference.common import load_jsonl
 from llmeval.tasks.code_eval.code_score import score_code
 from llmeval.tasks.math_eval.math_score import compute_scores
 from llmeval.tasks.mc_eval.mc_score import (
@@ -55,11 +56,6 @@ from llmeval.utils.log import init_logger
 logger = init_logger("evaluator")
 
 MATH_RESPONSE_PIPELINE = build_text_pipeline(strip_reasoning_wrappers)
-
-
-def _get_after_think(text: str) -> str:
-    """Compatibility wrapper for the shared reasoning-text filter."""
-    return apply_text_pipeline(text, MATH_RESPONSE_PIPELINE)
 
 
 def preprocess_answers(data: list[dict[str, Any]], response_key: str) -> None:
@@ -296,7 +292,7 @@ def main() -> int:
     """
     try:
         # Parse command line arguments using HuggingFace's argument parser
-        parser = HfArgumentParser(EvalTaskArguments)
+        parser = HfArgumentParser(EvalTaskArguments)  # type: ignore[arg-type]
         (args,) = parser.parse_args_into_dataclasses()
 
         # Log initialization with formatted argument display
@@ -310,13 +306,15 @@ def main() -> int:
 
         # Load and validate input data
         try:
-            with open(args.input_path, encoding="utf-8") as f:
-                data = [json.loads(line) for line in f if line.strip()]
+            data = load_jsonl(args.input_path)
         except FileNotFoundError:
             logger.error(f"❌ Input file not found: '{args.input_path}'")
             return 1
         except json.JSONDecodeError as e:
             logger.error(f"❌ Invalid JSON format in '{args.input_path}': {e!s}")
+            return 1
+        except ValueError as e:
+            logger.error(f"❌ Invalid evaluation record: {e!s}")
             return 1
 
         if not data:

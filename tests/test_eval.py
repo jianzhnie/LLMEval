@@ -51,37 +51,10 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
     sys.modules["transformers"] = _tf
 
 from llmeval.evaluator import (
-    _get_after_think,
     _process_item,
     evaluate_task,
     preprocess_answers,
 )
-
-
-class TestGetAfterThink:
-    def test_answer_tag_preferred(self) -> None:
-        text = "<think>reasoning</think>junk <answer>42</answer> tail"
-        assert _get_after_think(text) == "42"
-
-    def test_answer_tag_content_stripped(self) -> None:
-        assert _get_after_think("<answer>  42  </answer>") == "42"
-
-    def test_think_tag_fallback(self) -> None:
-        assert _get_after_think("reasoning</think>The answer is 5") == "The answer is 5"
-
-    def test_think_tag_with_space_and_newlines(self) -> None:
-        assert _get_after_think("reasoning</think >\n\nresult") == "result"
-
-    def test_empty_tail_after_think_returns_original(self) -> None:
-        text = "only reasoning</think>  "
-        assert _get_after_think(text) == text
-
-    def test_plain_text_passthrough(self) -> None:
-        assert _get_after_think("no tags here") == "no tags here"
-
-    def test_empty_and_non_string(self) -> None:
-        assert _get_after_think("") == ""
-        assert _get_after_think(None) == ""
 
 
 class TestPreprocessAnswers:

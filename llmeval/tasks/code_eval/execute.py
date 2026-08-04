@@ -153,10 +153,10 @@ class WriteOnlyStringIO(io.StringIO):
     def read(self, *args: Any, **kwargs: Any) -> str:
         raise OSError("reading from stdout/stderr is not allowed")
 
-    def readline(self, *args: Any, **kwargs: Any) -> str:
+    def readline(self, size: int = -1) -> str:  # type: ignore[override]
         raise OSError("reading from stdout/stderr is not allowed")
 
-    def readlines(self, *args: Any, **kwargs: Any) -> list[str]:
+    def readlines(self, hint: int = -1) -> list[str]:  # type: ignore[override]
         raise OSError("reading from stdout/stderr is not allowed")
 
 
@@ -232,7 +232,9 @@ def reliability_guard() -> None:
     # -- dangerous modules (block re-import) ------------------------------------
     for _mod in _BLOCKED_MODULES:
         _ORIGINAL_MODULES[_mod] = sys.modules.get(_mod)
-        sys.modules[_mod] = None  # None → ImportError on re-import
+        # ``None`` is a supported runtime sentinel for blocking imports, but
+        # typeshed models ``sys.modules`` as containing modules only.
+        sys.modules[_mod] = None  # type: ignore[assignment]
 
 
 def reliability_restore() -> None:
@@ -401,7 +403,8 @@ def check_correctness(
     os.close(tmp_fd)
 
     # -- start worker process ---------------------------------------------------
-    p = ctx.Process(
+    process_factory: Any = ctx.Process  # type: ignore[attr-defined]
+    p = process_factory(
         target=_worker,
         args=(check_program, timeout, task_id, tmp_path),
     )

@@ -518,7 +518,7 @@ if __name__ == "__main__":
     """Command-line interface for vLLM offline inference."""
     try:
         # Parse command line arguments
-        parser = HfArgumentParser(OfflineInferArguments)
+        parser = HfArgumentParser(OfflineInferArguments)  # type: ignore[arg-type]
         (eval_args,) = parser.parse_args_into_dataclasses()
 
         # Log configuration

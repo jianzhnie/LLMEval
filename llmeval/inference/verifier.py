@@ -20,7 +20,7 @@ import threading
 from collections.abc import Callable, Iterable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from tqdm import tqdm
 from transformers import AutoTokenizer, HfArgumentParser
@@ -34,6 +34,26 @@ from llmeval.utils.verifier_prompts import VERIFY_PROMPT_FACTORY
 
 # Initialize logger
 logger = init_logger("compass_verifier_infer", logging.INFO)
+
+
+class ChatTemplateTokenizer(Protocol):
+    """Minimal tokenizer interface required by the verifier runner.
+
+    vLLM exposes a tokenizer with ``apply_chat_template`` at runtime, while
+    the Transformers type stubs do not declare that method on every tokenizer
+    variant. Keeping the protocol local makes the runtime contract explicit
+    without weakening the entire runner to ``Any``.
+    """
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        add_generation_prompt: bool,
+        tokenize: bool,
+    ) -> str:
+        """Render chat messages into a model input string."""
+
 
 # Precompiled extraction patterns (compiled once at import, not per call).
 _ANSWER_TAG_RE: re.Pattern[str] = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
@@ -560,6 +580,13 @@ class VerifierOfflineInferenceRunner:
                 for line_num, line in enumerate(f, 1):
                     try:
                         item = json.loads(line.strip())
+                        if not isinstance(item, dict):
+                            logger.warning(
+                                "Skipping non-object JSON on output line %d: %s",
+                                line_num,
+                                type(item).__name__,
+                            )
+                            continue
                         prompt_key = (
                             item.get(_VERIFIER_RESUME_KEY)
                             or item.get(self.args.input_key)
@@ -675,9 +702,10 @@ class VerifierOfflineInferenceRunner:
         try:
             # Convert prompts to messages format for vLLM
             batch_messages: list[str] = []
+            tokenizer = cast(ChatTemplateTokenizer, self.tokenizer)
             for prompt in valid_prompts:
                 messages = [{"role": "user", "content": prompt}]
-                model_inputs = self.tokenizer.apply_chat_template(
+                model_inputs = tokenizer.apply_chat_template(
                     messages, add_generation_prompt=True, tokenize=False
                 )
                 batch_messages.append(model_inputs)
@@ -812,7 +840,7 @@ if __name__ == "__main__":
     """Command-line interface for Verifier offline inference."""
     try:
         # Parse command line arguments
-        parser = HfArgumentParser(VerifierInferArguments)
+        parser = HfArgumentParser(VerifierInferArguments)  # type: ignore[arg-type]
         (eval_args,) = parser.parse_args_into_dataclasses()
 
         # Log configuration

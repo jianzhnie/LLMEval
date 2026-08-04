@@ -54,16 +54,28 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
     Raises:
         FileNotFoundError: If the input file does not exist.
         json.JSONDecodeError: If an input line is not valid JSON.
+        ValueError: If a line contains valid JSON but not an object.
     """
+    records: list[dict[str, Any]] = []
     try:
         with open(path, encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
+            for line_num, line in enumerate(f, 1):
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError(
+                        f"JSONL line {line_num} must contain an object, "
+                        f"got {type(record).__name__}"
+                    )
+                records.append(record)
     except FileNotFoundError as e:
         logger.critical(f"Input file not found: {path}, {e}")
         raise
     except json.JSONDecodeError as e:
         logger.critical(f"Invalid JSON in input file: {e}")
         raise
+    return records
 
 
 def count_completed_samples(
@@ -95,7 +107,14 @@ def count_completed_samples(
         with open(output_file, encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
                 try:
-                    item: dict[str, Any] = json.loads(line.strip())
+                    item = json.loads(line.strip())
+                    if not isinstance(item, dict):
+                        logger.warning(
+                            "Skipping non-object JSON on output line %d: %s",
+                            line_num,
+                            type(item).__name__,
+                        )
+                        continue
                     prompt: Any = item.get(input_key) or item.get("prompt")
                     gen_response = item.get(response_key) or item.get("gen")
                     # Guard against a null / non-list gen field (e.g. a
@@ -137,6 +156,10 @@ def expand_data_with_resume(
     skipped_items = 0
 
     for item in raw_data:
+        if not isinstance(item, dict):
+            logger.warning("Skipping non-dict input item: %s", type(item).__name__)
+            skipped_items += 1
+            continue
         prompt_val: Any = item.get(input_key) or item.get("prompt")
         prompt = str(prompt_val) if prompt_val is not None else ""
 
@@ -183,7 +206,15 @@ def prepare_data_with_resume(
 
     Returns:
         Prepared dataset holding only the prompts still to process.
+
+    Raises:
+        ValueError: If ``input_key`` is empty or ``n_samples`` is not positive.
     """
+    if not input_key:
+        raise ValueError("input_key must be non-empty")
+    if n_samples <= 0:
+        raise ValueError(f"n_samples must be positive, got {n_samples}")
+
     prepared_data: list[dict[str, Any]] = []
     skipped_items = 0
 
@@ -267,6 +298,7 @@ def save_failed_items(
     """
     failed_file = os.path.splitext(str(output_file))[0] + "_failed.jsonl"
     try:
+        Path(failed_file).parent.mkdir(parents=True, exist_ok=True)
         with open(failed_file, "w", encoding="utf-8") as f:
             for entry in failed_items:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")

@@ -154,8 +154,8 @@ def _resolve_task_version(eval_dataset: list[dict[str, Any]]) -> str:
 
 
 def _contamination_summary(eval_dataset: list[dict[str, Any]]) -> dict[str, Any]:
-    checked = [
-        item.get(_CONTAMINATION_FIELD)
+    checked: list[dict[str, Any]] = [
+        item[_CONTAMINATION_FIELD]
         for item in eval_dataset
         if isinstance(item, dict) and isinstance(item.get(_CONTAMINATION_FIELD), dict)
     ]

@@ -609,7 +609,12 @@ def score_code(
     if not eval_dataset:
         logger.warning("Empty dataset — returning 0.0")
         return 0.0
-
+    # ``k_values`` is a scorer-level option rather than an inference config
+    # field, so validate it at the public scoring boundary.
+    if any(k <= 0 for k in k_values):
+        raise ValueError(
+            f"k_values must contain only positive integers, got {k_values}"
+        )
     expanded_dataset = _expand_code_samples(eval_dataset, response_key)
     total = len(expanded_dataset)
 
