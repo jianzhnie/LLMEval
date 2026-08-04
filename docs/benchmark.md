@@ -175,8 +175,8 @@ python scripts/data_process/prepare_code_benchmarks.py \
     --benchmarks humaneval mbpp
 
 # MC benchmark
-python scripts/data_process/prepare_math_benchmarks.py \
-    --mc_benchmarks mmlu mmlu_pro ceval
+python scripts/data_process/prepare_mc_benchmarks.py \
+    --benchmarks mmlu mmlu_pro ceval
 
 # Few-shot dev 数据放在 data/few_shot/，格式同推理数据
 ```

@@ -111,7 +111,7 @@ echo "[INFO] Benchmarks:"
 for task in $BENCHMARKS; do
     n="${BENCHMARK_SAMPLES[$task]:-$N_SAMPLES}"
     t="${BENCHMARK_TEMP[$task]:-$TEMPERATURE}"
-    printf "        %-14s  n_sample=%-3s  temp=%-4s\n" "$task" "$n" "$t"
+    printf "        %-14s  n_samples=%-3s  temp=%-4s\n" "$task" "$n" "$t"
 done
 echo "============================================"
 

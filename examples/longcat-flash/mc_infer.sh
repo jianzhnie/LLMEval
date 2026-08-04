@@ -76,7 +76,7 @@ for task in $BENCHMARKS; do
     fi
     if [[ ! -f "$input_file" ]]; then
         echo "[ERROR] 数据文件不存在: $input_file" >&2
-        echo "[INFO] 下载: python scripts/data_process/prepare_math_benchmarks.py --mc_benchmarks $task --output_dir ./data"
+        echo "[INFO] 下载: python scripts/data_process/prepare_mc_benchmarks.py --benchmarks $task --output_dir ./data"
         continue
     fi
 

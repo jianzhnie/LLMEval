@@ -95,7 +95,7 @@ echo "[INFO] Workers:   $MAX_WORKERS | MaxTokens: $MAX_TOKENS"
 echo "[INFO] Benchmarks:"
 for task in $BENCHMARKS; do
     n="${BENCHMARK_SAMPLES[$task]:-$N_SAMPLES}"
-    printf "        %-16s  n_sample=%-3s  temp=%-4s\n" "$task" "$n" "$TEMPERATURE"
+    printf "        %-16s  n_samples=%-3s  temp=%-4s\n" "$task" "$n" "$TEMPERATURE"
 done
 echo "============================================"
 
