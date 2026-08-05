@@ -24,7 +24,7 @@ import openai
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
-from llmeval.cache import ContentAddressedCache
+from llmeval.cache import build_cache, log_cache_stats
 from llmeval.inference.common import (
     count_completed_samples,
     count_completed_samples_by_identity,
@@ -96,16 +96,12 @@ class InferenceClient:
         self.seed = seed
         self.model_revision = model_revision
         self._git_hash = get_git_hash()
-        self.cache = (
-            ContentAddressedCache(
-                content_cache_dir,
-                "inference",
-                force_recompute=force_recompute,
-                read_only=read_only_cache,
-                rank=cache_rank,
-            )
-            if content_cache_dir
-            else None
+        self.cache = build_cache(
+            content_cache_dir,
+            "inference",
+            force_recompute=force_recompute,
+            read_only=read_only_cache,
+            rank=cache_rank,
         )
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
@@ -906,11 +902,7 @@ class InferenceRunner:
             logger.info(f"Success rate: {success_rate:.2f}%")
             logger.info(f"Total duration: {duration:.2f} seconds")
             logger.info(f"Output file: {self.args.output_file}")
-            if self.client.cache is not None:
-                logger.info(
-                    "Online inference cache statistics: %s",
-                    self.client.cache.stats().to_dict(),
-                )
+            log_cache_stats(self.client.cache, logger, "Online inference")
             logger.info("✅ Inference pipeline completed successfully\n")
 
         except Exception as e:

@@ -89,9 +89,7 @@ def prepare_mbpp(
         task_id = str(item.get("task_id", index))
         description = item.get("text", item.get("prompt"))
         if description is None:
-            raise KeyError(
-                "MBPP record must contain either a 'text' or 'prompt' field"
-            )
+            raise KeyError("MBPP record must contain either a 'text' or 'prompt' field")
         tests = "\n".join(item["test_list"])
         prompt = PROMPT_TEMPLATE.format(text=description, tests=tests)
         records.append(

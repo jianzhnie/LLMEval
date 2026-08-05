@@ -26,7 +26,7 @@ from transformers import HfArgumentParser
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
-from llmeval.cache import ContentAddressedCache
+from llmeval.cache import ContentAddressedCache, build_cache, log_cache_stats
 from llmeval.inference.common import (
     count_completed_samples,
     count_completed_samples_by_identity,
@@ -78,17 +78,12 @@ class OfflineInferenceRunner:
         self._file_lock: threading.Lock = threading.Lock()
         self.llm: LLM | None = None
         self.sampling_params: SamplingParams | None = None
-        content_cache_dir = getattr(args, "content_cache_dir", "")
-        self.cache: ContentAddressedCache | None = (
-            ContentAddressedCache(
-                content_cache_dir,
-                "inference",
-                force_recompute=getattr(args, "force_recompute", False),
-                read_only=getattr(args, "read_only_cache", False),
-                rank=getattr(args, "cache_rank", None),
-            )
-            if content_cache_dir
-            else None
+        self.cache: ContentAddressedCache | None = build_cache(
+            getattr(args, "content_cache_dir", ""),
+            "inference",
+            force_recompute=getattr(args, "force_recompute", False),
+            read_only=getattr(args, "read_only_cache", False),
+            rank=getattr(args, "cache_rank", None),
         )
         self._git_hash = get_git_hash()
         self.system_prompt: str | None = SYSTEM_PROMPT_FACTORY.get(
@@ -341,14 +336,6 @@ class OfflineInferenceRunner:
         }
         return cache.key(payload)
 
-    def _log_cache_stats(self) -> None:
-        """Log cache counters at the end of a run when caching is enabled."""
-        cache = getattr(self, "cache", None)
-        if cache is not None:
-            logger.info(
-                "Offline inference cache statistics: %s", cache.stats().to_dict()
-            )
-
     def _extract_model_response(self, output: RequestOutput) -> str:
         """Extract text response from vLLM output object.
 
@@ -583,7 +570,7 @@ class OfflineInferenceRunner:
 
             # Process data in batches
             self._process_batches(eval_dataset)
-            self._log_cache_stats()
+            log_cache_stats(getattr(self, "cache", None), logger, "Offline inference")
 
             logger.info(
                 f"✨ Final data processing completed. Results saved to {self.args.output_file}"

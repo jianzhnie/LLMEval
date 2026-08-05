@@ -33,7 +33,7 @@ import openai
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
-from llmeval.cache import ContentAddressedCache
+from llmeval.cache import ContentAddressedCache, build_cache, log_cache_stats
 from llmeval.inference.common import (
     completed_sample_indices_by_identity,
     count_completed_samples_by_identity,
@@ -227,16 +227,12 @@ class MCLoglikelihoodClient:
         self.seed = seed
         self.model_revision = model_revision
         self._git_hash = get_git_hash()
-        self.cache = (
-            ContentAddressedCache(
-                content_cache_dir,
-                "inference",
-                force_recompute=force_recompute,
-                read_only=read_only_cache,
-                rank=cache_rank,
-            )
-            if content_cache_dir
-            else None
+        self.cache = build_cache(
+            content_cache_dir,
+            "inference",
+            force_recompute=force_recompute,
+            read_only=read_only_cache,
+            rank=cache_rank,
         )
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
@@ -428,8 +424,8 @@ class MCLoglikelihoodClient:
                 token_logprobs = (
                     getattr(logprobs, "token_logprobs", None) if logprobs else None
                 )
-                if not isinstance(offsets, (list, tuple)) or not isinstance(
-                    token_logprobs, (list, tuple)
+                if not isinstance(offsets, list | tuple) or not isinstance(
+                    token_logprobs, list | tuple
                 ):
                     raise ValueError("completion is missing token offsets or logprobs")
                 if len(offsets) != len(token_logprobs) or any(
@@ -456,7 +452,7 @@ class MCLoglikelihoodClient:
                     raise ValueError("continuation does not start on a token boundary")
 
                 tokens = getattr(logprobs, "tokens", None)
-                if not isinstance(tokens, (list, tuple)) or len(tokens) != len(
+                if not isinstance(tokens, list | tuple) or len(tokens) != len(
                     token_logprobs
                 ):
                     raise ValueError("completion is missing aligned token text")
@@ -479,7 +475,7 @@ class MCLoglikelihoodClient:
 
                 backend_ids = getattr(logprobs, "token_ids", None)
                 if backend_ids is not None and (
-                    not isinstance(backend_ids, (list, tuple))
+                    not isinstance(backend_ids, list | tuple)
                     or len(backend_ids) != len(token_logprobs)
                 ):
                     raise ValueError("completion token IDs are malformed")
@@ -580,7 +576,7 @@ class MCRunner:
             except (OSError, ValueError) as e:
                 raise RuntimeError(f"Failed to initialize MC client: {e}") from e
         elif config.content_cache_dir:
-            self.cache = ContentAddressedCache(
+            self.cache = build_cache(
                 config.content_cache_dir,
                 "inference",
                 force_recompute=config.force_recompute,
@@ -1138,7 +1134,7 @@ class MCRunner:
             # max_tokens); discard empty choices so failed samples are not
             # written as completed generations.
             raw_choices = getattr(resp, "choices", []) or []
-            if not isinstance(raw_choices, (list, tuple)):
+            if not isinstance(raw_choices, list | tuple):
                 try:
                     raw_choices = [raw_choices[0]]
                 except (IndexError, TypeError):
@@ -1224,8 +1220,7 @@ class MCRunner:
         cache = getattr(self, "cache", None)
         if cache is None and self.client is not None:
             cache = getattr(self.client, "cache", None)
-        if cache is not None:
-            logger.info("MC inference cache statistics: %s", cache.stats().to_dict())
+        log_cache_stats(cache, logger, "MC inference")
 
     def print_loglikelihood_summary(self) -> None:
         """Print quick accuracy from in-memory stats."""

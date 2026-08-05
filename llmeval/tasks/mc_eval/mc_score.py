@@ -534,12 +534,9 @@ def build_result(
     per_sample = bool(records) and all(
         r.get("aggregation") == "per_sample" for r in records
     )
+
     def record_weight(record: dict[str, Any]) -> int:
-        return (
-            max(int(record.get("sample_total", 0)), 0)
-            if per_sample
-            else 1
-        )
+        return max(int(record.get("sample_total", 0)), 0) if per_sample else 1
 
     eligible_records = [
         record
@@ -548,15 +545,12 @@ def build_result(
     ]
     if per_sample:
         total = sum(int(r.get("sample_total", 0)) for r in records)
-        n_correct = sum(
-            int(r.get("sample_correct_count", 0)) for r in eligible_records
-        )
+        n_correct = sum(int(r.get("sample_correct_count", 0)) for r in eligible_records)
         n_correct_norm = sum(
             int(r.get("sample_correct_norm_count", 0)) for r in eligible_records
         )
         n_correct_bytes = sum(
-            int(r.get("sample_correct_bytes_count", 0))
-            for r in eligible_records
+            int(r.get("sample_correct_bytes_count", 0)) for r in eligible_records
         )
     else:
         total = len(records)
@@ -589,6 +583,7 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
     observations: dict[str, list[float]] = {
         name: [] for name in ("acc", "acc_norm", "acc_bytes", "exact_match")
     }
+
     def weight(record: dict[str, Any]) -> int:
         if record.get("aggregation") == "per_sample":
             return max(int(record.get("sample_total", 0)), 0)
@@ -902,10 +897,13 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
     summary_path = cache_path.with_suffix(".summary.json")
     question_total = len(result.per_item)
     sample_total = sum(int(record.get("sample_total", 1)) for record in result.per_item)
+
     def weight(record: dict[str, Any]) -> int:
-        return max(int(record.get("sample_total", 0)), 0) if record.get(
-            "aggregation"
-        ) == "per_sample" else 1
+        return (
+            max(int(record.get("sample_total", 0)), 0)
+            if record.get("aggregation") == "per_sample"
+            else 1
+        )
 
     failed_count = sum(
         weight(record)

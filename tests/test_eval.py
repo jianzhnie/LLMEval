@@ -66,10 +66,15 @@ def _scorer_result(name: str, value: float) -> ScorerResult:
 
 
 class TestEvaluateTask:
-    def test_empty_dataset_returns_zero_and_validates_task(self, tmp_path: Path) -> None:
-        assert evaluate_task(
-            [], "mc_opensource/task", "a", "g", tmp_path / "empty.jsonl", 4
-        ) == 0.0
+    def test_empty_dataset_returns_zero_and_validates_task(
+        self, tmp_path: Path
+    ) -> None:
+        assert (
+            evaluate_task(
+                [], "mc_opensource/task", "a", "g", tmp_path / "empty.jsonl", 4
+            )
+            == 0.0
+        )
         assert (tmp_path / "empty.summary.json").exists()
 
     def test_unsupported_task_returns_none(self, tmp_path: Path) -> None:

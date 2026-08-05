@@ -19,7 +19,13 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-__all__ = ["CACHE_SCHEMA_VERSION", "CacheStats", "ContentAddressedCache"]
+__all__ = [
+    "CACHE_SCHEMA_VERSION",
+    "CacheStats",
+    "ContentAddressedCache",
+    "build_cache",
+    "log_cache_stats",
+]
 
 CACHE_SCHEMA_VERSION = 1
 
@@ -62,7 +68,7 @@ def _json_safe(value: Any) -> Any:
         return "inf" if value > 0 else "-inf"
     if isinstance(value, dict):
         return {key: _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [_json_safe(item) for item in value]
     return value
 
@@ -164,8 +170,6 @@ class ContentAddressedCache:
         """Atomically write one entry unless the cache is read-only."""
         if self.read_only:
             return
-        if not isinstance(value, dict):
-            raise TypeError("cache values must be JSON objects")
         path = self._path(key)
         self.root.mkdir(parents=True, exist_ok=True)
         envelope = {
@@ -242,6 +246,38 @@ class ContentAddressedCache:
         with self._stats_lock:
             for counter_name in counter_names:
                 self._stats[counter_name] += 1
+
+
+def build_cache(
+    root: str | Path,
+    namespace: str,
+    *,
+    read_only: bool = False,
+    force_recompute: bool = False,
+    rank: int | str | None = None,
+) -> ContentAddressedCache | None:
+    """Return a cache for ``root``/``namespace``, or ``None`` when caching is off.
+
+    An empty ``root`` means the caller did not opt in, so all runners share one
+    construction site instead of repeating the same conditional.
+    """
+    if not root:
+        return None
+    return ContentAddressedCache(
+        root,
+        namespace,
+        read_only=read_only,
+        force_recompute=force_recompute,
+        rank=rank,
+    )
+
+
+def log_cache_stats(
+    cache: ContentAddressedCache | None, logger: Any, label: str
+) -> None:
+    """Log one cache's runtime counters when caching is enabled."""
+    if cache is not None:
+        logger.info("%s cache statistics: %s", label, cache.stats().to_dict())
 
 
 def _main() -> int:
