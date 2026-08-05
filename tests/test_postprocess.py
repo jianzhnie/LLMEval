@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from llmeval.tasks.postprocess import (
+    FilterRegistry,
     apply_text_pipeline,
     build_text_pipeline,
     strip_reasoning_wrappers,
@@ -29,3 +30,19 @@ def test_apply_text_pipeline_handles_none() -> None:
     assert (
         apply_text_pipeline(None, build_text_pipeline(strip_reasoning_wrappers)) == ""
     )
+
+
+def test_registered_pipeline_records_each_filter_step() -> None:
+    registry = FilterRegistry()
+    registry.register("strip", str.strip, version="2")
+    registry.register("upper", str.upper, version="1")
+    pipeline = registry.build_pipeline("test_pipeline", "3", "strip", "upper")
+
+    output, trace = pipeline.apply_with_trace(" a ")
+
+    assert output == "A"
+    assert trace["pipeline"] == "test_pipeline"
+    assert trace["pipeline_version"] == "3"
+    assert [step["name"] for step in trace["filters"]] == ["strip", "upper"]
+    assert trace["filters"][0]["input"] == " a "
+    assert trace["filters"][1]["output"] == "A"

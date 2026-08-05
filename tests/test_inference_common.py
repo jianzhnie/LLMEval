@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from llmeval.inference.common import (
+    completed_sample_indices_by_identity,
     count_completed_samples,
     count_completed_samples_by_id,
     count_completed_samples_by_identity,
@@ -263,6 +264,31 @@ class TestStableResumeCounts:
 
         assert counts == {("q1", "old"): 1}
         assert len(remaining) == 1
+
+    def test_identity_indices_deduplicate_resumed_rows(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        rows = [
+            {
+                "doc_id": "q1",
+                "prompt": "q",
+                "gen": ["a", "c"],
+                "_llmeval_sample_indices": [0, 2],
+            },
+            {
+                "doc_id": "q1",
+                "prompt": "q",
+                "gen": ["c"],
+                "_llmeval_sample_indices": [2],
+            },
+        ]
+        output.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        assert completed_sample_indices_by_identity(output, "prompt", "gen") == {
+            ("q1", "q"): {0, 2}
+        }
+        assert count_completed_samples_by_identity(output, "prompt", "gen") == {
+            ("q1", "q"): 2
+        }
 
 
 class TestToolChoiceHelper:

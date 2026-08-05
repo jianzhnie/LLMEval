@@ -170,6 +170,9 @@ class TestComputeScores:
         assert data[1]["accuracy"] == 0.0
         assert "extracted_gold" in data[0]
         assert "extracted_answer" in data[0]
+        assert data[0]["raw_gen"] == "$\\boxed{5}$"
+        assert data[0]["filtered_gen"] == "$\\boxed{5}$"
+        assert data[0]["filter_trace"]["pipeline"] == "math_response"
         summary = json.loads((tmp_path / "cache.summary.json").read_text())
         assert summary["accuracy"] == pytest.approx(0.5)
         assert summary["provenance"]["seed"] is None

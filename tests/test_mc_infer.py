@@ -16,6 +16,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from llmeval.cache import ContentAddressedCache
+from llmeval.inference.schema import LoglikelihoodRequest
+
 
 def _make_stub(name: str) -> types.ModuleType:
     mod = types.ModuleType(name)
@@ -59,6 +62,9 @@ def _make_ll_client(max_retries: int = 0) -> MCLoglikelihoodClient:
     client.model_name = "m"
     client.timeout = 5
     client.max_retries = max_retries
+    client.base_url = "http://test/v1"
+    client.seed = 0
+    client.cache = None
     client.client = MagicMock()
     return client
 
@@ -146,19 +152,179 @@ class TestMCLoglikelihoodClient:
             float("-inf"),
         ]
 
+    @pytest.mark.parametrize("backend_failure", ["exception", "empty_shape"])
+    def test_failed_continuation_is_not_cached(
+        self, tmp_path: Path, backend_failure: str
+    ) -> None:
+        client = _make_ll_client()
+        client.cache = ContentAddressedCache(tmp_path, "inference")
+        if backend_failure == "exception":
+            client.client.completions.create.side_effect = RuntimeError("down")
+        else:
+            client.client.completions.create.return_value.choices = []
+
+        result = client.get_choices_continuation_logprobs("prompt", [" A", " B"])
+
+        assert result == [[], []]
+        assert list(client.cache.root.glob("*.json")) == []
+
+    def test_cached_empty_continuation_is_ignored_and_recomputed(
+        self, tmp_path: Path
+    ) -> None:
+        client = _make_ll_client()
+        client.cache = ContentAddressedCache(tmp_path, "inference")
+        request = LoglikelihoodRequest("prompt", (" A",))
+        payload = {
+            "kind": "mc_continuation_logprobs_v2",
+            "base_url": client.base_url,
+            "model": client.model_name,
+            "request": request.cache_identity(),
+            "seed": client.seed,
+        }
+        client.cache.set(
+            client.cache.key(payload),
+            {
+                "result_schema_version": 1,
+                "request": request.cache_identity(),
+                "choices": [],
+                "exact": True,
+            },
+        )
+        choice = MagicMock(index=0)
+        choice.logprobs.text_offset = [0, 6]
+        choice.logprobs.token_logprobs = [None, -0.25]
+        choice.logprobs.tokens = ["prompt", " A"]
+        choice.logprobs.token_ids = [1, 2]
+        client.client.completions.create.return_value.choices = [choice]
+
+        result = client.get_choices_continuation_logprobs("prompt", [" A"])
+
+        assert result == [[-0.25]]
+        client.client.completions.create.assert_called_once()
+
     def test_continuation_returns_only_choice_token_scores(self) -> None:
         client = _make_ll_client()
         first = MagicMock()
         first.logprobs.text_offset = [0, 6, 8]
         first.logprobs.token_logprobs = [None, -0.2, -9.0]
+        first.logprobs.tokens = ["prompt", " A", "x"]
+        first.logprobs.token_ids = [1, 2, 3]
+        first.index = 0
         second = MagicMock()
         second.logprobs.text_offset = [0, 6, 8]
         second.logprobs.token_logprobs = [None, -1.3, -9.0]
+        second.logprobs.tokens = ["prompt", " B", "x"]
+        second.logprobs.token_ids = [1, 4, 3]
+        second.index = 1
         client.client.completions.create.return_value.choices = [first, second]
 
         result = client.get_choices_continuation_logprobs("prompt", [" A", " B"])
 
         assert result == [[-0.2], [-1.3]]
+        assert result.token_texts == [[" A"], [" B"]]
+        assert result.token_ids == [[2], [4]]
+
+    def test_continuation_cache_reproduces_aligned_token_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        client = _make_ll_client()
+        client.cache = ContentAddressedCache(tmp_path, "inference")
+        choice = MagicMock(index=0)
+        choice.logprobs.text_offset = [0, 6]
+        choice.logprobs.token_logprobs = [None, -0.25]
+        choice.logprobs.tokens = ["prompt", " A"]
+        choice.logprobs.token_ids = [1, 2]
+        client.client.completions.create.return_value.choices = [choice]
+
+        first = client.get_choices_continuation_logprobs("prompt", [" A"])
+        client.client.completions.create.reset_mock()
+        second = client.get_choices_continuation_logprobs("prompt", [" A"])
+
+        assert second == first == [[-0.25]]
+        assert second.token_texts == [[" A"]]
+        assert second.token_ids == [[2]]
+        client.client.completions.create.assert_not_called()
+
+    def test_continuation_handles_leading_space_and_multitoken_chinese(self) -> None:
+        client = _make_ll_client()
+        choice = MagicMock()
+        choice.index = 0
+        choice.logprobs.text_offset = [0, 2, 4]
+        choice.logprobs.token_logprobs = [None, -0.4, -0.2]
+        choice.logprobs.tokens = ["题:", " 答", "案"]
+        choice.logprobs.token_ids = [10, 11, 12]
+        client.client.completions.create.return_value.choices = [choice]
+
+        result = client.get_choices_continuation_logprobs("题:", [" 答案"])
+
+        assert result == [[-0.4, -0.2]]
+        assert result.token_texts == [[" 答", "案"]]
+        assert result.token_ids == [[11, 12]]
+
+    def test_continuation_scores_trailing_context_whitespace_like_harness(
+        self,
+    ) -> None:
+        client = _make_ll_client()
+        choice = MagicMock(index=0)
+        choice.logprobs.text_offset = [0, 2]
+        choice.logprobs.token_logprobs = [None, -0.3]
+        choice.logprobs.tokens = ["Q:", " A"]
+        choice.logprobs.token_ids = [10, 11]
+        client.client.completions.create.return_value.choices = [choice]
+
+        result = client.get_choices_continuation_logprobs("Q: ", ["A"])
+
+        assert result == [[-0.3]]
+        assert result.token_texts == [[" A"]]
+
+    def test_continuation_rejects_token_crossing_prompt_boundary(self) -> None:
+        client = _make_ll_client()
+        choice = MagicMock()
+        choice.index = 0
+        choice.logprobs.text_offset = [0, 5]
+        choice.logprobs.token_logprobs = [None, -0.2]
+        choice.logprobs.tokens = ["promp", "t A"]
+        client.client.completions.create.return_value.choices = [choice]
+
+        assert client.get_choices_continuation_logprobs("prompt", [" A"]) == [[]]
+
+    def test_continuation_rejects_misaligned_token_offsets(self) -> None:
+        client = _make_ll_client()
+        choice = MagicMock(index=0)
+        choice.logprobs.text_offset = [0, 6, 6]
+        choice.logprobs.token_logprobs = [None, -0.2, -0.3]
+        choice.logprobs.tokens = ["prompt", " ", "A"]
+        choice.logprobs.token_ids = [1, 2, 3]
+        client.client.completions.create.return_value.choices = [choice]
+
+        assert client.get_choices_continuation_logprobs("prompt", [" A"]) == [[]]
+
+    def test_continuation_cache_key_includes_endpoint_and_rejects_bad_shape(
+        self,
+    ) -> None:
+        client = _make_ll_client()
+        captured_payload: dict[str, object] = {}
+        client.cache = MagicMock()
+        client.cache.key.side_effect = lambda payload: (
+            captured_payload.update(payload) or "key"
+        )
+        client.cache.get.return_value = {"scores": [[-0.1]]}
+        response = MagicMock()
+        response.choices = []
+        for index, token in enumerate((" A", " B")):
+            choice = MagicMock()
+            choice.index = index
+            choice.logprobs.text_offset = [0, 6]
+            choice.logprobs.token_logprobs = [None, -0.2 - index]
+            choice.logprobs.tokens = ["prompt", token]
+            response.choices.append(choice)
+        client.client.completions.create.return_value = response
+
+        result = client.get_choices_continuation_logprobs("prompt", [" A", " B"])
+
+        assert len(result) == 2
+        assert captured_payload["base_url"] == "http://test/v1"
+        client.client.completions.create.assert_called_once()
 
 
 class TestProcessLoglikelihoodItem:
@@ -199,6 +365,8 @@ class TestProcessLoglikelihoodItem:
 
         assert result["scoring_mode"] == "first_token"
         assert result["logprobs"] == [-0.2, -1.0]
+        assert result["loglikelihood_exact"] is False
+        assert result["scoring_approximation"] == "first_token_top_logprobs"
 
 
 class TestProcessGenerateItem:
@@ -263,7 +431,7 @@ class TestProcessGenerateItem:
         )
 
         assert result["gen"] == ["a", "c"]
-        assert result["_llmeval_sample_indices"] == [0, 1]
+        assert result["_llmeval_sample_indices"] == [0, 2]
         assert client.chat.completions.create.call_args.kwargs["n"] == 3
 
 
@@ -322,6 +490,32 @@ class TestMCStableResume:
         )
 
         assert runner.load_data() == []
+
+    def test_generate_resume_requests_a_missing_middle_sample(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        runner.config.n_samples = 3
+        Path(runner.config.input_file).write_text(
+            json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "A"}) + "\n"
+        )
+        Path(runner.config.output_file).write_text(
+            json.dumps(
+                {
+                    "doc_id": "test:0",
+                    "prompt": "q",
+                    "answer": "A",
+                    "gen": ["a", "c"],
+                    "_llmeval_sample_indices": [0, 2],
+                }
+            )
+            + "\n"
+        )
+
+        remaining = runner.load_data()
+
+        assert remaining[0]["_llmeval_remaining_samples"] == 1
+        assert remaining[0]["_llmeval_requested_sample_indices"] == [1]
 
 
 class TestMCRunnerEndToEnd:

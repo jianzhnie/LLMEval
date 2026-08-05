@@ -23,6 +23,8 @@ __all__ = [
     "annotate_dataset_contamination",
     "build_run_provenance",
     "build_sample_provenance",
+    "get_git_hash",
+    "hash_evaluation_inputs",
     "hash_json",
     "hash_string",
     "load_contamination_sources",
@@ -43,6 +45,16 @@ _RUNTIME_FIELDS: set[str] = {
     "_llmeval_contamination",
     "_llmeval_group_id",
     "_llmeval_sample_index",
+    "raw_gen",
+    "filtered_gen",
+    "filter_trace",
+    "correct",
+    "correct_norm",
+    "correct_bytes",
+    "pred",
+    "passed",
+    "result",
+    "stderr",
 }
 _CONTAMINATION_FIELD = "_llmeval_contamination"
 
@@ -64,6 +76,25 @@ def hash_json(value: Any) -> str:
         separators=(",", ":"),
     )
     return hash_string(payload)
+
+
+def hash_evaluation_inputs(
+    eval_dataset: list[dict[str, Any]], response_key: str = "gen"
+) -> str:
+    """Hash scorer inputs while excluding fields produced during evaluation.
+
+    The model response and MC logprobs remain part of the key. Runtime scoring
+    artifacts are removed so scorers may annotate input records in place
+    without changing the key for an otherwise identical repeated evaluation.
+    """
+    runtime_fields = set(_RUNTIME_FIELDS)
+    runtime_fields.discard(response_key)
+    runtime_fields.discard("logprobs")
+    normalized = [
+        {key: value for key, value in item.items() if key not in runtime_fields}
+        for item in eval_dataset
+    ]
+    return hash_json(normalized)
 
 
 def _first_present(
@@ -107,8 +138,8 @@ def build_sample_provenance(
 def _get_git_hash(repo_path: str | Path | None = None) -> str | None:
     cwd = Path(repo_path or os.getcwd())
     try:
-        result = subprocess.run(
-            ["git", "describe", "--always", "--dirty"],
+        commit_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
             cwd=cwd,
             check=True,
             capture_output=True,
@@ -116,7 +147,72 @@ def _get_git_hash(repo_path: str | Path | None = None) -> str | None:
         )
     except (OSError, subprocess.CalledProcessError):
         return None
-    return result.stdout.strip() or None
+
+    commit = commit_result.stdout.strip()
+    if not commit:
+        return None
+
+    try:
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return commit
+
+    status = status_result.stdout
+    if not status:
+        return commit
+
+    # ``git describe --dirty`` only yields the same ``-dirty`` suffix for all
+    # worktree edits. Hash the actual tracked diff and untracked file contents
+    # so evaluation caches cannot survive a scorer change in a dirty checkout.
+    try:
+        diff_result = subprocess.run(
+            ["git", "diff", "HEAD", "--binary"],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+        )
+        root_result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        repo_root = Path(root_result.stdout.strip())
+        untracked_result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return f"{commit}-dirty-{hash_string(status)[:16]}"
+
+    digest = hashlib.sha256()
+    digest.update(status.encode("utf-8", errors="replace"))
+    digest.update(diff_result.stdout)
+    for raw_path in untracked_result.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        digest.update(raw_path)
+        path = repo_root / os.fsdecode(raw_path)
+        try:
+            if path.is_file():
+                digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<unreadable>")
+    return f"{commit}-dirty-{digest.hexdigest()[:16]}"
+
+
+def get_git_hash(repo_path: str | Path | None = None) -> str | None:
+    """Return the current repository revision used for cache provenance."""
+    return _get_git_hash(repo_path)
 
 
 def _resolve_task_name(
@@ -198,6 +294,11 @@ def build_run_provenance(
         "git_hash": _get_git_hash(),
         "date": time.time(),
         "seed": seed,
+        "python_seed": seed,
+        "numpy_seed": seed,
+        "torch_seed": seed,
+        "fewshot_seed": seed,
+        "generation_seed": seed,
         "num_records": len(eval_dataset),
         "prompt_hash": hash_json(prompt_hashes),
         "target_hash": hash_json(target_hashes),

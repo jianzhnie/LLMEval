@@ -120,10 +120,13 @@ def _format_mc_row(
 
     elif name == "mmlu_pro":
         raw_options = example["options"]
-        if isinstance(raw_options, str):
-            choices = [c.strip() for c in raw_options.split(",")]
+        if isinstance(raw_options, list):
+            choices = [str(choice).strip() for choice in raw_options]
+        elif isinstance(raw_options, str):
+            # Retain compatibility with older comma-separated local datasets.
+            choices = [choice.strip() for choice in raw_options.split(",")]
         else:
-            choices = [str(c).strip() for c in raw_options]
+            raise TypeError("mmlu_pro 'options' must be a list or string")
         answer_idx = example.get("answer_index")
         if answer_idx is not None and isinstance(answer_idx, int):
             answer = letters[answer_idx]
@@ -165,9 +168,8 @@ def _format_mc_row(
         "doc_id": f"{name}:{source_id}",
         "prompt": prompt,
         "answer": answer,
-        "choices": letters[
-            : len(choices)
-        ],  # answer letters (A/B/C/...), loglikelihood targets
+        "choices": choices,
+        "choice_tokens": letters[: len(choices)],
         "gold": answer_idx,
     }
 

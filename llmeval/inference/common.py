@@ -29,6 +29,7 @@ from typing import Any
 from llmeval.utils.log import init_logger
 
 __all__ = [
+    "completed_sample_indices_by_identity",
     "count_completed_samples",
     "count_completed_samples_by_id",
     "count_completed_samples_by_identity",
@@ -240,10 +241,28 @@ def count_completed_samples_by_identity(
     prompt in resume state prevents stale generations from being reused after
     a prompt template or few-shot prefix changes.
     """
-    counts: dict[tuple[str, str], int] = collections.defaultdict(int)
+    return {
+        identity: len(indices)
+        for identity, indices in completed_sample_indices_by_identity(
+            output_file, input_key, response_key
+        ).items()
+    }
+
+
+def completed_sample_indices_by_identity(
+    output_file: str | Path,
+    input_key: str,
+    response_key: str,
+) -> dict[tuple[str, str], set[int]]:
+    """Return completed sample indices for each stable document and prompt.
+
+    Explicit sample indices are deduplicated across resumed output rows. Older
+    rows without indices are assigned the next unused positions in file order.
+    """
+    completed: dict[tuple[str, str], set[int]] = collections.defaultdict(set)
     output_path = Path(output_file)
     if not output_path.exists() or output_path.stat().st_size == 0:
-        return counts
+        return completed
 
     try:
         with open(output_path, encoding="utf-8") as handle:
@@ -262,25 +281,49 @@ def count_completed_samples_by_identity(
                 if not document_id or prompt is None:
                     continue
 
-                response = item.get(response_key) or item.get("gen")
+                response = item.get(response_key)
+                if response is None:
+                    response = item.get("gen")
                 if isinstance(response, list):
                     count = len(response)
                 elif (
                     response is not None
                     or item.get("logprobs") is not None
-                    or item.get("Verifier_judgment")
+                    or item.get("Verifier_response")
                 ):
                     count = 1
                 else:
                     count = 0
-                if count:
-                    counts[(str(document_id), str(prompt))] += count
+                if not count:
+                    continue
+
+                identity = (str(document_id), str(prompt))
+                raw_indices = item.get("_llmeval_sample_indices")
+                if (
+                    isinstance(raw_indices, list)
+                    and len(raw_indices) == count
+                    and all(
+                        isinstance(index, int) and index >= 0 for index in raw_indices
+                    )
+                ):
+                    indices = raw_indices
+                elif isinstance(item.get("_llmeval_sample_index"), int):
+                    indices = [int(item["_llmeval_sample_index"])]
+                else:
+                    indices = []
+                    next_index = 0
+                    for _ in range(count):
+                        while next_index in completed[identity]:
+                            next_index += 1
+                        indices.append(next_index)
+                        next_index += 1
+                completed[identity].update(indices)
     except OSError as exc:
         logger.error(
             "Error reading resume identity state from %s: %s", output_file, exc
         )
 
-    return counts
+    return completed
 
 
 def expand_data_with_resume(

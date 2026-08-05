@@ -1,0 +1,200 @@
+"""Regression tests for P1 registry, reproducibility, metrics, and caches."""
+
+from __future__ import annotations
+
+import json
+import random
+from pathlib import Path
+
+import pytest
+
+from llmeval.cache import ContentAddressedCache
+from llmeval.inference.mc import FewShotFormatter
+from llmeval.tasks.registry import (
+    EvaluationContext,
+    MathTask,
+    MCTask,
+    TaskRegistry,
+    evaluate_registered_task,
+)
+from llmeval.tasks.results import (
+    aggregate_metric_values,
+    metric_from_samples,
+)
+from llmeval.utils.reproducibility import seed_everything, seed_provenance
+
+
+def test_content_cache_round_trip_corruption_and_key_isolation(tmp_path: Path) -> None:
+    cache = ContentAddressedCache(tmp_path, "evaluation")
+    key = cache.key({"task": "math", "seed": 1})
+    other_key = cache.key({"task": "math", "seed": 2})
+    assert key != other_key
+    cache.set(key, {"value": 1})
+    assert cache.get(key) == {"value": 1}
+    assert cache.get(other_key) is None
+
+    path = tmp_path / "evaluation" / f"{key}.json"
+    path.write_text("not json", encoding="utf-8")
+    assert cache.get(key) is None
+
+
+def test_content_cache_read_only_and_force_recompute(tmp_path: Path) -> None:
+    writable = ContentAddressedCache(tmp_path, "inference")
+    key = writable.key({"request": 1})
+    writable.set(key, {"answer": "cached"})
+    read_only = ContentAddressedCache(tmp_path, "inference", read_only=True)
+    assert read_only.get(key) == {"answer": "cached"}
+    read_only.set(key, {"answer": "ignored"})
+    assert read_only.get(key) == {"answer": "cached"}
+    forced = ContentAddressedCache(tmp_path, "inference", force_recompute=True)
+    assert forced.get(key) is None
+
+
+def test_content_cache_serializes_non_finite_numbers_as_json_strings(
+    tmp_path: Path,
+) -> None:
+    cache = ContentAddressedCache(tmp_path, "inference")
+    key = cache.key({"request": "first-token"})
+    cache.set(key, {"scores": [float("-inf"), float("inf"), float("nan")]})
+
+    raw = (tmp_path / "inference" / f"{key}.json").read_text(encoding="utf-8")
+    assert "-Infinity" not in raw
+    assert cache.get(key) == {"scores": ["-inf", "inf", "nan"]}
+
+
+def test_bootstrap_and_aggregation_are_deterministic() -> None:
+    samples = [0.0, 1.0, 1.0, 0.0]
+    first = metric_from_samples(samples, 7, n_resamples=100)
+    second = metric_from_samples(samples, 7, n_resamples=100)
+    different = metric_from_samples(samples, 8, n_resamples=100)
+    assert first == second
+    assert first.value == pytest.approx(0.5)
+    assert first.count == 4
+    assert (first.stderr, first.ci_low, first.ci_high) != (
+        different.stderr,
+        different.ci_low,
+        different.ci_high,
+    )
+    assert aggregate_metric_values([first], mode="micro").value == pytest.approx(0.5)
+    assert aggregate_metric_values([first], mode="macro").value == pytest.approx(0.5)
+
+
+def test_seed_everything_does_not_change_seed_contract() -> None:
+    state = seed_everything(123)
+    first = random.random()
+    seed_everything(123)
+    assert random.random() == first
+    assert state.seed == state.python_seed == 123
+    provenance = seed_provenance(state)
+    assert provenance["fewshot_seed"] == provenance["generation_seed"] == 123
+
+
+def test_few_shot_sampling_is_per_document_and_seeded(tmp_path: Path) -> None:
+    source = tmp_path / "dev.jsonl"
+    examples = [
+        {
+            "doc_id": f"dev:{index}",
+            "prompt": f"Question {index}?\nA. one\nB. two\nAnswer:",
+            "answer": "A",
+        }
+        for index in range(5)
+    ]
+    source.write_text(
+        "\n".join(json.dumps(example) for example in examples), encoding="utf-8"
+    )
+    formatter = FewShotFormatter(2, str(source), seed=9)
+    formatter.load(str(source))
+    first = formatter.get_prefix("test prompt", "test:0")
+    repeat = formatter.get_prefix("test prompt", "test:0")
+    other = formatter.get_prefix("test prompt", "test:1")
+    assert first == repeat
+    assert first != other
+
+
+def test_registry_reports_registered_families() -> None:
+    task = MathTask(lambda **_: 1.0)
+    registry = TaskRegistry({"math_opensource": task})
+    assert registry.names == ("math_opensource",)
+    with pytest.raises(ValueError, match="registered tasks"):
+        registry.resolve("unsupported/task")
+
+
+def test_evaluation_cache_avoids_recomputing_registered_task(tmp_path: Path) -> None:
+    calls = 0
+
+    def scorer(**kwargs: object) -> float:
+        nonlocal calls
+        calls += 1
+        eval_dataset = kwargs["eval_dataset"]
+        assert isinstance(eval_dataset, list)
+        for item in eval_dataset:
+            assert isinstance(item, dict)
+            item.update({"accuracy": 1.0, "raw_gen": "4"})
+        return 1.0
+
+    task = MathTask(scorer)
+    registry = TaskRegistry({"math_opensource": task})
+    dataset = [{"prompt": "2+2", "answer": "4", "gen": ["4"]}]
+
+    def context() -> EvaluationContext:
+        return EvaluationContext(
+            eval_dataset=dataset,
+            task_name="math_opensource/test",
+            label_key="answer",
+            response_key="gen",
+            cache_path=tmp_path / "legacy.jsonl",
+            max_workers=1,
+            timeout=1,
+            exec_timeout=1.0,
+            seed=42,
+            content_cache_dir=tmp_path / "content",
+            bootstrap_samples=10,
+        )
+
+    first = evaluate_registered_task(context(), registry)
+    second = evaluate_registered_task(context(), registry)
+    assert calls == 1
+    assert first.to_dict() == second.to_dict()
+
+
+@pytest.mark.parametrize("aggregation", ["first", "majority_vote", "any_correct"])
+def test_mc_registry_uses_one_observation_for_item_aggregation(
+    tmp_path: Path, aggregation: str
+) -> None:
+    def scorer(**kwargs: object) -> float:
+        cache_path = Path(str(kwargs["cache_path"]))
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "correct": True,
+                    "correct_norm": True,
+                    "correct_bytes": True,
+                    "aggregation": aggregation,
+                    "sample_correct": [True, False],
+                }
+            )
+            + "\n"
+        )
+        cache_path.with_suffix(".summary.json").write_text(
+            json.dumps({"acc": 1.0, "acc_norm": 1.0, "acc_bytes": 1.0})
+        )
+        return 1.0
+
+    context = EvaluationContext(
+        eval_dataset=[{"answer": "A", "gen": ["A", "B"]}],
+        task_name="mc_opensource/test",
+        label_key="answer",
+        response_key="gen",
+        cache_path=tmp_path / f"{aggregation}.jsonl",
+        max_workers=1,
+        timeout=1,
+        exec_timeout=1.0,
+        seed=1,
+        mc_aggregation=aggregation,
+        bootstrap_samples=10,
+    )
+
+    result = MCTask(scorer, scorer).score(context)
+
+    assert result.metrics["acc"].value == 1.0
+    assert result.metrics["acc"].count == 1

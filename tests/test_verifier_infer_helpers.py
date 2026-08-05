@@ -226,3 +226,35 @@ class TestVerifierResume:
         )
 
         assert runner.load_data() == []
+
+    def test_response_with_unparsed_judgment_is_still_complete(
+        self, tmp_path: Path
+    ) -> None:
+        runner = self._runner(tmp_path)
+        item = {"prompt": "q", "answer": "4", "gen": ["4"]}
+        Path(runner.args.input_file).write_text(json.dumps(item) + "\n")
+        result = runner._prepare_result_item(item, "unclassifiable response")
+        result["Verifier_judgment"] = ""
+        Path(runner.args.output_file).write_text(json.dumps(result) + "\n")
+
+        assert runner.count_completed_samples()[result["llmeval_verifier_id"]] == 1
+        assert runner.load_data() == []
+
+    def test_resume_preserves_missing_sample_index(self, tmp_path: Path) -> None:
+        runner = self._runner(tmp_path)
+        runner.args.n_samples = 3
+        item = {"doc_id": "doc:1", "prompt": "q", "answer": "4", "gen": ["4"]}
+        Path(runner.args.input_file).write_text(json.dumps(item) + "\n")
+        rows = []
+        for index in (0, 2):
+            row = runner._prepare_result_item(item, f"response-{index}")
+            row["_llmeval_sample_index"] = index
+            rows.append(row)
+        Path(runner.args.output_file).write_text(
+            "".join(json.dumps(row) + "\n" for row in rows)
+        )
+
+        remaining = runner.load_data()
+
+        assert len(remaining) == 1
+        assert remaining[0]["_llmeval_sample_index"] == 1

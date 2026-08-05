@@ -423,6 +423,9 @@ def _make_ll_client(max_retries: int = 0):
     client.model_name = "m"
     client.timeout = 5
     client.max_retries = max_retries
+    client.base_url = "http://test/v1"
+    client.seed = 0
+    client.cache = None
     client.client = MagicMock()
     return client
 
@@ -514,10 +517,12 @@ class TestMCLoglikelihoodClient:
         client = _make_ll_client()
         response = MagicMock()
         response.choices = []
-        for values in ([-1.0, -2.0], [-0.5]):
+        for text, values in (("AB", [-1.0, -2.0]), ("C", [-0.5])):
             choice = MagicMock()
-            choice.logprobs.text_offset = [0, 2, 3]
+            choice.logprobs.text_offset = [0, *range(2, 2 + len(text))]
             choice.logprobs.token_logprobs = [None, *values]
+            choice.logprobs.tokens = ["Q:", *text]
+            choice.logprobs.token_ids = None
             response.choices.append(choice)
         client.client.completions.create.return_value = response
 
@@ -530,20 +535,22 @@ class TestMCLoglikelihoodClient:
 
 
 class TestContinuationScoring:
-    def test_acc_norm_uses_continuation_token_counts(self, tmp_path: Path) -> None:
+    def test_acc_norm_uses_harness_character_counts(self, tmp_path: Path) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
 
         items = [
             {
-                "gold": 1,
-                "logprobs": [-1.0, -2.0],
-                "choice_logprobs": [[-1.0], [-0.5, -0.5, -0.5, -0.5]],
+                "gold": 0,
+                "logprobs": [-1.0, -1.2],
+                "choice_logprobs": [[-1.0], [-0.3, -0.3, -0.3, -0.3]],
+                "choice_tokens": ["AB", "C"],
                 "choice_token_count": [1, 4],
-                "choice_byte_count": [1, 4],
+                "choice_char_count": [2, 1],
+                "choice_byte_count": [2, 1],
             }
         ]
         cache = tmp_path / "continuation.jsonl"
-        assert score_loglikelihood(items, cache) == 0.0
+        assert score_loglikelihood(items, cache) == 1.0
         summary = json.loads(cache.with_suffix(".summary.json").read_text())
         assert summary["acc_norm"] == 1.0
 
@@ -768,3 +775,58 @@ class TestMCScoreEdgeCases:
         items = [{"answer": "B", "gen": "Answer: B"}]
         acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
         assert acc == 1.0
+
+
+def test_generate_filter_trace_preserves_raw_response(tmp_path: Path) -> None:
+    from llmeval.tasks.mc_eval.mc_score import score_generate
+
+    cache = tmp_path / "mc.jsonl"
+    score_generate(
+        [{"answer": "B", "gen": ["<think>x</think><answer>B</answer>"]}],
+        "answer",
+        "gen",
+        cache,
+    )
+
+    record = json.loads(cache.read_text(encoding="utf-8"))
+    assert record["raw_gen"] == ["<think>x</think><answer>B</answer>"]
+    assert record["filtered_gen"] == ["B"]
+    assert record["filter_trace"][0]["pipeline"] == "mc_generation"
+    assert [step["name"] for step in record["filter_trace"][0]["filters"]] == [
+        "strip_reasoning",
+        "extract_answer",
+    ]
+
+
+def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None:
+    from llmeval.tasks.mc_eval.mc_score import score_generate
+
+    items = [
+        {
+            "doc_id": "mmlu:0",
+            "prompt": "q",
+            "answer": "B",
+            "gen": ["Answer: A", "Answer: B"],
+            "_llmeval_sample_indices": [0, 2],
+        },
+        {
+            "doc_id": "mmlu:0",
+            "prompt": "q",
+            "answer": "B",
+            "gen": ["Answer: B"],
+            "_llmeval_sample_indices": [1],
+        },
+    ]
+    cache = tmp_path / "resumed.jsonl"
+
+    assert (
+        score_generate(items, "answer", "gen", cache, aggregation="majority_vote")
+        == 1.0
+    )
+    records = cache.read_text(encoding="utf-8").strip().splitlines()
+    assert len(records) == 1
+    assert json.loads(records[0])["predictions"] == ["A", "B", "B"]
+    summary = json.loads(cache.with_suffix(".summary.json").read_text())
+    assert summary["question_total"] == 1
+    assert summary["sample_total"] == 3
+    assert summary["aggregation"] == "majority_vote"

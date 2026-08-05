@@ -564,7 +564,7 @@ class VerifierOfflineInferenceRunner:
 
         return result
 
-    def count_completed_samples(self) -> dict[str, int]:
+    def get_completed_sample_indices(self) -> dict[str, set[int]]:
         """
         Count completed samples for resume functionality.
 
@@ -573,15 +573,15 @@ class VerifierOfflineInferenceRunner:
         functionality for interrupted runs.
 
         Returns:
-            Dictionary mapping question content to count of completed samples.
+            Mapping of verifier identity to completed sample indices.
         """
-        completed_counts: dict[str, int] = collections.defaultdict(int)
+        completed_indices: dict[str, set[int]] = collections.defaultdict(set)
 
         if not os.path.exists(self.args.output_file):
-            return completed_counts
+            return {}
 
         if os.path.getsize(self.args.output_file) == 0:
-            return completed_counts
+            return {}
 
         try:
             with open(self.args.output_file, encoding="utf-8") as f:
@@ -601,17 +601,32 @@ class VerifierOfflineInferenceRunner:
                             or item.get("prompt")
                         )
 
-                        # Each written line represents a single completed judgment.
-                        # Only count entries that contain a non-empty 'Verifier_judgment'.
-                        if prompt_key is not None and item.get("Verifier_judgment"):
-                            completed_counts[str(prompt_key)] += 1
+                        # Inference completion is independent from whether the
+                        # judgment parser could classify the model response.
+                        if prompt_key is not None and item.get("Verifier_response"):
+                            key = str(prompt_key)
+                            raw_index = item.get("_llmeval_sample_index")
+                            if isinstance(raw_index, int) and raw_index >= 0:
+                                sample_index = raw_index
+                            else:
+                                sample_index = 0
+                                while sample_index in completed_indices[key]:
+                                    sample_index += 1
+                            completed_indices[key].add(sample_index)
                     except json.JSONDecodeError as e:
                         logger.warning(f"Invalid JSON on line {line_num}: {e}")
                         continue
         except Exception as e:
             logger.error(f"Error reading output file for resume check: {e}")
 
-        return completed_counts
+        return completed_indices
+
+    def count_completed_samples(self) -> dict[str, int]:
+        """Return deduplicated completed sample counts for compatibility."""
+        return {
+            key: len(indices)
+            for key, indices in self.get_completed_sample_indices().items()
+        }
 
     def load_data(self) -> list[dict[str, Any]]:
         """
@@ -637,8 +652,8 @@ class VerifierOfflineInferenceRunner:
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
         # Check for completed samples
-        completed_counts = self.count_completed_samples()
-        total_completed = sum(completed_counts.values())
+        completed_indices = self.get_completed_sample_indices()
+        total_completed = sum(len(indices) for indices in completed_indices.values())
 
         if total_completed > 0:
             logger.info(f"Found {total_completed} completed samples from previous run")
@@ -650,11 +665,13 @@ class VerifierOfflineInferenceRunner:
                 skipped_items += 1
                 continue
             resume_id = self._resume_id(item)
-            completed = completed_counts.get(resume_id, 0)
-            remaining = max(0, self.args.n_samples - completed)
-            for _ in range(remaining):
+            used_indices = completed_indices.get(resume_id, set())
+            for sample_index in range(self.args.n_samples):
+                if sample_index in used_indices:
+                    continue
                 expanded_item = copy.deepcopy(item)
                 expanded_item[_VERIFIER_RESUME_KEY] = resume_id
+                expanded_item["_llmeval_sample_index"] = sample_index
                 expanded_data.append(expanded_item)
         if skipped_items > 0:
             logger.warning(f"Skipped {skipped_items} non-dict item(s)")

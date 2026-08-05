@@ -179,6 +179,12 @@ class TestEvalTaskArguments:
             args = EvalTaskArguments(input_path=str(input_f), task_name=task)
             assert args.task_name == task
 
+    def test_evaluation_content_cache_is_opt_in(self, tmp_path: Path) -> None:
+        input_f = tmp_path / "data.jsonl"
+        input_f.write_text('{"prompt": "q", "answer": "a"}\n')
+        args = EvalTaskArguments(input_path=str(input_f))
+        assert args.content_cache_dir == ""
+
     def test_invalid_task_raises(self, tmp_path: Path) -> None:
         input_f = tmp_path / "data.jsonl"
         input_f.write_text("{}\n")

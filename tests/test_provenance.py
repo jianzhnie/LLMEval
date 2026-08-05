@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 from llmeval.tasks.provenance import (
     annotate_dataset_contamination,
     build_run_provenance,
     build_sample_provenance,
+    get_git_hash,
 )
 
 
@@ -55,3 +59,30 @@ def test_contamination_annotation_flags_exact_prompt_overlap() -> None:
     assert provenance["contamination"]["checked"] is True
     assert provenance["contamination"]["contaminated"] is True
     assert provenance["contamination"]["match_hash"]
+
+
+def test_git_hash_changes_when_dirty_worktree_content_changes(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "LLMEval Test"], cwd=tmp_path, check=True
+    )
+    source = tmp_path / "scorer.py"
+    source.write_text("return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "scorer.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+
+    clean = get_git_hash(tmp_path)
+    source.write_text("return 2\n", encoding="utf-8")
+    first_dirty = get_git_hash(tmp_path)
+    source.write_text("return 3\n", encoding="utf-8")
+    second_dirty = get_git_hash(tmp_path)
+
+    assert clean is not None
+    assert first_dirty is not None and first_dirty.startswith(f"{clean}-dirty-")
+    assert second_dirty is not None and second_dirty.startswith(f"{clean}-dirty-")
+    assert first_dirty != second_dirty

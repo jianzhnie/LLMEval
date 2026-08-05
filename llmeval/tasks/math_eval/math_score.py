@@ -23,9 +23,8 @@ from tqdm import tqdm
 
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
 from llmeval.tasks.postprocess import (
-    apply_text_pipeline,
-    build_text_pipeline,
-    strip_reasoning_wrappers,
+    DEFAULT_FILTER_REGISTRY,
+    TextFilterPipeline,
 )
 from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
 from llmeval.utils.log import init_logger
@@ -59,7 +58,9 @@ _verify_func = math_metric(
     precision=6,
 )
 
-MATH_RESPONSE_PIPELINE = build_text_pipeline(strip_reasoning_wrappers)
+MATH_RESPONSE_PIPELINE: TextFilterPipeline = DEFAULT_FILTER_REGISTRY.build_pipeline(
+    "math_response", "1", "strip_reasoning"
+)
 
 INVALID_ANSWER = "[invalidanswer]"
 _FINAL_ANSWER_RE = re.compile(
@@ -310,7 +311,7 @@ def process_answers(
     generated_text = (
         generated_text[0] if isinstance(generated_text, list) else str(generated_text)
     )
-    generated_text = apply_text_pipeline(generated_text, MATH_RESPONSE_PIPELINE)
+    generated_text = MATH_RESPONSE_PIPELINE.apply(generated_text)
 
     try:
         grade, extracted_answers = _verify_func([gold_answer_text], [generated_text])
@@ -458,6 +459,7 @@ def compute_scores(
                         "accuracy": is_correct,
                         "extracted_gold": extracted_gold,
                         "extracted_answer": extracted_answer,
+                        **_filter_artifacts(eval_dataset[idx].get(response_key)),
                         **build_sample_provenance(
                             eval_dataset[idx],
                             label_key=label_key,
@@ -485,6 +487,7 @@ def compute_scores(
                     "accuracy": 0.0,
                     "extracted_gold": "Error",
                     "extracted_answer": "Error",
+                    **_filter_artifacts(eval_dataset[idx].get(response_key)),
                     **build_sample_provenance(
                         eval_dataset[idx],
                         label_key=label_key,
@@ -537,6 +540,17 @@ def compute_scores(
     )
     logger.info(f"Final Accuracy: {accuracy:.4f}")
     return accuracy
+
+
+def _filter_artifacts(response: Any) -> dict[str, Any]:
+    """Return the raw response, filtered response, and task pipeline trace."""
+    raw_response = response[0] if isinstance(response, list) and response else response
+    filtered, trace = MATH_RESPONSE_PIPELINE.apply_with_trace(raw_response)
+    return {
+        "raw_gen": "" if raw_response is None else str(raw_response),
+        "filtered_gen": filtered,
+        "filter_trace": trace,
+    }
 
 
 def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:

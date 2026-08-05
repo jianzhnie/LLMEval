@@ -1,7 +1,7 @@
-"""Tests for llmeval.evaluator helpers.
+"""Tests for the evaluator entry points.
 
-These tests target _process_item and evaluate_task logic without
-requiring pebble / math-verify to be installed.
+These tests exercise registry-backed evaluation without requiring a live model
+service.
 """
 
 from __future__ import annotations
@@ -51,68 +51,8 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
     sys.modules["transformers"] = _tf
 
 from llmeval.evaluator import (
-    _process_item,
     evaluate_task,
-    preprocess_answers,
 )
-
-
-class TestPreprocessAnswers:
-    def test_strips_think_tags_from_list(self) -> None:
-        data = [{"gen": ["<think>r</think>answer A", "<answer>B</answer>"]}]
-        preprocess_answers(data, "gen")
-        assert data[0]["gen"] == ["answer A", "B"]
-
-    def test_handles_bare_string_gen(self) -> None:
-        data = [{"gen": "reasoning</think>final"}]
-        preprocess_answers(data, "gen")
-        assert data[0]["gen"] == "final"
-
-    def test_missing_response_key_becomes_empty_list(self) -> None:
-        data = [{"answer": "5"}]
-        preprocess_answers(data, "gen")
-        assert data[0]["gen"] == []
-
-    def test_plain_responses_unchanged(self) -> None:
-        data = [{"gen": ["plain one", "plain two"]}]
-        preprocess_answers(data, "gen")
-        assert data[0]["gen"] == ["plain one", "plain two"]
-
-
-class TestProcessItem:
-    def test_copies_and_adds_task(self) -> None:
-        item = {"prompt": "q", "answer": "a", "gen": ["response"]}
-        result = _process_item(item, "math_opensource/aime24")
-        assert result["task"] == "math_opensource/aime24"
-        assert result["gen"] == ["response"]
-        # Original not modified
-        assert "task" not in item
-
-    def test_custom_keys(self) -> None:
-        item = {"input": "q", "label": "a", "output": ["r"]}
-        result = _process_item(
-            item, "math_opensource/math500", label_key="label", response_key="output"
-        )
-        assert result["task"] == "math_opensource/math500"
-
-    def test_missing_label_key_raises(self) -> None:
-        with pytest.raises(ValueError, match="label"):
-            _process_item({"prompt": "q"}, "task")
-
-    def test_missing_response_key_raises(self) -> None:
-        with pytest.raises(ValueError, match="response"):
-            _process_item({"prompt": "q", "answer": "a"}, "task")
-
-    def test_non_dict_raises(self) -> None:
-        with pytest.raises(TypeError, match="dictionary"):
-            _process_item("not a dict", "task")
-
-    def test_does_not_mutate_original(self) -> None:
-        item = {"prompt": "q", "answer": "a", "gen": ["r"]}
-        original_keys = set(item.keys())
-        _process_item(item, "task")
-        assert set(item.keys()) == original_keys
-        assert "task" not in item
 
 
 class TestEvaluateTask:

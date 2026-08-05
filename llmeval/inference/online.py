@@ -24,6 +24,7 @@ import openai
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
+from llmeval.cache import ContentAddressedCache
 from llmeval.inference.common import (
     count_completed_samples,
     count_completed_samples_by_identity,
@@ -37,6 +38,7 @@ from llmeval.inference.common import (
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
+from llmeval.utils.reproducibility import seed_everything
 from llmeval.utils.retry import call_with_retry
 
 logger = init_logger("online_vllm_server", logging.INFO)
@@ -63,6 +65,10 @@ class InferenceClient:
         max_retries: int = 3,
         tool_choice: str = "none",
         api_key: str | None = None,
+        seed: int = 0,
+        content_cache_dir: str = "",
+        force_recompute: bool = False,
+        read_only_cache: bool = False,
     ) -> None:
         """Initialize the inference client with API configuration and validation.
 
@@ -84,6 +90,17 @@ class InferenceClient:
         self.timeout: int = timeout
         self.max_retries: int = max_retries
         self.tool_choice: str = tool_choice
+        self.seed = seed
+        self.cache = (
+            ContentAddressedCache(
+                content_cache_dir,
+                "inference",
+                force_recompute=force_recompute,
+                read_only=read_only_cache,
+            )
+            if content_cache_dir
+            else None
+        )
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
         # Warn if using default EMPTY key
@@ -192,12 +209,25 @@ class InferenceClient:
             top_k,
             enable_thinking,
         )
+        cache = getattr(self, "cache", None)
+        cache_key = (
+            cache.key({"endpoint": self.base_url, "request": call_args})
+            if cache is not None
+            else None
+        )
+        if cache is not None and cache_key is not None:
+            cached = cache.get(cache_key)
+            if cached is not None and isinstance(cached.get("content"), str):
+                return cached["content"]
         completion = self._request_with_retry(call_args)
         if completion is None:
             return ""  # context length exceeded (logged in _request_with_retry)
         # Reasoning models may return content=None (thinking exhausted
         # max_tokens); normalize to "" so callers can treat it uniformly
-        return completion.choices[0].message.content or ""
+        content = completion.choices[0].message.content or ""
+        if cache is not None and cache_key is not None:
+            cache.set(cache_key, {"content": content})
+        return content
 
     def get_contents(
         self,
@@ -250,10 +280,23 @@ class InferenceClient:
             enable_thinking,
             n=n,
         )
+        cache = getattr(self, "cache", None)
+        cache_key = (
+            cache.key({"endpoint": self.base_url, "request": call_args})
+            if cache is not None
+            else None
+        )
+        if cache is not None and cache_key is not None:
+            cached = cache.get(cache_key)
+            if cached is not None and isinstance(cached.get("contents"), list):
+                return [str(content) for content in cached["contents"]]
         completion = self._request_with_retry(call_args)
         if completion is None:
             return []  # context length exceeded (logged in _request_with_retry)
-        return [choice.message.content or "" for choice in completion.choices]
+        contents = [choice.message.content or "" for choice in completion.choices]
+        if cache is not None and cache_key is not None:
+            cache.set(cache_key, {"contents": contents})
+        return contents
 
     def _build_call_args(
         self,
@@ -303,6 +346,7 @@ class InferenceClient:
                 "chat_template_kwargs": {"enable_thinking": enable_thinking},
             },
             "timeout": self.timeout,
+            "seed": getattr(self, "seed", 0),
         }
         # n: only sent for multi-sample requests (single-sample default is 1)
         if n > 1:
@@ -386,6 +430,7 @@ class InferenceRunner:
             proper resource management and progress tracking.
         """
         self.args: OnlineInferArguments = args
+        seed_everything(args.seed)
 
         # Initialize client with error handling
         try:
@@ -395,6 +440,10 @@ class InferenceRunner:
                 max_retries=args.max_retries,
                 tool_choice=args.tool_choice,
                 api_key=args.api_key,
+                seed=args.seed,
+                content_cache_dir=args.content_cache_dir,
+                force_recompute=args.force_recompute,
+                read_only_cache=args.read_only_cache,
             )
         except (OSError, ValueError) as e:
             raise RuntimeError(f"Failed to initialize inference client: {e}") from e

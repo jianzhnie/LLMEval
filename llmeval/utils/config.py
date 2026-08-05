@@ -503,6 +503,18 @@ class OnlineInferArguments(
     and ServerArguments.
     """
 
+    seed: int = field(default=0, metadata={"help": "Generation seed sent to the API."})
+    content_cache_dir: str = field(
+        default="",
+        metadata={"help": "Optional content-addressed inference cache directory."},
+    )
+    force_recompute: bool = field(
+        default=False, metadata={"help": "Ignore existing inference cache entries."}
+    )
+    read_only_cache: bool = field(
+        default=False, metadata={"help": "Do not write inference cache entries."}
+    )
+
     def __post_init__(self) -> None:
         """Validate all inherited arguments."""
         # Only validate what online mode needs; no vLLM engine args
@@ -510,6 +522,8 @@ class OnlineInferArguments(
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)
         ServerArguments.__post_init__(self)
+        if self.seed < 0:
+            raise ValueError(f"seed must be non-negative, got: {self.seed}")
 
 
 @dataclass
@@ -710,6 +724,19 @@ class MCInferConfig:
         default="gen",
         metadata={"help": "Field name for model generation results in dataset."},
     )
+    seed: int = field(
+        default=0, metadata={"help": "Generation and few-shot sampling seed."}
+    )
+    content_cache_dir: str = field(
+        default="",
+        metadata={"help": "Optional content-addressed inference cache directory."},
+    )
+    force_recompute: bool = field(
+        default=False, metadata={"help": "Ignore existing inference cache entries."}
+    )
+    read_only_cache: bool = field(
+        default=False, metadata={"help": "Do not write inference cache entries."}
+    )
 
     def __post_init__(self) -> None:
         """
@@ -755,6 +782,13 @@ class MCInferConfig:
             )
         if self.n_shot < 0:
             raise ValueError(f"n_shot must be non-negative, got: {self.n_shot}")
+        if self.seed < 0:
+            raise ValueError(f"seed must be non-negative, got: {self.seed}")
+        if self.n_shot > 0 and not self.few_shot_file:
+            raise ValueError(
+                "few_shot_file is required when n_shot is greater than zero; "
+                "do not sample demonstrations from the evaluation set"
+            )
 
 
 @dataclass
@@ -840,6 +874,29 @@ class EvalTaskArguments:
         default=32,
         metadata={"help": "Minimum normalized prompt length for contamination checks."},
     )
+    content_cache_dir: str = field(
+        default="",
+        metadata={"help": "Optional content-addressed evaluation cache directory."},
+    )
+    force_recompute: bool = field(
+        default=False, metadata={"help": "Ignore existing evaluation cache entries."}
+    )
+    read_only_cache: bool = field(
+        default=False, metadata={"help": "Do not write evaluation cache entries."}
+    )
+    bootstrap_samples: int = field(
+        default=1000,
+        metadata={"help": "Number of bootstrap resamples for uncertainty."},
+    )
+    confidence_level: float = field(
+        default=0.95, metadata={"help": "Bootstrap confidence level."}
+    )
+    model_name: str = field(
+        default="", metadata={"help": "Optional model identifier for cache provenance."}
+    )
+    model_revision: str = field(
+        default="", metadata={"help": "Optional model revision for cache provenance."}
+    )
 
     def __post_init__(self) -> None:
         """
@@ -876,6 +933,14 @@ class EvalTaskArguments:
             raise ValueError(
                 "contamination_min_length must be positive, "
                 f"got {self.contamination_min_length}"
+            )
+        if self.bootstrap_samples < 0:
+            raise ValueError(
+                f"bootstrap_samples must be non-negative, got {self.bootstrap_samples}"
+            )
+        if not 0.0 < self.confidence_level < 1.0:
+            raise ValueError(
+                f"confidence_level must be between 0 and 1, got {self.confidence_level}"
             )
         if self.contamination_path and not Path(self.contamination_path).exists():
             raise ValueError(

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import dataclasses
+import hashlib
 import json
 import os
 import random
@@ -32,7 +33,9 @@ import openai
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
+from llmeval.cache import ContentAddressedCache
 from llmeval.inference.common import (
+    completed_sample_indices_by_identity,
     count_completed_samples_by_identity,
     is_explicit_tool_choice,
     load_jsonl,
@@ -40,12 +43,33 @@ from llmeval.inference.common import (
     save_failed_items,
     validate_document_ids,
 )
+from llmeval.inference.schema import (
+    ChoiceLoglikelihood,
+    LoglikelihoodRequest,
+    LoglikelihoodResult,
+)
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
+from llmeval.utils.reproducibility import seed_everything
 from llmeval.utils.retry import ClientError, call_with_retry
 
 logger = init_logger("mc_infer")
+
+
+class ContinuationLogprobs(list[list[float]]):
+    """Aligned continuation scores plus optional backend token metadata."""
+
+    def __init__(
+        self,
+        scores: list[list[float]],
+        *,
+        token_texts: list[list[str]] | None = None,
+        token_ids: list[list[int] | None] | None = None,
+    ) -> None:
+        super().__init__(scores)
+        self.token_texts = token_texts or [[] for _ in scores]
+        self.token_ids = token_ids or [None for _ in scores]
 
 
 # ===========================================================================
@@ -68,7 +92,12 @@ class FewShotFormatter:
         self._all_formatted: list[str] = []
 
     def load(self, input_file: str) -> None:
-        """Load few-shot examples from dev file.  Call once before get_prefix()."""
+        """Load all demonstrations from an explicit dev file.
+
+        Sampling happens per test document in :meth:`get_prefix`, matching
+        lm-evaluation-harness semantics and preventing one global pool from
+        coupling every prompt in a run.
+        """
         if self.n_shot <= 0:
             return
 
@@ -83,27 +112,27 @@ class FewShotFormatter:
             logger.warning(f"Only {len(items)} examples available, need {self.n_shot}")
             return
 
-        rng = random.Random(self.seed)
-        # Sample n_shot+1: extra for dedup (lm-eval style)
-        selected = rng.sample(items, min(self.n_shot + 1, len(items)))
-        self._few_shot_pool = selected
-        self._all_formatted = [self._format_demo(it) for it in selected]
-        logger.info(f"Loaded {self.n_shot} few-shot examples (seed={self.seed})")
+        self._few_shot_pool = items
+        self._all_formatted = [self._format_demo(it) for it in items]
+        logger.info(f"Loaded {len(items)} few-shot examples (seed={self.seed})")
 
-    def get_prefix(self, test_prompt: str) -> str:
-        """Get few-shot prefix, excluding any demo matching test_prompt (lm-eval dedup)."""
+    def get_prefix(self, test_prompt: str, document_id: str = "") -> str:
+        """Get a deterministic, per-document prefix excluding the test item."""
         if self.n_shot <= 0:
             return ""
 
-        # Filter out the test doc if it appears in few-shot pool
-        demos = self._all_formatted
-        if test_prompt:
-            demos = [
-                d
-                for i, d in enumerate(demos)
-                if self._few_shot_pool[i].get("prompt", "") != test_prompt
-            ]
-        demos = demos[: self.n_shot]  # trim to n_shot
+        candidates = [
+            index
+            for index, item in enumerate(self._few_shot_pool)
+            if item.get("prompt", "") != test_prompt
+            and (not document_id or str(item.get("doc_id", "")) != document_id)
+        ]
+        if len(candidates) < self.n_shot:
+            return ""
+        seed_text = f"{self.seed}:{document_id}:{test_prompt}"
+        derived_seed = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest(), 16)
+        selected = random.Random(derived_seed).sample(candidates, self.n_shot)
+        demos = [self._all_formatted[index] for index in selected]
 
         return "\n\n".join(demos) + "\n\n" if demos else ""
 
@@ -136,6 +165,10 @@ class MCLoglikelihoodClient:
         timeout: int = 300,
         max_retries: int = 3,
         api_key: str = "",
+        seed: int = 0,
+        content_cache_dir: str = "",
+        force_recompute: bool = False,
+        read_only_cache: bool = False,
     ) -> None:
         """Initialize the client with API configuration.
 
@@ -147,8 +180,20 @@ class MCLoglikelihoodClient:
             api_key: API key; falls back to the OPENAI_API_KEY env var
         """
         self.model_name: str = model_name
+        self.base_url: str = base_url
         self.timeout: int = timeout
         self.max_retries: int = max_retries
+        self.seed = seed
+        self.cache = (
+            ContentAddressedCache(
+                content_cache_dir,
+                "inference",
+                force_recompute=force_recompute,
+                read_only=read_only_cache,
+            )
+            if content_cache_dir
+            else None
+        )
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
         # Warn if using default EMPTY key
@@ -189,6 +234,21 @@ class MCLoglikelihoodClient:
             request fails after all retries.
         """
 
+        payload = {
+            "kind": "mc_first_token_logprobs",
+            "base_url": getattr(self.client, "base_url", None),
+            "model": self.model_name,
+            "prompt": prompt,
+            "choices": choice_texts,
+            "seed": getattr(self, "seed", 0),
+        }
+        cache = getattr(self, "cache", None)
+        key = cache.key(payload) if cache is not None else None
+        if cache is not None and key is not None:
+            cached = cache.get(key)
+            if cached is not None and isinstance(cached.get("scores"), list):
+                return [float(score) for score in cached["scores"]]
+
         def do_request() -> list[float]:
             resp = self.client.completions.create(
                 model=self.model_name,
@@ -198,6 +258,7 @@ class MCLoglikelihoodClient:
                 logprobs=20,
                 echo=False,
                 timeout=self.timeout,
+                seed=getattr(self, "seed", 0),
             )
             top_dict: dict[str, float] = (
                 resp.choices[0].logprobs.top_logprobs[0]
@@ -230,26 +291,34 @@ class MCLoglikelihoodClient:
             # Request failed (4xx / exhausted retries / context length): the
             # all-"-inf" result marks the item failed downstream, never scored.
             return [float("-inf")] * len(choice_texts)
+        if cache is not None and key is not None:
+            cache.set(key, {"scores": choice_logprobs})
         return choice_logprobs
 
-    def get_choices_continuation_logprobs(
-        self, prompt: str, choice_texts: list[str]
-    ) -> list[list[float]]:
-        """Score complete choice continuations using an echo completion.
+    def score_continuations(self, request: LoglikelihoodRequest) -> LoglikelihoodResult:
+        """Score complete continuations and return a validated typed result."""
+        payload = {
+            "kind": "mc_continuation_logprobs_v2",
+            "base_url": self.base_url,
+            "model": self.model_name,
+            "request": request.cache_identity(),
+            "seed": getattr(self, "seed", 0),
+        }
+        cache = getattr(self, "cache", None)
+        key = cache.key(payload) if cache is not None else None
+        if cache is not None and key is not None:
+            cached = cache.get(key)
+            if cached is not None:
+                try:
+                    return LoglikelihoodResult.from_cache_value(request, cached)
+                except (TypeError, ValueError) as exc:
+                    logger.warning("Ignoring invalid continuation cache entry: %s", exc)
 
-        OpenAI-compatible completion APIs that support ``echo=True`` return
-        token-level log probabilities for the supplied prompt.  By sending
-        ``prompt + choice`` and selecting offsets inside the choice span, the
-        scorer obtains the complete continuation likelihood instead of only
-        looking at the first token's top-k entries.
-
-        Returns an empty list for a choice whose token-level scores cannot be
-        recovered.  A request failure returns one empty list per choice so the
-        caller can mark the item as failed rather than selecting index zero.
-        """
-
-        def do_request() -> list[list[float]]:
-            prompts = [f"{prompt}{choice}" for choice in choice_texts]
+        def do_request() -> LoglikelihoodResult:
+            prompts = [
+                f"{request.context}{continuation}"
+                for continuation in request.continuations
+            ]
             response = self.client.completions.create(
                 model=self.model_name,
                 prompt=prompts,
@@ -258,40 +327,140 @@ class MCLoglikelihoodClient:
                 logprobs=20,
                 echo=True,
                 timeout=self.timeout,
+                seed=getattr(self, "seed", 0),
             )
             completions = getattr(response, "choices", []) or []
-            if len(completions) != len(choice_texts):
-                return [[] for _ in choice_texts]
+            if len(completions) != len(request.continuations):
+                raise ValueError("completion count does not match continuation count")
 
-            scores: list[list[float]] = []
-            prompt_length = len(prompt)
-            for completion, choice_text in zip(completions, choice_texts, strict=True):
+            ordered_completions: list[Any | None] = [None] * len(request.continuations)
+            for fallback_index, completion in enumerate(completions):
+                response_index = getattr(completion, "index", fallback_index)
+                index = (
+                    response_index
+                    if isinstance(response_index, int)
+                    else fallback_index
+                )
+                if (
+                    index < 0
+                    or index >= len(request.continuations)
+                    or ordered_completions[index] is not None
+                ):
+                    raise ValueError("completion indices are invalid or duplicated")
+                ordered_completions[index] = completion
+
+            choice_results: list[ChoiceLoglikelihood] = []
+            scoring_context_length = len(request.scoring_context)
+            for choice_index, (completion, continuation) in enumerate(
+                zip(ordered_completions, request.continuations, strict=True)
+            ):
                 logprobs = getattr(completion, "logprobs", None)
                 offsets = getattr(logprobs, "text_offset", None) if logprobs else None
                 token_logprobs = (
                     getattr(logprobs, "token_logprobs", None) if logprobs else None
                 )
-                if not offsets or not token_logprobs:
-                    scores.append([])
-                    continue
+                if not isinstance(offsets, (list, tuple)) or not isinstance(
+                    token_logprobs, (list, tuple)
+                ):
+                    raise ValueError("completion is missing token offsets or logprobs")
+                if len(offsets) != len(token_logprobs) or any(
+                    offset is not None and not isinstance(offset, int)
+                    for offset in offsets
+                ):
+                    raise ValueError("completion token offsets are malformed")
 
-                choice_end = prompt_length + len(choice_text)
-                selected = [
-                    float(logprob)
-                    for offset, logprob in zip(offsets, token_logprobs, strict=False)
+                scored_text = request.scored_continuation(choice_index)
+                choice_end = scoring_context_length + len(scored_text)
+                selected_indices = [
+                    index
+                    for index, (offset, logprob) in enumerate(
+                        zip(offsets, token_logprobs, strict=False)
+                    )
                     if offset is not None
-                    and prompt_length <= offset < choice_end
+                    and scoring_context_length <= offset < choice_end
                     and logprob is not None
                 ]
-                scores.append(selected)
-            return scores
+                if (
+                    not selected_indices
+                    or offsets[selected_indices[0]] != scoring_context_length
+                ):
+                    raise ValueError("continuation does not start on a token boundary")
+
+                tokens = getattr(logprobs, "tokens", None)
+                if not isinstance(tokens, (list, tuple)) or len(tokens) != len(
+                    token_logprobs
+                ):
+                    raise ValueError("completion is missing aligned token text")
+                selected_tokens = tuple(
+                    str(tokens[index]) for index in selected_indices
+                )
+                expected_offset = scoring_context_length
+                for selected_index, token in zip(
+                    selected_indices, selected_tokens, strict=True
+                ):
+                    if offsets[selected_index] != expected_offset:
+                        raise ValueError(
+                            "continuation token offsets do not match token text"
+                        )
+                    expected_offset += len(token)
+                if expected_offset != choice_end:
+                    raise ValueError(
+                        "continuation token offsets do not cover the choice"
+                    )
+
+                backend_ids = getattr(logprobs, "token_ids", None)
+                if backend_ids is not None and (
+                    not isinstance(backend_ids, (list, tuple))
+                    or len(backend_ids) != len(token_logprobs)
+                ):
+                    raise ValueError("completion token IDs are malformed")
+                selected_ids = (
+                    tuple(int(backend_ids[index]) for index in selected_indices)
+                    if backend_ids is not None
+                    else None
+                )
+                choice_results.append(
+                    ChoiceLoglikelihood(
+                        continuation=continuation,
+                        scored_text=scored_text,
+                        token_logprobs=tuple(
+                            float(token_logprobs[index]) for index in selected_indices
+                        ),
+                        token_texts=selected_tokens,
+                        token_ids=selected_ids,
+                    )
+                )
+            return LoglikelihoodResult(
+                request=request,
+                choices=tuple(choice_results),
+                exact=True,
+            )
 
         try:
-            scores = call_with_retry(do_request, self.max_retries)
-            return scores if scores is not None else [[] for _ in choice_texts]
+            result = call_with_retry(do_request, self.max_retries)
         except ClientError as exc:
             logger.warning("Continuation logprob request failed: %s", exc)
-            return [[] for _ in choice_texts]
+            return LoglikelihoodResult.failure(request, str(exc))
+        if result is None:
+            return LoglikelihoodResult.failure(request, "context_length_exceeded")
+        if cache is not None and key is not None:
+            cache.set(key, result.to_cache_value())
+        return result
+
+    def get_choices_continuation_logprobs(
+        self, prompt: str, choice_texts: list[str]
+    ) -> ContinuationLogprobs:
+        """Compatibility wrapper returning aligned token score lists."""
+        request = LoglikelihoodRequest(prompt, tuple(choice_texts))
+        result = self.score_continuations(request)
+        return ContinuationLogprobs(
+            [list(choice.token_logprobs) for choice in result.choices],
+            token_texts=[list(choice.token_texts) for choice in result.choices],
+            token_ids=[
+                list(choice.token_ids) if choice.token_ids is not None else None
+                for choice in result.choices
+            ],
+        )
 
 
 # ===========================================================================
@@ -317,10 +486,12 @@ class MCRunner:
             RuntimeError: If the loglikelihood client fails to initialize
         """
         self.config: MCInferConfig = config
+        seed_everything(config.seed)
 
         # Initialize client with error handling (loglikelihood mode only;
         # generate mode builds a plain OpenAI client per run)
         self.client: MCLoglikelihoodClient | None = None
+        self.cache: ContentAddressedCache | None = None
         if config.mode == "loglikelihood":
             try:
                 self.client = MCLoglikelihoodClient(
@@ -329,9 +500,20 @@ class MCRunner:
                     timeout=config.request_timeout,
                     max_retries=config.max_retries,
                     api_key=config.api_key,
+                    seed=config.seed,
+                    content_cache_dir=config.content_cache_dir,
+                    force_recompute=config.force_recompute,
+                    read_only_cache=config.read_only_cache,
                 )
             except (OSError, ValueError) as e:
                 raise RuntimeError(f"Failed to initialize MC client: {e}") from e
+        elif config.content_cache_dir:
+            self.cache = ContentAddressedCache(
+                config.content_cache_dir,
+                "inference",
+                force_recompute=config.force_recompute,
+                read_only=config.read_only_cache,
+            )
 
         # Set up system prompt with validation (generate mode)
         self.system_prompt: str | None = None
@@ -345,8 +527,10 @@ class MCRunner:
         # Few-shot formatter (per-item dedup)
         self._few_shot_fmt: FewShotFormatter | None = None
         if config.n_shot > 0:
-            self._few_shot_fmt = FewShotFormatter(config.n_shot, config.few_shot_file)
-            self._few_shot_fmt.load(config.input_file)
+            self._few_shot_fmt = FewShotFormatter(
+                config.n_shot, config.few_shot_file, seed=config.seed
+            )
+            self._few_shot_fmt.load(config.few_shot_file)
 
         # Initialize thread safety and monitoring
         self._file_lock: threading.Lock = threading.Lock()
@@ -365,6 +549,14 @@ class MCRunner:
     def get_completed_identity_counts(self) -> dict[tuple[str, str], int]:
         """Return completed counts keyed by prepared ID and rendered prompt."""
         return count_completed_samples_by_identity(
+            self.config.output_file,
+            self.config.input_key,
+            self.config.response_key,
+        )
+
+    def get_completed_identity_indices(self) -> dict[tuple[str, str], set[int]]:
+        """Return deduplicated completed sample positions for resume."""
+        return completed_sample_indices_by_identity(
             self.config.output_file,
             self.config.input_key,
             self.config.response_key,
@@ -435,8 +627,8 @@ class MCRunner:
         validate_document_ids(raw_data)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
-        completed_counts = self.get_completed_identity_counts()
-        completed_ids = {document_id for document_id, _ in completed_counts}
+        completed_indices = self.get_completed_identity_indices()
+        completed_ids = {document_id for document_id, _ in completed_indices}
         completed_prompts = self.get_completed_prompts()
 
         remaining: list[dict[str, Any]] = []
@@ -447,7 +639,9 @@ class MCRunner:
                 self.config.n_samples if self.config.mode == "generate" else 1
             )
             rendered_prompt = self.build_prompt(item)
-            completed = completed_counts.get((document_id, rendered_prompt), 0)
+            identity = (document_id, rendered_prompt)
+            used_indices = completed_indices.get(identity, set())
+            completed = sum(index < target_samples for index in used_indices)
             if completed == 0 and rendered_prompt in completed_prompts:
                 # Legacy MC output did not record per-sample counts. Treat the
                 # item as complete, matching the historical resume behavior.
@@ -455,8 +649,14 @@ class MCRunner:
             is_completed = completed >= target_samples
             if not is_completed:
                 if self.config.mode == "generate":
-                    item["_llmeval_remaining_samples"] = target_samples - completed
-                    item["_llmeval_sample_start"] = completed
+                    missing_indices = [
+                        index
+                        for index in range(target_samples)
+                        if index not in used_indices
+                    ]
+                    item["_llmeval_remaining_samples"] = len(missing_indices)
+                    item["_llmeval_requested_sample_indices"] = missing_indices
+                    item["_llmeval_sample_start"] = missing_indices[0]
                 else:
                     item["_llmeval_sample_index"] = completed
                 remaining.append(item)
@@ -481,7 +681,9 @@ class MCRunner:
         even when n_shot > 0 changes the prompt that gets written to output.
         """
         fs_prefix = (
-            self._few_shot_fmt.get_prefix(item.get(self.config.input_key, ""))
+            self._few_shot_fmt.get_prefix(
+                item.get(self.config.input_key, ""), str(item.get("doc_id", ""))
+            )
             if self._few_shot_fmt
             else ""
         )
@@ -610,7 +812,10 @@ class MCRunner:
         choice_tokens = self._choice_tokens(item, len(choices))
         scoring_mode = self.config.loglikelihood_mode
         choice_logprobs: list[list[float]] = []
+        choice_scored_tokens: list[list[str]] = []
+        choice_token_ids: list[list[int] | None] | None = None
         if scoring_mode in ("auto", "continuation"):
+            candidate_scores: list[list[float]]
             try:
                 candidate_scores = self.client.get_choices_continuation_logprobs(
                     prompt, choice_tokens
@@ -625,6 +830,16 @@ class MCRunner:
                 )
             ):
                 choice_logprobs = candidate_scores
+                choice_scored_tokens = getattr(
+                    candidate_scores,
+                    "token_texts",
+                    [[] for _ in candidate_scores],
+                )
+                candidate_token_ids = getattr(candidate_scores, "token_ids", None)
+                if isinstance(candidate_token_ids, list) and any(
+                    token_ids is not None for token_ids in candidate_token_ids
+                ):
+                    choice_token_ids = candidate_token_ids
                 scoring_mode = "continuation"
             elif scoring_mode == "continuation":
                 raise RuntimeError("Continuation logprob request failed")
@@ -636,6 +851,7 @@ class MCRunner:
             choice_logprobs = [
                 [score] if score != float("-inf") else [] for score in logprobs
             ]
+            choice_scored_tokens = [[] for _ in choice_tokens]
         else:
             logprobs = [
                 sum(scores) if scores else float("-inf") for scores in choice_logprobs
@@ -655,16 +871,23 @@ class MCRunner:
             "logprobs": logprobs,
             "choice_logprobs": choice_logprobs,
             "scoring_mode": scoring_mode,
+            "loglikelihood_exact": scoring_mode == "continuation",
+            "scoring_approximation": (
+                None if scoring_mode == "continuation" else "first_token_top_logprobs"
+            ),
+            "choice_scored_tokens": choice_scored_tokens,
+            "choice_token_ids": choice_token_ids,
             "choice_token_count": (
                 [len(scores) for scores in choice_logprobs]
                 if scoring_mode == "continuation"
                 else None
             ),
-            "choice_byte_count": (
-                [len(token.encode("utf-8")) for token in choice_tokens]
-                if scoring_mode == "continuation"
-                else None
-            ),
+            # Harness normalizes MC likelihood by Unicode character count and
+            # UTF-8 byte count. Token count is retained only as diagnostics.
+            "choice_char_count": [len(token) for token in choice_tokens],
+            "choice_byte_count": [
+                len(token.encode("utf-8")) for token in choice_tokens
+            ],
             "pred": pred,
             "correct": is_correct,
         }
@@ -762,6 +985,7 @@ class MCRunner:
             "max_tokens": self.config.max_tokens,
             "temperature": self.config.temperature,
             "timeout": self.config.request_timeout,
+            "seed": self.config.seed,
         }
         request_samples = int(
             item.get("_llmeval_remaining_samples", self.config.n_samples)
@@ -772,7 +996,34 @@ class MCRunner:
         if is_explicit_tool_choice(self.config.tool_choice):
             call_args["tool_choice"] = self.config.tool_choice
 
-        def do_request() -> list[str]:
+        cache = getattr(self, "cache", None)
+        cache_payload = {
+            "kind": "mc_generate",
+            "base_url": self.config.base_url,
+            "model": self.config.model_name,
+            "request": call_args,
+        }
+        cache_key = cache.key(cache_payload) if cache is not None else None
+        if cache is not None and cache_key is not None:
+            cached = cache.get(cache_key)
+            if cached is not None and isinstance(cached.get("generations"), list):
+                generations = [str(value) for value in cached["generations"]]
+                cached_positions = cached.get("response_positions")
+                generation_positions = (
+                    [int(value) for value in cached_positions]
+                    if isinstance(cached_positions, list)
+                    and len(cached_positions) == len(generations)
+                    and all(isinstance(value, int) for value in cached_positions)
+                    else list(range(len(generations)))
+                )
+            else:
+                generations = []
+                generation_positions = []
+        else:
+            generations = []
+            generation_positions = []
+
+        def do_request() -> tuple[list[str], list[int]]:
             resp = client.chat.completions.create(**call_args)
             # Reasoning models may return content=None (thinking exhausted
             # max_tokens); discard empty choices so failed samples are not
@@ -783,22 +1034,60 @@ class MCRunner:
                     raw_choices = [raw_choices[0]]
                 except (IndexError, TypeError):
                     raw_choices = []
-            return [
-                choice.message.content
-                for choice in raw_choices
-                if choice.message.content
-            ]
+            response_generations: list[str] = []
+            response_positions: list[int] = []
+            used_positions: set[int] = set()
+            for fallback_position, choice in enumerate(raw_choices):
+                raw_position = getattr(choice, "index", fallback_position)
+                position = (
+                    raw_position if isinstance(raw_position, int) else fallback_position
+                )
+                content = getattr(getattr(choice, "message", None), "content", None)
+                if content and position not in used_positions:
+                    response_generations.append(str(content))
+                    response_positions.append(position)
+                    used_positions.add(position)
+            return response_generations, response_positions
 
-        try:
-            generations = call_with_retry(do_request, self.config.max_retries)
-        except ClientError as e:
-            raise RuntimeError(f"Generate produced no usable text: {e}") from e
+        if not generations:
+            try:
+                response_data = call_with_retry(do_request, self.config.max_retries)
+                if response_data is not None:
+                    generations, generation_positions = response_data
+                if generations and cache is not None and cache_key is not None:
+                    cache.set(
+                        cache_key,
+                        {
+                            "generations": generations,
+                            "response_positions": generation_positions,
+                        },
+                    )
+            except ClientError as e:
+                raise RuntimeError(f"Generate produced no usable text: {e}") from e
         if not generations:
             # Context-length rejection (None) or null/empty content ("")
             raise RuntimeError("Generate produced no usable text (empty response)")
 
-        sample_start = int(item.get("_llmeval_sample_start", 0))
-        sample_indices = list(range(sample_start, sample_start + len(generations)))
+        requested_indices = item.get("_llmeval_requested_sample_indices")
+        if not (
+            isinstance(requested_indices, list)
+            and len(requested_indices) == request_samples
+            and all(
+                isinstance(index, int) and index >= 0 for index in requested_indices
+            )
+        ):
+            sample_start = int(item.get("_llmeval_sample_start", 0))
+            requested_indices = list(
+                range(sample_start, sample_start + request_samples)
+            )
+        if any(
+            position < 0 or position >= len(requested_indices)
+            for position in generation_positions
+        ):
+            raise RuntimeError("Generate returned an invalid sample position")
+        sample_indices = [
+            requested_indices[position] for position in generation_positions
+        ]
 
         return {
             self.config.input_key: prompt,

@@ -23,8 +23,8 @@ from tqdm import tqdm
 
 from llmeval.tasks.code_eval.execute import check_correctness
 from llmeval.tasks.postprocess import (
-    apply_text_pipeline,
-    build_text_pipeline,
+    FilterRegistry,
+    TextFilterPipeline,
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
@@ -85,7 +85,9 @@ _MBPP_PROMPT_MODES: tuple[str, ...] = (
     "instruction",
 )
 
-CODE_GENERATION_PIPELINE = build_text_pipeline(strip_reasoning_wrappers)
+CODE_FILTER_REGISTRY = FilterRegistry()
+CODE_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers, version="1")
+CODE_GENERATION_PIPELINE: TextFilterPipeline
 
 
 # ===========================================================================
@@ -132,6 +134,17 @@ def extract_code(text: object) -> str:
 
     # Strategy 3 — raw fallback (preserve leading whitespace for indentation)
     return text.rstrip()
+
+
+def _extract_code_filter(text: str) -> str:
+    """Text-filter adapter for :func:`extract_code`."""
+    return extract_code(text)
+
+
+CODE_FILTER_REGISTRY.register("extract_code", _extract_code_filter, version="1")
+CODE_GENERATION_PIPELINE = CODE_FILTER_REGISTRY.build_pipeline(
+    "code_generation", "1", "strip_reasoning", "extract_code"
+)
 
 
 def _longest_valid_python_prefix(code: str) -> str:
@@ -353,18 +366,22 @@ def _process_code_item(
     else:
         gen_str = ""
 
+    code, filter_trace = CODE_GENERATION_PIPELINE.apply_with_trace(gen_str)
+    filter_artifacts = {
+        "raw_gen": gen_str,
+        "filtered_gen": code,
+        "filter_trace": filter_trace,
+    }
+
     if not gen_str.strip():
         record = _failure(task_id, "failed: empty generation", group_id, sample_index)
+        record.update(filter_artifacts)
         record.update(provenance)
         return idx, record
 
-    # Strip reasoning-model wrappers before code extraction.
-    gen_str = apply_text_pipeline(gen_str, CODE_GENERATION_PIPELINE)
-
-    # -- extract code -----------------------------------------------------------
-    code = extract_code(gen_str)
     if not code.strip():
         record = _failure(task_id, "failed: no code extracted", group_id, sample_index)
+        record.update(filter_artifacts)
         record.update(provenance)
         return idx, record
 
@@ -387,11 +404,13 @@ def _process_code_item(
         record = _failure(
             task_id, "failed: no executable candidate", group_id, sample_index
         )
+        record.update(filter_artifacts)
         record.update(provenance)
         return idx, record
     exec_result.setdefault("task_id", task_id)
     exec_result.setdefault("group_id", group_id)
     exec_result.setdefault("sample_index", sample_index)
+    exec_result.update(filter_artifacts)
     exec_result.update(provenance)
     return idx, exec_result
 

@@ -5,7 +5,8 @@ Aligned with lm-evaluation-harness metric definitions.
 Metrics
 -------
 acc         — accuracy (argmax of raw answer-token logprobs, or letter extraction in generate mode)
-acc_norm    — accuracy with length-normalized logprobs when continuation tokens are available; equals acc for answer-letter scoring
+acc_norm    — accuracy with Unicode-character-normalized continuation logprobs
+acc_bytes   — accuracy with UTF-8-byte-normalized continuation logprobs
 exact_match — alias for acc in the MC context
 
 Entry points
@@ -48,8 +49,8 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.postprocess import (
-    apply_text_pipeline,
-    build_text_pipeline,
+    FilterRegistry,
+    TextFilterPipeline,
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
@@ -59,6 +60,7 @@ __all__ = [
     "MCScoreResult",
     "build_result",
     "extract_answer",
+    "merge_generate_records",
     "process_item",
     "score_generate",
     "score_generate_item",
@@ -72,7 +74,9 @@ logger = init_logger("mc_score")
 
 _MC_AGGREGATIONS = frozenset({"first", "majority_vote", "any_correct", "per_sample"})
 
-MC_GENERATION_PIPELINE = build_text_pipeline(strip_reasoning_wrappers)
+MC_FILTER_REGISTRY = FilterRegistry()
+MC_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers, version="1")
+MC_GENERATION_PIPELINE: TextFilterPipeline
 
 # Precompiled answer-extraction regexes.
 _ANSWER_MARKER_RE: re.Pattern[str] = re.compile(
@@ -92,12 +96,11 @@ class MCScoreResult:
         Accuracy via argmax of raw answer-token logprobs (loglikelihood), or via answer-letter
         extraction from generated text (generate mode).
     acc_norm:
-        Accuracy via length-normalized logprobs when continuation tokens are
-        available. In generate mode this always equals *acc* because generate
-        records carry no ``correct_norm`` field.
+        Accuracy via Unicode-character-length-normalized logprobs. In generate
+        mode this always equals *acc* because no likelihood is available.
     acc_bytes:
-        Accuracy via byte-length-normalized logprobs when continuation tokens
-        are available. In generate mode this always equals *acc*.
+        Accuracy via UTF-8-byte-length-normalized logprobs. In generate mode
+        this always equals *acc*.
     exact_match:
         Convenience alias for *acc* in the multiple-choice context.
     total:
@@ -190,6 +193,90 @@ def score_loglikelihood(
     return metrics.acc
 
 
+def merge_generate_records(
+    eval_dataset: list[dict[str, Any]], label_key: str, response_key: str
+) -> list[dict[str, Any]]:
+    """Merge resumed rows for the same stable MC question.
+
+    New inference output records sample indices explicitly. Older stable-ID
+    rows without indices are assigned the next unused positions in file order.
+    Legacy rows without ``doc_id`` remain independent because prompt text is
+    not a safe dataset identity.
+    """
+    merged: list[dict[str, Any]] = []
+    positions: dict[tuple[str, str], int] = {}
+    samples_by_position: list[dict[int, str] | None] = []
+
+    for source in eval_dataset:
+        item = source.copy()
+        document_id = item.get("doc_id")
+        prompt = item.get("prompt", item.get("query", ""))
+        if not document_id:
+            merged.append(item)
+            samples_by_position.append(None)
+            continue
+
+        identity = (str(document_id), str(prompt))
+        position = positions.get(identity)
+        if position is None:
+            position = len(merged)
+            positions[identity] = position
+            merged.append(item)
+            samples_by_position.append({})
+        else:
+            target = merged[position]
+            for key in (label_key, "gold", "choices", "choice_tokens"):
+                if key in item and key in target and item[key] != target[key]:
+                    raise ValueError(
+                        f"Conflicting {key!r} for resumed MC document {document_id!r}"
+                    )
+                if key in item and key not in target:
+                    target[key] = item[key]
+
+        target_samples = samples_by_position[position]
+        assert target_samples is not None
+        raw_generations = item.get(response_key, [])
+        if isinstance(raw_generations, str):
+            generations = [raw_generations]
+        elif isinstance(raw_generations, list):
+            generations = [str(value) for value in raw_generations]
+        else:
+            generations = []
+
+        raw_indices = item.get("_llmeval_sample_indices")
+        if (
+            isinstance(raw_indices, list)
+            and len(raw_indices) == len(generations)
+            and all(isinstance(value, int) and value >= 0 for value in raw_indices)
+        ):
+            sample_indices = raw_indices
+        else:
+            sample_indices = []
+            next_index = 0
+            for _ in generations:
+                while next_index in target_samples:
+                    next_index += 1
+                sample_indices.append(next_index)
+                next_index += 1
+
+        for sample_index, generation in zip(sample_indices, generations, strict=True):
+            existing = target_samples.get(sample_index)
+            if existing is not None and existing != generation:
+                raise ValueError(
+                    "Conflicting generation for resumed MC document "
+                    f"{document_id!r}, sample {sample_index}"
+                )
+            target_samples[sample_index] = generation
+
+    for item, samples in zip(merged, samples_by_position, strict=True):
+        if samples is None:
+            continue
+        ordered_indices = sorted(samples)
+        item[response_key] = [samples[index] for index in ordered_indices]
+        item["_llmeval_sample_indices"] = ordered_indices
+    return merged
+
+
 def score_generate(
     eval_dataset: list[dict[str, Any]],
     label_key: str,
@@ -237,8 +324,9 @@ def score_generate(
             f"expected one of {sorted(_MC_AGGREGATIONS)}"
         )
 
+    merged_dataset = merge_generate_records(eval_dataset, label_key, response_key)
     records = score_items(
-        eval_dataset,
+        merged_dataset,
         mode="generate",
         label_key=label_key,
         response_key=response_key,
@@ -249,7 +337,7 @@ def score_generate(
     metrics = build_result(
         records,
         provenance=build_run_provenance(
-            eval_dataset,
+            merged_dataset,
             task_name=task_name,
             label_key=label_key,
             response_key=response_key,
@@ -487,23 +575,33 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     pred = max(range(len(logprobs)), key=logprobs.__getitem__)
     is_correct = pred == gold
 
-    # acc_norm — length-normalised logprobs (lm-eval convention).
-    token_counts = item.get("choice_token_count")
+    # lm-eval uses Unicode character length for acc_norm and UTF-8 byte length
+    # for acc_bytes. Token counts are useful diagnostics but are not the
+    # denominator of either harness metric.
+    char_counts = item.get("choice_char_count")
     byte_counts = item.get("choice_byte_count")
-    token_count_values = token_counts if isinstance(token_counts, list) else []
+    char_count_values = char_counts if isinstance(char_counts, list) else []
     byte_count_values = byte_counts if isinstance(byte_counts, list) else []
-    has_token_counts = len(token_count_values) == len(logprobs) and all(
-        isinstance(count, int | float) and count > 0 for count in token_count_values
+    has_char_counts = len(char_count_values) == len(logprobs) and all(
+        isinstance(count, int | float) and count > 0 for count in char_count_values
     )
     has_byte_counts = len(byte_count_values) == len(logprobs) and all(
         isinstance(count, int | float) and count > 0 for count in byte_count_values
     )
-    if has_token_counts and has_byte_counts:
+    if has_char_counts:
         normed = [
             lp / float(count)
-            for lp, count in zip(logprobs, token_count_values, strict=True)
+            for lp, count in zip(logprobs, char_count_values, strict=True)
         ]
         is_correct_norm = max(range(len(normed)), key=normed.__getitem__) == gold
+    elif choices and len(choices) == len(logprobs):
+        choice_lens = [max(len(str(choice)), 1) for choice in choices]
+        normed = [lp / length for lp, length in zip(logprobs, choice_lens, strict=True)]
+        is_correct_norm = max(range(len(normed)), key=normed.__getitem__) == gold
+    else:
+        is_correct_norm = is_correct
+
+    if has_byte_counts:
         normed_bytes = [
             lp / float(count)
             for lp, count in zip(logprobs, byte_count_values, strict=True)
@@ -512,17 +610,14 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
             max(range(len(normed_bytes)), key=normed_bytes.__getitem__) == gold
         )
     elif choices and len(choices) == len(logprobs):
-        # Legacy first-token records do not carry continuation lengths.
-        choice_lens = [max(len(str(c)), 1) for c in choices]
-        normed = [lp / cl for lp, cl in zip(logprobs, choice_lens, strict=True)]
-        is_correct_norm = max(range(len(normed)), key=normed.__getitem__) == gold
-        choice_bytes = [max(len(str(c).encode("utf-8")), 1) for c in choices]
-        normed_bytes = [lp / cl for lp, cl in zip(logprobs, choice_bytes, strict=True)]
+        choice_bytes = [max(len(str(choice).encode("utf-8")), 1) for choice in choices]
+        normed_bytes = [
+            lp / length for lp, length in zip(logprobs, choice_bytes, strict=True)
+        ]
         is_correct_bytes = (
             max(range(len(normed_bytes)), key=normed_bytes.__getitem__) == gold
         )
     else:
-        is_correct_norm = is_correct
         is_correct_bytes = is_correct
 
     return {
@@ -560,10 +655,10 @@ def score_generate_item(
     else:
         generation_texts = []
 
-    predictions = [
-        extract_answer(apply_text_pipeline(text, MC_GENERATION_PIPELINE))
-        for text in generation_texts
+    filtered = [
+        MC_GENERATION_PIPELINE.apply_with_trace(text) for text in generation_texts
     ]
+    predictions = [prediction for prediction, _ in filtered]
     sample_correct = [bool(gold) and prediction == gold for prediction in predictions]
 
     if aggregation == "majority_vote":
@@ -602,6 +697,9 @@ def score_generate_item(
         "correct_bytes": is_correct,
         "aggregation": aggregation,
         "predictions": predictions,
+        "raw_gen": generation_texts,
+        "filtered_gen": predictions,
+        "filter_trace": [trace for _, trace in filtered],
         "sample_correct": sample_correct,
         "sample_total": len(predictions),
         "sample_correct_count": sum(sample_correct),
@@ -638,6 +736,12 @@ def extract_answer(text: str) -> str:
     return ""
 
 
+MC_FILTER_REGISTRY.register("extract_answer", extract_answer, version="1")
+MC_GENERATION_PIPELINE = MC_FILTER_REGISTRY.build_pipeline(
+    "mc_generation", "1", "strip_reasoning", "extract_answer"
+)
+
+
 # ===========================================================================
 # Cache persistence
 # ===========================================================================
@@ -659,6 +763,8 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
 
     # Aggregated metrics summary (JSON).
     summary_path = cache_path.with_suffix(".summary.json")
+    question_total = len(result.per_item)
+    sample_total = sum(int(record.get("sample_total", 1)) for record in result.per_item)
     with open(summary_path, "w", encoding="utf-8") as fh:
         json.dump(
             {
@@ -667,6 +773,9 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
                 "acc_bytes": round(result.acc_bytes, 4),
                 "exact_match": round(result.exact_match, 4),
                 "total": result.total,
+                "question_total": question_total,
+                "sample_total": sample_total,
+                "aggregation": result.provenance.get("mc_aggregation"),
                 "provenance": result.provenance,
             },
             fh,

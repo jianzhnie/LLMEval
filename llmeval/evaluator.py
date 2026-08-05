@@ -40,112 +40,24 @@ from llmeval.tasks.mc_eval.mc_score import (
     score_generate,
     score_loglikelihood,
 )
-from llmeval.tasks.postprocess import (
-    apply_text_pipeline,
-    build_text_pipeline,
-    strip_reasoning_wrappers,
-)
 from llmeval.tasks.provenance import (
     annotate_dataset_contamination,
     load_contamination_sources,
 )
+from llmeval.tasks.registry import (
+    EvaluationContext,
+    EvaluationResult,
+    PreparationContext,
+    TaskRegistry,
+    build_default_registry,
+    evaluate_registered_task,
+)
 from llmeval.utils.config import EvalTaskArguments
 from llmeval.utils.log import init_logger
+from llmeval.utils.reproducibility import seed_everything, seed_provenance
 
 # Initialize logger for the evaluation orchestrator
 logger = init_logger("evaluator")
-
-MATH_RESPONSE_PIPELINE = build_text_pipeline(strip_reasoning_wrappers)
-
-
-def preprocess_answers(data: list[dict[str, Any]], response_key: str) -> None:
-    """Strip think tags from all generated responses before scoring.
-
-    Args:
-        data: List of data items with generated responses.
-        response_key: The dictionary key for model responses.
-
-    Returns:
-        The modified list (in-place) with cleaned responses.
-    """
-    for item in data:
-        gen = item.get(response_key, [])
-        if isinstance(gen, list):
-            item[response_key] = [
-                apply_text_pipeline(g, MATH_RESPONSE_PIPELINE) for g in gen
-            ]
-        elif isinstance(gen, str):
-            item[response_key] = apply_text_pipeline(gen, MATH_RESPONSE_PIPELINE)
-    return None  # mutates in-place; callers should not rely on return value
-
-
-def _infer_mc_mode(eval_dataset: list[dict[str, Any]]) -> str:
-    """Infer the MC scoring mode from the dataset shape.
-
-    Returns:
-        ``"loglikelihood"`` when every item carries ``logprobs``.
-        ``"generate"`` when no item carries ``logprobs``.
-
-    Raises:
-        ValueError: If the dataset mixes both shapes.  Mixed inputs are a
-            schema error, not a valid evaluation batch.
-    """
-    has_logprobs = ["logprobs" in item for item in eval_dataset]
-    if all(has_logprobs):
-        return "loglikelihood"
-    if not any(has_logprobs):
-        return "generate"
-    raise ValueError(
-        "Mixed MC dataset detected: some items have 'logprobs' and others do not. "
-        "Please evaluate a single inference schema per batch."
-    )
-
-
-def _process_item(
-    item: dict[str, Any],
-    task_name: str,
-    label_key: str = "answer",
-    response_key: str = "gen",
-) -> dict[str, Any]:
-    """
-    Process and validate a single data item from the input dataset.
-
-    This function performs validation checks on the input dictionary to ensure it contains
-    the required keys for evaluation. It creates a copy of the input item to avoid
-    modifying the original data and adds the task name for reference.
-
-    Args:
-        item: A dictionary containing the evaluation data with the following expected keys:
-            - label_key: Contains the ground truth answer
-            - response_key: Contains the model's generated response
-        task_name: The identifier for the evaluation task (e.g., 'math_opensource')
-        label_key: The dictionary key used to access the ground truth answer (default: 'answer')
-        response_key: The dictionary key used to access the model's response (default: 'gen')
-
-    Returns:
-        Dict[str, Any]: A new dictionary containing the validated data with added task field
-
-    Raises:
-        ValueError: If either the label_key or response_key is missing from the input item
-        TypeError: If the item argument is not a dictionary
-    """
-    if not isinstance(item, dict):
-        raise TypeError(f"Expected dictionary input, got {type(item).__name__}")
-
-    # Validate required keys with detailed error messages
-    if label_key not in item:
-        raise ValueError(
-            f"Missing ground truth label key '{label_key}' in item. Available keys: {', '.join(item.keys())}"
-        )
-    if response_key not in item:
-        raise ValueError(
-            f"Missing model response key '{response_key}' in item. Available keys: {', '.join(item.keys())}"
-        )
-
-    # Create a new copy to avoid modifying the original dictionary
-    processed_item = item.copy()
-    processed_item["task"] = task_name
-    return processed_item
 
 
 def evaluate_task(
@@ -160,6 +72,14 @@ def evaluate_task(
     seed: int | None = None,
     mc_aggregation: str = "first",
     allow_unsafe_code: bool = False,
+    bootstrap_samples: int = 1000,
+    confidence_level: float = 0.95,
+    content_cache_dir: str | Path | None = None,
+    force_recompute: bool = False,
+    read_only_cache: bool = False,
+    model_name: str | None = None,
+    model_revision: str | None = None,
+    input_key: str = "prompt",
 ) -> float | None:
     """
     Evaluate model outputs against ground truth data for a specific task.
@@ -195,89 +115,115 @@ def evaluate_task(
         ... )
         >>> print(f"Accuracy: {accuracy:.2f}")
     """
+    result = evaluate_task_result(
+        eval_dataset=eval_dataset,
+        task_name=task_name,
+        label_key=label_key,
+        response_key=response_key,
+        cache_path=cache_path,
+        max_workers=max_workers,
+        timeout=timeout,
+        exec_timeout=exec_timeout,
+        seed=seed,
+        mc_aggregation=mc_aggregation,
+        allow_unsafe_code=allow_unsafe_code,
+        bootstrap_samples=bootstrap_samples,
+        confidence_level=confidence_level,
+        content_cache_dir=content_cache_dir,
+        force_recompute=force_recompute,
+        read_only_cache=read_only_cache,
+        model_name=model_name,
+        model_revision=model_revision,
+        input_key=input_key,
+    )
+    return result.primary_value if result is not None else None
+
+
+def _default_registry() -> TaskRegistry:
+    """Build a registry from module symbols so scorer tests remain injectable."""
+    return build_default_registry(
+        compute_scores, score_generate, score_loglikelihood, score_code
+    )
+
+
+def prepare_evaluation_data(
+    data: list[dict[str, Any]],
+    task_name: str,
+    label_key: str,
+    response_key: str,
+) -> list[dict[str, Any]]:
+    """Validate and annotate input through the registered task adapter."""
+    context = PreparationContext(
+        task_name=task_name,
+        label_key=label_key,
+        response_key=response_key,
+    )
+    return _default_registry().resolve(task_name).prepare_dataset(data, context)
+
+
+def evaluate_task_result(
+    eval_dataset: list[dict[str, Any]],
+    task_name: str,
+    label_key: str,
+    response_key: str,
+    cache_path: str | Path,
+    max_workers: int,
+    timeout: int = 20,
+    exec_timeout: float = 3.0,
+    seed: int | None = None,
+    mc_aggregation: str = "first",
+    allow_unsafe_code: bool = False,
+    bootstrap_samples: int = 1000,
+    confidence_level: float = 0.95,
+    content_cache_dir: str | Path | None = None,
+    force_recompute: bool = False,
+    read_only_cache: bool = False,
+    model_name: str | None = None,
+    model_revision: str | None = None,
+    input_key: str = "prompt",
+) -> EvaluationResult | None:
+    """Evaluate a task through the registry and return all declared metrics."""
     if not eval_dataset:
         logger.warning("Empty dataset provided for evaluation")
         return None
-
-    # Parse task name to determine evaluation type
-    task_parts = task_name.split("/")
-    dataset_source = task_parts[0] if task_parts else task_name
-
-    # Convert cache_path to Path object for consistent handling
-    cache_path = Path(cache_path)
-
-    if dataset_source == "math_opensource":
-        try:
-            accuracy = compute_scores(
-                eval_dataset=eval_dataset,
-                label_key=label_key,
-                response_key=response_key,
-                cache_path=str(cache_path),  # compute_scores expects string path
-                max_workers=max_workers,
-                timeout=timeout,
-                task_name=task_name,
-                seed=seed,
+    actual_seed = 0 if seed is None else seed
+    seed_state = seed_everything(actual_seed)
+    context = EvaluationContext(
+        eval_dataset=eval_dataset,
+        task_name=task_name,
+        label_key=label_key,
+        response_key=response_key,
+        cache_path=Path(cache_path),
+        max_workers=max_workers,
+        timeout=timeout,
+        exec_timeout=exec_timeout,
+        seed=actual_seed,
+        mc_aggregation=mc_aggregation,
+        allow_unsafe_code=allow_unsafe_code,
+        bootstrap_samples=bootstrap_samples,
+        confidence_level=confidence_level,
+        model_name=model_name,
+        model_revision=model_revision,
+        content_cache_dir=Path(content_cache_dir) if content_cache_dir else None,
+        force_recompute=force_recompute,
+        read_only_cache=read_only_cache,
+        input_key=input_key,
+    )
+    try:
+        result = evaluate_registered_task(context, _default_registry())
+        result.provenance.update(seed_provenance(seed_state))
+        for name, metric in result.metrics.items():
+            logger.info(
+                "Task %s metric %s=%.4f (n=%d, stderr=%s)",
+                task_name,
+                name,
+                metric.value,
+                metric.count,
+                f"{metric.stderr:.6f}" if metric.stderr is not None else "N/A",
             )
-            logger.info(f"✅ Task: {task_name}, Accuracy: {accuracy:.2%}")
-            return accuracy
-        except Exception as e:
-            logger.error(f"❌ Evaluation failed: {e!s}", exc_info=True)
-            return None
-    elif dataset_source == "mc_opensource":
-        try:
-            mc_mode = _infer_mc_mode(eval_dataset)
-            if mc_mode == "loglikelihood":
-                accuracy = score_loglikelihood(
-                    eval_dataset=eval_dataset,
-                    cache_path=cache_path,
-                    max_workers=max_workers,
-                    timeout=timeout,
-                    task_name=task_name,
-                    seed=seed,
-                )
-                logger.info(
-                    f"✅ Task: {task_name} (loglikelihood), Accuracy: {accuracy:.2%}"
-                )
-            else:
-                accuracy = score_generate(
-                    eval_dataset=eval_dataset,
-                    label_key=label_key,
-                    response_key=response_key,
-                    cache_path=cache_path,
-                    max_workers=max_workers,
-                    timeout=timeout,
-                    task_name=task_name,
-                    seed=seed,
-                    aggregation=mc_aggregation,
-                )
-                logger.info(
-                    f"✅ Task: {task_name} (generate), Accuracy: {accuracy:.2%}"
-                )
-            return accuracy
-        except Exception as e:
-            logger.error(f"❌ Evaluation failed: {e!s}", exc_info=True)
-            return None
-    elif dataset_source == "code_opensource":
-        try:
-            accuracy = score_code(
-                eval_dataset=eval_dataset,
-                label_key=label_key,
-                response_key=response_key,
-                cache_path=cache_path,
-                max_workers=max_workers,
-                timeout=timeout,
-                exec_timeout=exec_timeout,
-                task_name=task_name,
-                seed=seed,
-                allow_unsafe_code=allow_unsafe_code,
-            )
-            logger.info(f"✅ Task: {task_name}, Pass@1: {accuracy:.2%}")
-            return accuracy
-        except Exception as e:
-            logger.error(f"❌ Evaluation failed: {e!s}", exc_info=True)
-            return None
-    else:
-        logger.error(f"🤷‍♂️ Unsupported task type: '{task_name}'")
+        return result
+    except Exception as exc:
+        logger.error("Evaluation failed: %s", exc, exc_info=True)
         return None
 
 
@@ -327,25 +273,12 @@ def main() -> int:
             logger.error("❌ Input file is empty")
             return 1
 
-        # Process data items and handle potential errors.
-        # MC inference must be a single schema per batch: all items with
-        # ``logprobs`` (loglikelihood) or none (generate).
+        # Task-specific validation and annotation live in the registry. The
+        # evaluator does not need to know how a task identifies its schema.
         try:
-            if args.task_name.startswith("mc_opensource"):
-                mc_mode = _infer_mc_mode(data)
-                is_loglikelihood = mc_mode == "loglikelihood"
-            else:
-                is_loglikelihood = False
-
-            if is_loglikelihood:
-                processed_data = [{**item, "task": args.task_name} for item in data]
-            else:
-                processed_data = [
-                    _process_item(
-                        item, args.task_name, args.label_key, args.response_key
-                    )
-                    for item in data
-                ]
+            processed_data = prepare_evaluation_data(
+                data, args.task_name, args.label_key, args.response_key
+            )
         except (ValueError, TypeError) as e:
             logger.error(f"❌ Error processing data: {e!s}")
             return 1
@@ -369,8 +302,8 @@ def main() -> int:
                 logger.error(f"❌ Error checking contamination: {e!s}", exc_info=True)
                 return 1
 
-        # Run evaluation and get results
-        accuracy = evaluate_task(
+        # Run evaluation and retain the complete metric result.
+        result = evaluate_task_result(
             processed_data,
             args.task_name,
             args.label_key,
@@ -382,9 +315,17 @@ def main() -> int:
             args.seed,
             args.mc_aggregation,
             args.allow_unsafe_code,
+            args.bootstrap_samples,
+            args.confidence_level,
+            args.content_cache_dir,
+            args.force_recompute,
+            args.read_only_cache,
+            args.model_name,
+            args.model_revision,
+            input_key=args.input_key,
         )
 
-        if accuracy is not None:
+        if result is not None:
             logger.info("🎉 Evaluation completed successfully!")
             return 0
         else:

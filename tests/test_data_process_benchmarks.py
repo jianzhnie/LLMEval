@@ -88,6 +88,24 @@ def test_mc_formatter_persists_document_id() -> None:
     assert row["doc_id"] == "mmlu:algebra:3"
 
 
+def test_mmlu_pro_formatter_accepts_option_lists() -> None:
+    module = _load_script(MC_SCRIPT)
+
+    row = module._format_mc_row(
+        "mmlu_pro",
+        {
+            "question": "2+2?",
+            "options": ["1", "2", "4", "8"],
+            "answer": "C",
+            "answer_index": 2,
+        },
+        source_id="math:1",
+    )
+
+    assert row["choices"] == ["1", "2", "4", "8"]
+    assert row["gold"] == 2
+
+
 def test_mmlu_pro_formatter_accepts_list_options() -> None:
     module = _load_script(MC_SCRIPT)
 
@@ -102,7 +120,8 @@ def test_mmlu_pro_formatter_accepts_list_options() -> None:
     )
 
     assert row["doc_id"] == "mmlu_pro:algebra:3"
-    assert row["choices"] == ["A", "B", "C", "D"]
+    assert row["choices"] == ["1", "2", "3", "4"]
+    assert row["choice_tokens"] == ["A", "B", "C", "D"]
     assert row["answer"] == "B"
 
 

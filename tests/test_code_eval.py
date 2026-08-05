@@ -29,12 +29,32 @@ if "pebble" not in sys.modules and not importlib.util.find_spec("pebble"):
 from llmeval.tasks.code_eval.code_score import (
     CodeScoreResult,
     _failure_code_record,
+    _process_code_item,
     _strip_think_tags,
     estimate_pass_at_k,
     extract_code,
     score_code,
     write_cache,
 )
+
+
+def test_code_failure_record_contains_filter_trace() -> None:
+    _, record = _process_code_item(
+        (
+            0,
+            {"task_id": "t", "prompt": "def f():\n", "test": "", "gen": [""]},
+            "test",
+            "gen",
+            1.0,
+            False,
+        )
+    )
+
+    assert record["raw_gen"] == ""
+    assert record["filtered_gen"] == ""
+    assert record["filter_trace"]["pipeline"] == "code_generation"
+
+
 from llmeval.tasks.code_eval.execute import (
     TimeoutException,
     check_correctness,
