@@ -203,7 +203,6 @@ def _make_client(max_retries: int = 0):
     client.tool_choice = "none"
     client.base_url = "http://example.test/v1"
     client.model_revision = "revision-1"
-    client._git_hash = "test-git"
     client.client = MagicMock()
     return client
 

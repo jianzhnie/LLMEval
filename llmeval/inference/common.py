@@ -36,6 +36,7 @@ __all__ = [
     "count_completed_samples_by_id",
     "count_completed_samples_by_identity",
     "expand_data_with_resume",
+    "expand_data_with_resume_indices",
     "expand_group_for_sampling",
     "is_explicit_tool_choice",
     "is_local_endpoint",
@@ -421,6 +422,70 @@ def expand_data_with_resume(
     if skipped_items > 0:
         logger.warning(f"Skipped {skipped_items} items due to missing or empty prompt")
 
+    return expanded_data
+
+
+def expand_data_with_resume_indices(
+    raw_data: list[dict[str, Any]],
+    completed_indices: dict[tuple[str, str], set[int]],
+    legacy_counts: dict[str, int],
+    input_key: str,
+    n_samples: int,
+) -> list[dict[str, Any]]:
+    """Expand raw items into per-sample copies for every index still missing.
+
+    Unlike :func:`expand_data_with_resume`, which assumes completed samples are
+    contiguous from index 0, this variant consumes the explicit completed-index
+    set. A sample that failed mid-run (e.g. an empty response that was never
+    written) is regenerated instead of duplicating the highest contiguous count.
+
+    Args:
+        raw_data: Items loaded from the input file; each must carry ``doc_id``.
+        completed_indices: Completed sample indices per ``(doc_id, prompt)``.
+        legacy_counts: Prompt-keyed completed counts for legacy output rows
+            that predate stable IDs (treated as contiguous from index 0).
+        input_key: Prompt field name (``"prompt"`` used as fallback).
+        n_samples: Target number of samples per prompt.
+
+    Returns:
+        Expanded dataset holding only the samples still to process, each tagged
+        with its ``sample_index``.
+    """
+    validate_document_ids(raw_data)
+
+    expanded_data: list[dict[str, Any]] = []
+    skipped_items = 0
+    for index, item in enumerate(raw_data):
+        if not isinstance(item, dict):
+            logger.warning("Skipping non-dict input item: %s", type(item).__name__)
+            skipped_items += 1
+            continue
+        prompt_val: Any = item.get(input_key) or item.get("prompt")
+        prompt = str(prompt_val) if prompt_val is not None else ""
+        if not prompt.strip():
+            logger.warning(
+                f"No valid prompt found under keys [{input_key!r}, 'prompt'] "
+                f"for item with keys: {list(item.keys())}"
+            )
+            skipped_items += 1
+            continue
+
+        document_id = require_document_id(item, index)
+        used = set(completed_indices.get((document_id, prompt), set()))
+        if not used:
+            # Legacy prompt-keyed counts carry no per-index metadata; assume the
+            # first ``legacy_done`` contiguous indices were written.
+            legacy_done = legacy_counts.get(prompt, 0)
+            used = set(range(max(legacy_done, 0)))
+        for sample_index in range(n_samples):
+            if sample_index in used:
+                continue
+            expanded_item = copy.deepcopy(item)
+            expanded_item["sample_index"] = sample_index
+            expanded_data.append(expanded_item)
+
+    if skipped_items > 0:
+        logger.warning(f"Skipped {skipped_items} items due to missing or empty prompt")
     return expanded_data
 
 

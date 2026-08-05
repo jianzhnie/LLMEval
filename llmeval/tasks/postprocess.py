@@ -86,7 +86,7 @@ class FilterRegistry:
 
 @dataclass(frozen=True)
 class TextFilterPipeline:
-    """An ordered task-level text pipeline with stable provenance metadata."""
+    """An ordered task-level text pipeline with a stable name and version."""
 
     name: str
     version: str

@@ -18,6 +18,7 @@ from llmeval.inference.common import (
     count_completed_samples_by_id,
     count_completed_samples_by_identity,
     expand_data_with_resume,
+    expand_data_with_resume_indices,
     expand_group_for_sampling,
     is_explicit_tool_choice,
     load_jsonl,
@@ -169,6 +170,37 @@ class TestExpandDataWithResume:
     def test_missing_document_id_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="missing required 'doc_id'"):
             require_document_id({"prompt": "q"}, 0)
+
+
+class TestExpandDataWithResumeIndices:
+    def test_expands_to_n_samples(self) -> None:
+        raw = [{"doc_id": "q1", "prompt": "p"}]
+        expanded = expand_data_with_resume_indices(raw, {}, {}, "prompt", 3)
+        assert [item["sample_index"] for item in expanded] == [0, 1, 2]
+
+    def test_regenerates_only_missing_indices(self) -> None:
+        """A mid-run failure must be retried, not the highest contiguous count."""
+        raw = [{"doc_id": "q1", "prompt": "p"}]
+        expanded = expand_data_with_resume_indices(
+            raw, {("q1", "p"): {0, 2}}, {}, "prompt", 4
+        )
+        assert [item["sample_index"] for item in expanded] == [1, 3]
+
+    def test_all_completed_yields_nothing(self) -> None:
+        raw = [{"doc_id": "q1", "prompt": "p"}]
+        expanded = expand_data_with_resume_indices(
+            raw, {("q1", "p"): {0, 1}}, {}, "prompt", 2
+        )
+        assert expanded == []
+
+    def test_falls_back_to_legacy_counts(self) -> None:
+        raw = [{"doc_id": "q1", "prompt": "legacy"}]
+        expanded = expand_data_with_resume_indices(raw, {}, {"legacy": 1}, "prompt", 2)
+        assert [item["sample_index"] for item in expanded] == [1]
+
+    def test_requires_document_id(self) -> None:
+        with pytest.raises(ValueError, match="missing required 'doc_id'"):
+            expand_data_with_resume_indices([{"prompt": "p"}], {}, {}, "prompt", 1)
 
 
 class TestPrepareDataWithResume:

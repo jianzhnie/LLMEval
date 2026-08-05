@@ -59,7 +59,7 @@ class DataArguments:
         cache_dir (str): Path to the directory for caching models and data.
         output_file (str): Path to the output JSONL file to save results.
         task (str): Optional evaluation task name. Callers should pass the
-            actual benchmark when task-specific provenance is needed.
+            actual benchmark when task-specific handling is needed.
         batch_size (int): The number of samples to process in each batch.
     """
 

@@ -19,7 +19,7 @@ import threading
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from tqdm import tqdm
 from transformers import HfArgumentParser
@@ -28,9 +28,9 @@ from vllm.outputs import RequestOutput
 
 from llmeval.cache import ContentAddressedCache, build_cache, log_cache_stats
 from llmeval.inference.common import (
+    completed_sample_indices_by_identity,
     count_completed_samples,
-    count_completed_samples_by_identity,
-    expand_data_with_resume,
+    expand_data_with_resume_indices,
     load_jsonl,
     sample_seed_for_item,
 )
@@ -389,14 +389,13 @@ class OfflineInferenceRunner:
         raw_data: list[dict[str, Any]] = load_jsonl(self.args.input_file)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
-        # Check for completed samples
-        completed_counts = cast(
-            dict[object, int],
-            count_completed_samples_by_identity(
-                self.args.output_file,
-                self.args.input_key,
-                self.args.response_key,
-            ),
+        # Check for completed samples. Track the explicit completed index set
+        # (not just a count) so a partially-failed sample in the middle of a
+        # run is regenerated instead of duplicating the highest contiguous count.
+        completed_indices = completed_sample_indices_by_identity(
+            self.args.output_file,
+            self.args.input_key,
+            self.args.response_key,
         )
         legacy_counts = count_completed_samples(
             self.args.output_file,
@@ -404,22 +403,20 @@ class OfflineInferenceRunner:
             self.args.response_key,
             legacy_only=True,
         )
-        if legacy_counts:
-            # Preserve prompt-based resume for legacy records while allowing
-            # stable-ID records in the same file to remain independently keyed.
-            completed_counts.update(legacy_counts)
-        total_completed: int = sum(completed_counts.values())
+        total_completed: int = sum(
+            len(indices) for indices in completed_indices.values()
+        ) + sum(legacy_counts.values())
 
         if total_completed > 0:
             logger.info(f"Found {total_completed} completed samples from previous run")
 
         # Expand data according to n_samples and resume functionality
-        expanded_data: list[dict[str, Any]] = expand_data_with_resume(
+        expanded_data: list[dict[str, Any]] = expand_data_with_resume_indices(
             raw_data,
-            completed_counts,
+            completed_indices,
+            legacy_counts,
             self.args.input_key,
             self.args.n_samples,
-            stable_ids=True,
         )
 
         if not expanded_data:

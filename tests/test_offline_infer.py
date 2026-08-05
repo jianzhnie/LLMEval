@@ -86,7 +86,6 @@ def _runner(tmp_path: Path, **overrides: object) -> OfflineInferenceRunner:
     runner.llm = None
     runner.sampling_params = None
     runner.cache = None
-    runner._git_hash = "test-git"
     runner.system_prompt = None
     return runner
 
