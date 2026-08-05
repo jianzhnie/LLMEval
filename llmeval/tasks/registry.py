@@ -1,9 +1,4 @@
-"""Task registry and structured adapters for the three evaluation families.
-
-The registry owns task-family discovery and task metadata. Scorers retain their
-existing public APIs; adapters translate their legacy JSONL/summary output into
-the common :class:`EvaluationResult` contract.
-"""
+"""Task registry and structured adapters for evaluation task families."""
 
 from __future__ import annotations
 
@@ -19,11 +14,14 @@ from llmeval.tasks.provenance import (
     get_git_hash,
     hash_evaluation_inputs,
 )
-from llmeval.tasks.results import EvaluationResult, MetricValue, metric_from_samples
+from llmeval.tasks.results import (
+    EvaluationResult,
+    MetricValue,
+    ScorerResult,
+    metric_from_samples,
+)
 
-MathScorer = Callable[..., float]
-MCScorer = Callable[..., float]
-CodeScorer = Callable[..., float]
+StructuredScorer = Callable[..., ScorerResult]
 
 
 @dataclass(frozen=True)
@@ -72,37 +70,13 @@ class EvaluationTask(Protocol):
     version: str
     pipeline_version: str
     metric_specs: tuple[MetricSpec, ...]
+    required_fields: tuple[str, ...]
 
     def prepare_dataset(
         self, data: list[dict[str, Any]], context: PreparationContext
     ) -> list[dict[str, Any]]: ...
 
     def score(self, context: EvaluationContext) -> EvaluationResult: ...
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            value = json.loads(line)
-            if isinstance(value, dict):
-                records.append(value)
-    return records
-
-
-def _read_summary(cache_path: Path) -> dict[str, Any]:
-    summary_path = cache_path.with_suffix(".summary.json")
-    if not summary_path.exists():
-        return {}
-    try:
-        value = json.loads(summary_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
 def _metric(
@@ -140,15 +114,66 @@ def _base_provenance(
     return provenance
 
 
+def _build_evaluation_result(
+    scored: ScorerResult,
+    context: EvaluationContext,
+    task: EvaluationTask,
+) -> EvaluationResult:
+    """Translate the shared scorer contract without filesystem round-trips."""
+    specifications = {spec.name: spec for spec in task.metric_specs}
+    metrics: dict[str, MetricValue] = {}
+    for name, value in scored.metrics.items():
+        spec = specifications.get(name, MetricSpec(name))
+        observations = scored.observations.get(name, [])
+        metrics[name] = (
+            _metric(observations, context, higher_is_better=spec.higher_is_better)
+            if observations
+            else MetricValue(
+                value=float(value),
+                count=0,
+                higher_is_better=spec.higher_is_better,
+            )
+        )
+    missing = set(specifications) - set(metrics)
+    if missing:
+        raise ValueError(f"Scorer omitted declared metrics: {sorted(missing)}")
+    return EvaluationResult(
+        task_name=context.task_name,
+        task_version=task.version,
+        metrics=metrics,
+        sample_count=scored.sample_count,
+        effective_sample_count=scored.effective_sample_count,
+        failed_count=scored.failed_count,
+        skipped_count=scored.skipped_count,
+        timeout_count=scored.timeout_count,
+        provenance={**scored.provenance, **_base_provenance(context, task)},
+    )
+
+
+def write_structured_summary(result: EvaluationResult, cache_path: Path) -> None:
+    """Write the registry result in one schema shared by all task families."""
+    summary_path = cache_path.with_suffix(".summary.json")
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = result.to_dict()
+    payload["summary_version"] = 1
+    payload["metric_values"] = {
+        name: metric.value for name, metric in result.metrics.items()
+    }
+    summary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 @dataclass
 class MathTask:
     """Adapter for math-verify scoring."""
 
-    scorer: MathScorer
+    scorer: StructuredScorer
     family: str = "math_opensource"
     version: str = "math_v1"
     pipeline_version: str = "math_response_v1"
     metric_specs: tuple[MetricSpec, ...] = (MetricSpec("accuracy"),)
+    required_fields: tuple[str, ...] = ("label", "response")
 
     def prepare_dataset(
         self, data: list[dict[str, Any]], context: PreparationContext
@@ -161,7 +186,7 @@ class MathTask:
         ]
 
     def score(self, context: EvaluationContext) -> EvaluationResult:
-        value = self.scorer(
+        scored = self.scorer(
             eval_dataset=context.eval_dataset,
             label_key=context.label_key,
             response_key=context.response_key,
@@ -171,38 +196,15 @@ class MathTask:
             task_name=context.task_name,
             seed=context.seed,
         )
-        records = [
-            float(record.get("accuracy", value))
-            for record in context.eval_dataset
-            if isinstance(record.get("accuracy", value), (int, float))
-        ]
-        samples = records or [float(value)]
-        return EvaluationResult(
-            task_name=context.task_name,
-            task_version=self.version,
-            metrics={"accuracy": _metric(samples, context)},
-            sample_count=len(samples),
-            effective_sample_count=sum(1 for sample in samples if sample in {0.0, 1.0}),
-            failed_count=sum(
-                1
-                for record in context.eval_dataset
-                if record.get("extracted_answer") == "Error"
-            ),
-            timeout_count=sum(
-                1
-                for record in context.eval_dataset
-                if record.get("extracted_answer") == "Timeout"
-            ),
-            provenance=_base_provenance(context, self),
-        )
+        return _build_evaluation_result(scored, context, self)
 
 
 @dataclass
 class MCTask:
     """Adapter for generation and loglikelihood MC scoring."""
 
-    generate_scorer: MCScorer
-    loglikelihood_scorer: MCScorer
+    generate_scorer: StructuredScorer
+    loglikelihood_scorer: StructuredScorer
     family: str = "mc_opensource"
     version: str = "mc_v1"
     pipeline_version: str = "mc_generation_v1"
@@ -212,6 +214,7 @@ class MCTask:
         MetricSpec("acc_bytes"),
         MetricSpec("exact_match"),
     )
+    required_fields: tuple[str, ...] = ("response",)
 
     def prepare_dataset(
         self, data: list[dict[str, Any]], context: PreparationContext
@@ -252,59 +255,26 @@ class MCTask:
                 response_key=context.response_key,
                 aggregation=context.mc_aggregation,
             )
-        value = scorer(**kwargs)
-        records = _read_jsonl(context.cache_path)
-        summary = _read_summary(context.cache_path)
-        metric_samples: dict[str, list[float]] = {
-            name: [] for name in ("acc", "acc_norm", "acc_bytes", "exact_match")
-        }
-        for record in records:
-            if record.get("aggregation") == "per_sample" and isinstance(
-                record.get("sample_correct"), list
-            ):
-                samples = [float(bool(item)) for item in record["sample_correct"]]
-                metric_samples["acc"].extend(samples)
-                metric_samples["acc_norm"].extend(samples)
-                metric_samples["acc_bytes"].extend(samples)
-                metric_samples["exact_match"].extend(samples)
-            else:
-                for name, key in (
-                    ("acc", "correct"),
-                    ("acc_norm", "correct_norm"),
-                    ("acc_bytes", "correct_bytes"),
-                    ("exact_match", "correct"),
-                ):
-                    metric_samples[name].append(float(bool(record.get(key, False))))
-        metrics: dict[str, MetricValue] = {}
-        for name in metric_samples:
-            samples = metric_samples[name]
-            if not samples:
-                samples = [float(summary.get(name, value if name == "acc" else 0.0))]
-            metrics[name] = _metric(samples, context)
-        return EvaluationResult(
-            task_name=context.task_name,
-            task_version=self.version,
-            metrics=metrics,
-            sample_count=metrics["acc"].count,
-            effective_sample_count=metrics["acc"].count,
-            failed_count=sum(1 for record in records if record.get("error")),
-            provenance={
-                **_base_provenance(context, self),
+        scored = scorer(**kwargs)
+        scored.provenance.update(
+            {
                 "mc_mode": "loglikelihood" if is_loglikelihood else "generate",
                 "mc_aggregation": context.mc_aggregation,
-            },
+            }
         )
+        return _build_evaluation_result(scored, context, self)
 
 
 @dataclass
 class CodeTask:
     """Adapter for sandboxed code scoring."""
 
-    scorer: CodeScorer
+    scorer: StructuredScorer
     family: str = "code_opensource"
     version: str = "code_v1"
     pipeline_version: str = "code_generation_v1"
     metric_specs: tuple[MetricSpec, ...] = (MetricSpec("pass@1"),)
+    required_fields: tuple[str, ...] = ("label", "response")
 
     def prepare_dataset(
         self, data: list[dict[str, Any]], context: PreparationContext
@@ -317,7 +287,7 @@ class CodeTask:
         ]
 
     def score(self, context: EvaluationContext) -> EvaluationResult:
-        value = self.scorer(
+        scored = self.scorer(
             eval_dataset=context.eval_dataset,
             label_key=context.label_key,
             response_key=context.response_key,
@@ -329,26 +299,7 @@ class CodeTask:
             seed=context.seed,
             allow_unsafe_code=context.allow_unsafe_code,
         )
-        records = _read_jsonl(context.cache_path)
-        samples = [float(bool(record.get("passed"))) for record in records]
-        if not samples:
-            samples = [float(value)]
-        summary = _read_summary(context.cache_path)
-        metrics = {"pass@1": _metric(samples, context)}
-        for name, raw in summary.get("pass_at_k", {}).items():
-            if name != "pass@1" and isinstance(raw, (int, float)):
-                metrics[name] = MetricValue(
-                    float(raw), int(summary.get("problems", len(samples)))
-                )
-        return EvaluationResult(
-            task_name=context.task_name,
-            task_version=self.version,
-            metrics=metrics,
-            sample_count=len(samples),
-            effective_sample_count=len(samples),
-            failed_count=len(samples) - sum(int(sample) for sample in samples),
-            provenance=_base_provenance(context, self),
-        )
+        return _build_evaluation_result(scored, context, self)
 
 
 def _annotate_item(
@@ -389,10 +340,10 @@ class TaskRegistry:
 
 
 def build_default_registry(
-    math_scorer: MathScorer,
-    mc_generate_scorer: MCScorer,
-    mc_loglikelihood_scorer: MCScorer,
-    code_scorer: CodeScorer,
+    math_scorer: StructuredScorer,
+    mc_generate_scorer: StructuredScorer,
+    mc_loglikelihood_scorer: StructuredScorer,
+    code_scorer: StructuredScorer,
 ) -> TaskRegistry:
     """Build the standard registry; scorer arguments keep tests injectable."""
     return TaskRegistry(
@@ -430,11 +381,16 @@ def evaluate_registered_task(
             "model_revision": context.model_revision,
             "task_name": context.task_name,
             "task_version": task.version,
+            "dataset_hash": hash_evaluation_inputs(
+                context.eval_dataset, context.response_key
+            ),
+            "prompt_hash": run_provenance.get("prompt_hash"),
             "evaluation_input_hash": hash_evaluation_inputs(
                 context.eval_dataset, context.response_key
             ),
-            "git_hash": get_git_hash(),
-            "generation": {
+            "git_commit": get_git_hash(),
+            "postprocess_version": task.pipeline_version,
+            "generation_params": {
                 "label_key": context.label_key,
                 "response_key": context.response_key,
                 "mc_aggregation": context.mc_aggregation,
@@ -451,6 +407,7 @@ def evaluate_registered_task(
                 "bootstrap_samples": context.bootstrap_samples,
                 "confidence_level": context.confidence_level,
             },
+            "sampling_seed": context.seed,
         }
         cache_key = cache.key(payload)
         cached = cache.get(cache_key)
@@ -460,10 +417,12 @@ def evaluate_registered_task(
                 result.task_name == context.task_name
                 and result.task_version == task.version
             ):
+                write_structured_summary(result, context.cache_path)
                 return result
 
     result = task.score(context)
     result.cache_key = cache_key
+    write_structured_summary(result, context.cache_path)
     if cache is not None and cache_key is not None:
         cache.set(cache_key, result.to_dict())
     return result

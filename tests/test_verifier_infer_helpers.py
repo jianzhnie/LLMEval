@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -37,6 +38,7 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
     _tf.HfArgumentParser = MagicMock
     sys.modules["transformers"] = _tf
 
+from llmeval.cache import ContentAddressedCache
 from llmeval.inference.verifier import (
     VerifierOfflineInferenceRunner,
     _last_n_strs,
@@ -195,7 +197,23 @@ class TestVerifierResume:
         args.input_file = str(tmp_path / "input.jsonl")
         args.n_samples = 1
         args.verifier_prompt_type = "fdd_prompt_cursor"
+        args.model_name_or_path = "verifier-model"
+        args.model_revision = "revision-1"
+        args.task = "math_opensource/test"
+        args.max_tokens = 64
+        args.temperature = 0.0
+        args.top_p = 1.0
+        args.top_k = -1
+        args.repetition_penalty = 1.0
+        args.seed = 7
         runner.args = args
+        runner._file_lock = threading.Lock()
+        runner.cache = None
+        runner._git_hash = "test-git"
+        runner.verifier_prompt = "{question}\n{gold_answer}\n{llm_response}"
+        runner.llm = None
+        runner.tokenizer = None
+        runner.sampling_params = None
         return runner
 
     def test_resume_id_survives_compacted_output(self, tmp_path: Path) -> None:
@@ -258,3 +276,56 @@ class TestVerifierResume:
 
         assert len(remaining) == 1
         assert remaining[0]["_llmeval_sample_index"] == 1
+
+    def test_verifier_content_cache_reuses_raw_response(self, tmp_path: Path) -> None:
+        runner = self._runner(tmp_path)
+        runner.cache = ContentAddressedCache(tmp_path / "content", "inference")
+        runner.sampling_params = object()
+        runner.tokenizer = MagicMock()
+        runner.tokenizer.apply_chat_template.return_value = "rendered verifier prompt"
+        output = MagicMock()
+        output.outputs = [MagicMock(text="\\boxed{A}")]
+        runner.llm = MagicMock()
+        runner.llm.generate.return_value = [output]
+        item = {
+            "doc_id": "math:1",
+            "prompt": "2+2",
+            "answer": "4",
+            "gen": ["4"],
+        }
+
+        first_key = runner._cache_key(item, "rendered verifier prompt")
+        runner.process_and_write_batch([item])
+        runner.process_and_write_batch([item])
+
+        assert runner.llm.generate.call_count == 1
+        assert runner.cache.stats().to_dict() == {
+            "hits": 1,
+            "misses": 1,
+            "corrupt": 0,
+            "writes": 1,
+        }
+        rows = Path(runner.args.output_file).read_text().strip().splitlines()
+        assert len(rows) == 2
+        assert json.loads(rows[-1])["Verifier_judgment"] == "A"
+
+        runner.args.temperature = 0.5
+        assert runner._cache_key(item, "rendered verifier prompt") != first_key
+
+    def test_verifier_empty_response_is_not_cached(self, tmp_path: Path) -> None:
+        runner = self._runner(tmp_path)
+        runner.cache = ContentAddressedCache(tmp_path / "content", "inference")
+        runner.sampling_params = object()
+        runner.tokenizer = MagicMock()
+        runner.tokenizer.apply_chat_template.return_value = "rendered verifier prompt"
+        output = MagicMock()
+        output.outputs = [MagicMock(text="")]
+        runner.llm = MagicMock()
+        runner.llm.generate.return_value = [output]
+        item = {"doc_id": "math:1", "prompt": "2+2", "answer": "4", "gen": ["4"]}
+
+        runner.process_and_write_batch([item])
+        runner.process_and_write_batch([item])
+
+        assert runner.llm.generate.call_count == 2
+        assert runner.cache.stats().writes == 0

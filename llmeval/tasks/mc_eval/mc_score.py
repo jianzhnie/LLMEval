@@ -54,6 +54,7 @@ from llmeval.tasks.postprocess import (
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
+from llmeval.tasks.results import ScorerResult
 from llmeval.utils.log import init_logger
 
 __all__ = [
@@ -64,9 +65,11 @@ __all__ = [
     "process_item",
     "score_generate",
     "score_generate_item",
+    "score_generate_result",
     "score_items",
     "score_loglikelihood",
     "score_loglikelihood_item",
+    "score_loglikelihood_result",
     "write_cache",
 ]
 
@@ -132,15 +135,15 @@ class MCScoreResult:
 # ===========================================================================
 
 
-def score_loglikelihood(
+def score_loglikelihood_result(
     eval_dataset: list[dict[str, Any]],
     cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
     task_name: str | None = None,
     seed: int | None = None,
-) -> float:
-    """Score loglikelihood-based MC results and persist cache files.
+) -> ScorerResult:
+    """Score loglikelihood-based MC results and return structured metrics.
 
     Parameters
     ----------
@@ -156,10 +159,8 @@ def score_loglikelihood(
     timeout:
         Per-item scoring timeout in seconds.
 
-    Returns
-    -------
-    float
-        Accuracy (*acc* metric).
+    The legacy JSONL/summary artifacts are still written for CLI compatibility,
+    but registry adapters consume the returned object directly.
     """
     if any(
         not (
@@ -190,7 +191,26 @@ def score_loglikelihood(
         ),
     )
     write_cache(metrics, cache_path)
-    return metrics.acc
+    return _to_scorer_result(metrics)
+
+
+def score_loglikelihood(
+    eval_dataset: list[dict[str, Any]],
+    cache_path: str | Path,
+    max_workers: int = 8,
+    timeout: int = 60,
+    task_name: str | None = None,
+    seed: int | None = None,
+) -> float:
+    """Compatibility wrapper returning only the primary ``acc`` metric."""
+    return score_loglikelihood_result(
+        eval_dataset,
+        cache_path,
+        max_workers=max_workers,
+        timeout=timeout,
+        task_name=task_name,
+        seed=seed,
+    ).metrics["acc"]
 
 
 def merge_generate_records(
@@ -277,7 +297,7 @@ def merge_generate_records(
     return merged
 
 
-def score_generate(
+def score_generate_result(
     eval_dataset: list[dict[str, Any]],
     label_key: str,
     response_key: str,
@@ -287,8 +307,8 @@ def score_generate(
     task_name: str | None = None,
     seed: int | None = None,
     aggregation: str = "first",
-) -> float:
-    """Score generation-based MC results by extracting the answer letter.
+) -> ScorerResult:
+    """Score generation-based MC results and return structured metrics.
 
     The ``aggregation`` argument controls how multiple generations are
     evaluated.  ``first`` preserves the historical behavior; ``majority_vote``
@@ -313,10 +333,8 @@ def score_generate(
     aggregation:
         Multiple-generation aggregation strategy.
 
-    Returns
-    -------
-    float
-        Accuracy (also reported as *acc_norm* / *exact_match* in the summary).
+    The legacy JSONL/summary artifacts are still written for CLI compatibility,
+    but registry adapters consume the returned object directly.
     """
     if aggregation not in _MC_AGGREGATIONS:
         raise ValueError(
@@ -346,7 +364,32 @@ def score_generate(
     )
     metrics.provenance["mc_aggregation"] = aggregation
     write_cache(metrics, cache_path)
-    return metrics.acc
+    return _to_scorer_result(metrics)
+
+
+def score_generate(
+    eval_dataset: list[dict[str, Any]],
+    label_key: str,
+    response_key: str,
+    cache_path: str | Path,
+    max_workers: int = 8,
+    timeout: int = 60,
+    task_name: str | None = None,
+    seed: int | None = None,
+    aggregation: str = "first",
+) -> float:
+    """Compatibility wrapper returning only the primary ``acc`` metric."""
+    return score_generate_result(
+        eval_dataset,
+        label_key,
+        response_key,
+        cache_path,
+        max_workers=max_workers,
+        timeout=timeout,
+        task_name=task_name,
+        seed=seed,
+        aggregation=aggregation,
+    ).metrics["acc"]
 
 
 # ===========================================================================
@@ -369,8 +412,9 @@ def score_items(
     to avoid pool overhead.  Otherwise a :class:`~pebble.ProcessPool` is used
     so that large benchmarks (e.g. MMLU ~14k items) finish quickly.
 
-    Timed-out or crashed worker tasks are replaced with forced-incorrect
-    records so that a single bad item never aborts the whole run.
+    Timed-out or crashed worker tasks are replaced with records carrying an
+    explicit status.  They remain in the output for diagnostics, but are not
+    treated as ordinary incorrect model answers by the structured scorer.
     """
     total = len(eval_dataset)
     if total == 0:
@@ -404,7 +448,7 @@ def score_items(
             except StopIteration:
                 break
             except TimeoutError:
-                logger.warning("Individual scoring task timed out — marked as failed.")
+                logger.warning("Individual scoring task timed out — marked as timeout.")
                 pbar.update(1)
                 continue
             except Exception:
@@ -417,8 +461,8 @@ def score_items(
                 results_by_index[idx] = record
             pbar.update(1)
 
-    # Replace missing entries (pool timeouts, worker crashes) with
-    # forced-incorrect records so they never inflate accuracy.
+    # Replace missing entries (pool timeouts, worker crashes) with explicit
+    # failure records so they never inflate accuracy or uncertainty.
     records: list[dict[str, Any]] = []
     for i, item in enumerate(eval_dataset):
         record = results_by_index.get(i)
@@ -434,6 +478,7 @@ def score_items(
                     "correct": False,
                     "correct_norm": False,
                     "correct_bytes": False,
+                    "evaluation_status": "timeout",
                     "aggregation": aggregation,
                     **build_sample_provenance(
                         item, label_key="gold", response_key="logprobs"
@@ -446,6 +491,7 @@ def score_items(
                     "correct": False,
                     "correct_norm": False,
                     "correct_bytes": False,
+                    "evaluation_status": "timeout",
                     "aggregation": aggregation,
                     **build_sample_provenance(
                         item, label_key=label_key, response_key=response_key
@@ -488,24 +534,42 @@ def build_result(
     per_sample = bool(records) and all(
         r.get("aggregation") == "per_sample" for r in records
     )
+    def record_weight(record: dict[str, Any]) -> int:
+        return (
+            max(int(record.get("sample_total", 0)), 0)
+            if per_sample
+            else 1
+        )
+
+    eligible_records = [
+        record
+        for record in records
+        if record.get("evaluation_status", "completed") == "completed"
+    ]
     if per_sample:
         total = sum(int(r.get("sample_total", 0)) for r in records)
-        n_correct = sum(int(r.get("sample_correct_count", 0)) for r in records)
+        n_correct = sum(
+            int(r.get("sample_correct_count", 0)) for r in eligible_records
+        )
         n_correct_norm = sum(
-            int(r.get("sample_correct_norm_count", 0)) for r in records
+            int(r.get("sample_correct_norm_count", 0)) for r in eligible_records
         )
         n_correct_bytes = sum(
-            int(r.get("sample_correct_bytes_count", 0)) for r in records
+            int(r.get("sample_correct_bytes_count", 0))
+            for r in eligible_records
         )
     else:
         total = len(records)
-        n_correct = sum(1 for r in records if r["correct"])
-        n_correct_norm = sum(1 for r in records if r.get("correct_norm", r["correct"]))
+        n_correct = sum(1 for r in eligible_records if r["correct"])
+        n_correct_norm = sum(
+            1 for r in eligible_records if r.get("correct_norm", r["correct"])
+        )
         n_correct_bytes = sum(
-            1 for r in records if r.get("correct_bytes", r["correct"])
+            1 for r in eligible_records if r.get("correct_bytes", r["correct"])
         )
 
-    safe_total = max(total, 1)
+    effective_total = sum(record_weight(record) for record in eligible_records)
+    safe_total = max(effective_total, 1)
     return MCScoreResult(
         acc=n_correct / safe_total,
         acc_norm=n_correct_norm / safe_total,
@@ -517,6 +581,70 @@ def build_result(
         correct_bytes=n_correct_bytes,
         per_item=records,
         provenance=provenance or {},
+    )
+
+
+def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
+    """Convert MC task output to the registry's scorer contract."""
+    observations: dict[str, list[float]] = {
+        name: [] for name in ("acc", "acc_norm", "acc_bytes", "exact_match")
+    }
+    def weight(record: dict[str, Any]) -> int:
+        if record.get("aggregation") == "per_sample":
+            return max(int(record.get("sample_total", 0)), 0)
+        return 1
+
+    for record in result.per_item:
+        if record.get("evaluation_status", "completed") != "completed":
+            continue
+        if record.get("aggregation") == "per_sample" and isinstance(
+            record.get("sample_correct"), list
+        ):
+            samples = [float(bool(value)) for value in record["sample_correct"]]
+            for values in observations.values():
+                values.extend(samples)
+            continue
+        for name, key in (
+            ("acc", "correct"),
+            ("acc_norm", "correct_norm"),
+            ("acc_bytes", "correct_bytes"),
+            ("exact_match", "correct"),
+        ):
+            observations[name].append(float(bool(record.get(key, False))))
+
+    sample_count = sum(weight(record) for record in result.per_item)
+    failed_count = sum(
+        weight(record)
+        for record in result.per_item
+        if record.get("evaluation_status") == "failed"
+    )
+    skipped_count = sum(
+        weight(record)
+        for record in result.per_item
+        if record.get("evaluation_status") == "skipped"
+    )
+    timeout_count = sum(
+        weight(record)
+        for record in result.per_item
+        if record.get("evaluation_status") == "timeout"
+    )
+    return ScorerResult(
+        metrics={
+            "acc": result.acc,
+            "acc_norm": result.acc_norm,
+            "acc_bytes": result.acc_bytes,
+            "exact_match": result.exact_match,
+        },
+        observations=observations,
+        per_item=result.per_item,
+        sample_count=sample_count,
+        effective_sample_count=max(
+            sample_count - failed_count - skipped_count - timeout_count, 0
+        ),
+        failed_count=failed_count,
+        skipped_count=skipped_count,
+        timeout_count=timeout_count,
+        provenance=result.provenance,
     )
 
 
@@ -568,6 +696,7 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
             "correct": False,
             "correct_norm": False,
             "correct_bytes": False,
+            "evaluation_status": "skipped" if gold < 0 else "failed",
             **provenance,
         }
 
@@ -655,6 +784,13 @@ def score_generate_item(
     else:
         generation_texts = []
 
+    if not gold:
+        status = "skipped"
+    elif not generation_texts:
+        status = "failed"
+    else:
+        status = "completed"
+
     filtered = [
         MC_GENERATION_PIPELINE.apply_with_trace(text) for text in generation_texts
     ]
@@ -700,6 +836,7 @@ def score_generate_item(
         "raw_gen": generation_texts,
         "filtered_gen": predictions,
         "filter_trace": [trace for _, trace in filtered],
+        "evaluation_status": status,
         "sample_correct": sample_correct,
         "sample_total": len(predictions),
         "sample_correct_count": sum(sample_correct),
@@ -765,6 +902,26 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
     summary_path = cache_path.with_suffix(".summary.json")
     question_total = len(result.per_item)
     sample_total = sum(int(record.get("sample_total", 1)) for record in result.per_item)
+    def weight(record: dict[str, Any]) -> int:
+        return max(int(record.get("sample_total", 0)), 0) if record.get(
+            "aggregation"
+        ) == "per_sample" else 1
+
+    failed_count = sum(
+        weight(record)
+        for record in result.per_item
+        if record.get("evaluation_status") == "failed"
+    )
+    skipped_count = sum(
+        weight(record)
+        for record in result.per_item
+        if record.get("evaluation_status") == "skipped"
+    )
+    timeout_count = sum(
+        weight(record)
+        for record in result.per_item
+        if record.get("evaluation_status") == "timeout"
+    )
     with open(summary_path, "w", encoding="utf-8") as fh:
         json.dump(
             {
@@ -775,6 +932,13 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
                 "total": result.total,
                 "question_total": question_total,
                 "sample_total": sample_total,
+                "sample_count": sample_total,
+                "effective_sample_count": max(
+                    sample_total - failed_count - skipped_count - timeout_count, 0
+                ),
+                "failed_count": failed_count,
+                "skipped_count": skipped_count,
+                "timeout_count": timeout_count,
                 "aggregation": result.provenance.get("mc_aggregation"),
                 "provenance": result.provenance,
             },

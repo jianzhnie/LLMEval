@@ -17,6 +17,7 @@ from typing import Any
 __all__ = [
     "EvaluationResult",
     "MetricValue",
+    "ScorerResult",
     "aggregate_metric_values",
     "bootstrap_metric",
     "metric_from_samples",
@@ -128,6 +129,60 @@ class EvaluationResult:
                 else {}
             ),
             cache_key=(str(data["cache_key"]) if data.get("cache_key") else None),
+        )
+
+
+@dataclass
+class ScorerResult:
+    """Task-scorer output consumed directly by registry adapters.
+
+    ``metrics`` stores aggregate values for persistence and compatibility.
+    ``observations`` stores the denominator-level values used to recompute
+    uncertainty in :class:`EvaluationResult`. Scorers also return their
+    per-item records so adapters never need to read JSONL or summary files.
+    """
+
+    metrics: dict[str, float]
+    observations: dict[str, list[float]]
+    per_item: list[dict[str, Any]] = field(default_factory=list)
+    sample_count: int = 0
+    effective_sample_count: int = 0
+    failed_count: int = 0
+    skipped_count: int = 0
+    timeout_count: int = 0
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if any(not math.isfinite(float(value)) for value in self.metrics.values()):
+            raise ValueError("scorer metrics must be finite")
+        if any(count < 0 for count in self._counts):
+            raise ValueError("scorer result counts must be non-negative")
+        excluded_count = self.failed_count + self.skipped_count + self.timeout_count
+        if excluded_count > self.sample_count:
+            raise ValueError("excluded sample counts cannot exceed sample count")
+        if self.effective_sample_count > self.sample_count:
+            raise ValueError("effective sample count cannot exceed sample count")
+        if self.effective_sample_count != self.sample_count - excluded_count:
+            raise ValueError(
+                "effective sample count must equal sample_count minus excluded counts"
+            )
+        unknown = set(self.observations) - set(self.metrics)
+        if unknown:
+            raise ValueError(
+                f"observations reference undeclared metrics: {sorted(unknown)}"
+            )
+        for name, values in self.observations.items():
+            if any(not math.isfinite(float(value)) for value in values):
+                raise ValueError(f"observations for metric {name!r} must be finite")
+
+    @property
+    def _counts(self) -> tuple[int, ...]:
+        return (
+            self.sample_count,
+            self.effective_sample_count,
+            self.failed_count,
+            self.skipped_count,
+            self.timeout_count,
         )
 
 

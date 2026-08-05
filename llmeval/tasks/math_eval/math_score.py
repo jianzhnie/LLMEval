@@ -27,6 +27,7 @@ from llmeval.tasks.postprocess import (
     TextFilterPipeline,
 )
 from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
+from llmeval.tasks.results import ScorerResult
 from llmeval.utils.log import init_logger
 
 # Configure a dedicated logger for the math scoring module
@@ -128,11 +129,17 @@ class ProcessingStats:
     correct: int = 0
     timeout: int = 0
     error: int = 0
+    skipped: int = 0
+
+    @property
+    def effective(self) -> int:
+        """Number of samples eligible for the accuracy denominator."""
+        return max(self.total - self.timeout - self.error - self.skipped, 0)
 
     @property
     def correct_rate(self) -> float:
         """Calculate percentage of correct answers."""
-        return (self.correct / self.total * 100) if self.total > 0 else 0.0
+        return (self.correct / self.effective * 100) if self.effective > 0 else 0.0
 
     @property
     def timeout_rate(self) -> float:
@@ -359,6 +366,30 @@ def process_answers(
         return index, 0.0, f"Error: {e}", f"Error: {e}"
 
 
+def _math_record_status(
+    item: dict[str, Any],
+    label_key: str,
+    response_key: str,
+    extracted_answer: Any,
+) -> str:
+    """Classify a math record for the shared denominator contract.
+
+    An unparseable model answer is a completed incorrect observation. Missing
+    input fields are skipped, while verifier/worker errors and timeouts are
+    excluded from the metric denominator.
+    """
+    if extracted_answer == "Timeout":
+        return "timeout"
+    if isinstance(extracted_answer, str) and extracted_answer.startswith(
+        ("Error", "Format Error")
+    ):
+        return "failed"
+    response = item.get(response_key)
+    if not response or not item.get(label_key) or "/" not in str(item.get("task", "")):
+        return "skipped"
+    return "completed"
+
+
 def compute_scores(
     eval_dataset: list[dict[str, Any]],
     label_key: str,
@@ -452,6 +483,9 @@ def compute_scores(
             pbar.update(1)
             if result is not None:
                 idx, is_correct, extracted_answer, extracted_gold = result
+                status = _math_record_status(
+                    eval_dataset[idx], label_key, response_key, extracted_answer
+                )
 
                 # Update results atomically
                 eval_dataset[idx].update(
@@ -459,6 +493,7 @@ def compute_scores(
                         "accuracy": is_correct,
                         "extracted_gold": extracted_gold,
                         "extracted_answer": extracted_answer,
+                        "evaluation_status": status,
                         **_filter_artifacts(eval_dataset[idx].get(response_key)),
                         **build_sample_provenance(
                             eval_dataset[idx],
@@ -472,12 +507,12 @@ def compute_scores(
                 # Update statistics
                 if is_correct == 1.0:
                     stats.correct += 1
-                elif extracted_answer == "Timeout":
+                if status == "timeout":
                     stats.timeout += 1
-                elif isinstance(extracted_answer, str) and extracted_answer.startswith(
-                    "Error"
-                ):
+                elif status == "failed":
                     stats.error += 1
+                elif status == "skipped":
+                    stats.skipped += 1
 
     # Handle any jobs that were not processed (e.g., due to a process crash or other unforeseen error).
     for idx in range(total):
@@ -487,6 +522,7 @@ def compute_scores(
                     "accuracy": 0.0,
                     "extracted_gold": "Error",
                     "extracted_answer": "Error",
+                    "evaluation_status": "failed",
                     **_filter_artifacts(eval_dataset[idx].get(response_key)),
                     **build_sample_provenance(
                         eval_dataset[idx],
@@ -516,6 +552,9 @@ def compute_scores(
         "correct_count": stats.correct,
         "timeout_count": stats.timeout,
         "error_count": stats.error,
+        "skipped_count": stats.skipped,
+        "sample_count": stats.total,
+        "effective_sample_count": stats.effective,
         "workers_used": optimal_workers,
         "timeout_setting": timeout,
     }
@@ -525,7 +564,12 @@ def compute_scores(
     save_cache(eval_dataset, cache_path)
 
     # Calculate and return the average accuracy
-    accuracy = mean(data["accuracy"] for data in eval_dataset)
+    eligible_accuracy = [
+        float(data["accuracy"])
+        for data in eval_dataset
+        if data.get("evaluation_status", "completed") == "completed"
+    ]
+    accuracy = mean(eligible_accuracy) if eligible_accuracy else 0.0
     save_summary(
         accuracy=accuracy,
         metadata=metadata,
@@ -540,6 +584,66 @@ def compute_scores(
     )
     logger.info(f"Final Accuracy: {accuracy:.4f}")
     return accuracy
+
+
+def compute_score_result(
+    eval_dataset: list[dict[str, Any]],
+    label_key: str,
+    response_key: str,
+    cache_path: str,
+    max_workers: int,
+    timeout: int,
+    task_name: str | None = None,
+    seed: int | None = None,
+) -> ScorerResult:
+    """Return math scores through the registry's structured scorer contract.
+
+    :func:`compute_scores` remains the compatibility API and performs the
+    established JSONL/summary persistence. This entry point builds the registry
+    result from the in-memory annotated records, without reading those files
+    back from disk.
+    """
+    accuracy = compute_scores(
+        eval_dataset=eval_dataset,
+        label_key=label_key,
+        response_key=response_key,
+        cache_path=cache_path,
+        max_workers=max_workers,
+        timeout=timeout,
+        task_name=task_name,
+        seed=seed,
+    )
+    observations = [
+        float(item.get("accuracy", 0.0))
+        for item in eval_dataset
+        if item.get("evaluation_status", "completed") == "completed"
+    ]
+    timeout_count = sum(
+        item.get("evaluation_status") == "timeout" for item in eval_dataset
+    )
+    failed_count = sum(
+        item.get("evaluation_status") == "failed" for item in eval_dataset
+    )
+    skipped_count = sum(
+        item.get("evaluation_status") == "skipped" for item in eval_dataset
+    )
+    return ScorerResult(
+        metrics={"accuracy": accuracy},
+        observations={"accuracy": observations},
+        per_item=[dict(item) for item in eval_dataset],
+        sample_count=len(eval_dataset),
+        effective_sample_count=len(observations),
+        failed_count=failed_count,
+        skipped_count=skipped_count,
+        timeout_count=timeout_count,
+        provenance=build_run_provenance(
+            eval_dataset,
+            task_name=task_name,
+            label_key=label_key,
+            response_key=response_key,
+            seed=seed,
+        ),
+    )
 
 
 def _filter_artifacts(response: Any) -> dict[str, Any]:

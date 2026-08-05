@@ -34,14 +34,15 @@ from typing import Any
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import load_jsonl
-from llmeval.tasks.code_eval.code_score import score_code
-from llmeval.tasks.math_eval.math_score import compute_scores
+from llmeval.tasks.code_eval.code_score import score_code_result
+from llmeval.tasks.math_eval.math_score import compute_score_result
 from llmeval.tasks.mc_eval.mc_score import (
-    score_generate,
-    score_loglikelihood,
+    score_generate_result,
+    score_loglikelihood_result,
 )
 from llmeval.tasks.provenance import (
     annotate_dataset_contamination,
+    build_run_provenance,
     load_contamination_sources,
 )
 from llmeval.tasks.registry import (
@@ -51,7 +52,9 @@ from llmeval.tasks.registry import (
     TaskRegistry,
     build_default_registry,
     evaluate_registered_task,
+    write_structured_summary,
 )
+from llmeval.tasks.results import MetricValue
 from llmeval.utils.config import EvalTaskArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.reproducibility import seed_everything, seed_provenance
@@ -142,7 +145,10 @@ def evaluate_task(
 def _default_registry() -> TaskRegistry:
     """Build a registry from module symbols so scorer tests remain injectable."""
     return build_default_registry(
-        compute_scores, score_generate, score_loglikelihood, score_code
+        compute_score_result,
+        score_generate_result,
+        score_loglikelihood_result,
+        score_code_result,
     )
 
 
@@ -183,9 +189,6 @@ def evaluate_task_result(
     input_key: str = "prompt",
 ) -> EvaluationResult | None:
     """Evaluate a task through the registry and return all declared metrics."""
-    if not eval_dataset:
-        logger.warning("Empty dataset provided for evaluation")
-        return None
     actual_seed = 0 if seed is None else seed
     seed_state = seed_everything(actual_seed)
     context = EvaluationContext(
@@ -209,9 +212,36 @@ def evaluate_task_result(
         read_only_cache=read_only_cache,
         input_key=input_key,
     )
+    registry = _default_registry()
     try:
-        result = evaluate_registered_task(context, _default_registry())
+        task = registry.resolve(task_name)
+        if not eval_dataset:
+            logger.warning("Empty dataset provided for evaluation")
+            result = EvaluationResult(
+                task_name=task_name,
+                task_version=task.version,
+                metrics={
+                    spec.name: MetricValue(
+                        value=0.0,
+                        count=0,
+                        higher_is_better=spec.higher_is_better,
+                    )
+                    for spec in task.metric_specs
+                },
+                provenance=build_run_provenance(
+                    [],
+                    task_name=task_name,
+                    input_key=input_key,
+                    label_key=label_key,
+                    response_key=response_key,
+                    seed=actual_seed,
+                ),
+            )
+            write_structured_summary(result, context.cache_path)
+        else:
+            result = evaluate_registered_task(context, registry)
         result.provenance.update(seed_provenance(seed_state))
+        write_structured_summary(result, context.cache_path)
         for name, metric in result.metrics.items():
             logger.info(
                 "Task %s metric %s=%.4f (n=%d, stderr=%s)",
@@ -221,6 +251,15 @@ def evaluate_task_result(
                 metric.count,
                 f"{metric.stderr:.6f}" if metric.stderr is not None else "N/A",
             )
+        logger.info(
+            "Task %s counts: samples=%d effective=%d failed=%d skipped=%d timeout=%d",
+            task_name,
+            result.sample_count,
+            result.effective_sample_count,
+            result.failed_count,
+            result.skipped_count,
+            result.timeout_count,
+        )
         return result
     except Exception as exc:
         logger.error("Evaluation failed: %s", exc, exc_info=True)

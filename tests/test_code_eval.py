@@ -34,6 +34,7 @@ from llmeval.tasks.code_eval.code_score import (
     estimate_pass_at_k,
     extract_code,
     score_code,
+    score_code_result,
     write_cache,
 )
 
@@ -245,6 +246,28 @@ class TestUnsafeExecute:
 
 
 class TestScoreCode:
+    def test_incorrect_program_is_not_infrastructure_failure(
+        self, tmp_path: Path
+    ) -> None:
+        result = score_code_result(
+            [
+                {
+                    "prompt": "def f():\n",
+                    "answer": "\nassert f() == 1\n",
+                    "gen": ["    return 2"],
+                }
+            ],
+            "answer",
+            "gen",
+            tmp_path / "incorrect.jsonl",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert result.metrics["pass@1"] == 0.0
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 1
+
     def test_execution_requires_explicit_opt_in(self, tmp_path: Path) -> None:
         with pytest.raises(PermissionError, match="executes generated code"):
             score_code(

@@ -31,6 +31,7 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
     _tf.HfArgumentParser = MagicMock
     sys.modules["transformers"] = _tf
 
+from llmeval.cache import ContentAddressedCache
 from llmeval.inference.offline import OfflineInferenceRunner
 
 
@@ -46,6 +47,8 @@ def _args(tmp_path: Path, **overrides: object) -> SimpleNamespace:
         "n_samples": 1,
         "batch_size": 2,
         "model_name_or_path": "test-model",
+        "model_revision": "revision-1",
+        "task": "math_opensource/test",
         "max_model_len": 4096,
         "rope_scaling": "{}",
         "rope_scaling_dict": None,
@@ -67,6 +70,10 @@ def _args(tmp_path: Path, **overrides: object) -> SimpleNamespace:
         "top_p": 0.9,
         "top_k": 20,
         "repetition_penalty": 1.1,
+        "content_cache_dir": "",
+        "force_recompute": False,
+        "read_only_cache": False,
+        "cache_rank": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -78,6 +85,8 @@ def _runner(tmp_path: Path, **overrides: object) -> OfflineInferenceRunner:
     runner._file_lock = threading.Lock()
     runner.llm = None
     runner.sampling_params = None
+    runner.cache = None
+    runner._git_hash = "test-git"
     runner.system_prompt = None
     return runner
 
@@ -137,6 +146,49 @@ class TestOfflineInferenceRunner:
             for line in Path(runner.args.output_file).read_text().splitlines()
         ]
         assert rows == [{"prompt": "q", "answer": "a", "gen": ["answer text"]}]
+
+    def test_content_cache_hits_and_generation_params_change_key(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _runner(tmp_path)
+        runner.cache = ContentAddressedCache(tmp_path / "content", "inference")
+        runner.sampling_params = object()
+        output = MagicMock()
+        output.outputs = [MagicMock(text="answer text")]
+        runner.llm = MagicMock()
+        runner.llm.chat.return_value = [output]
+        item = {"doc_id": "test:1", "prompt": "q", "answer": "a"}
+        messages = [{"role": "user", "content": "q"}]
+
+        first_key = runner._cache_key(item, messages)
+        runner.process_and_write_batch([item])
+        runner.process_and_write_batch([item])
+        assert runner.llm.chat.call_count == 1
+        assert runner.cache.stats().to_dict() == {
+            "hits": 1,
+            "misses": 1,
+            "corrupt": 0,
+            "writes": 1,
+        }
+
+        runner.args.temperature = 0.8
+        assert runner._cache_key(item, messages) != first_key
+
+    def test_empty_response_is_not_cached(self, tmp_path: Path) -> None:
+        runner = _runner(tmp_path)
+        runner.cache = ContentAddressedCache(tmp_path / "content", "inference")
+        runner.sampling_params = object()
+        output = MagicMock()
+        output.outputs = [MagicMock(text="")]
+        runner.llm = MagicMock()
+        runner.llm.chat.return_value = [output]
+        item = {"doc_id": "test:1", "prompt": "q", "answer": "a"}
+
+        runner.process_and_write_batch([item])
+        runner.process_and_write_batch([item])
+
+        assert runner.llm.chat.call_count == 2
+        assert runner.cache.stats().writes == 0
 
     def test_setup_vllm_engine_passes_configured_args(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

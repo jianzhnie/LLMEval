@@ -35,6 +35,7 @@ from llmeval.inference.common import (
     sample_count_for_item,
     save_failed_items,
 )
+from llmeval.tasks.provenance import get_git_hash, hash_json
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
@@ -69,6 +70,8 @@ class InferenceClient:
         content_cache_dir: str = "",
         force_recompute: bool = False,
         read_only_cache: bool = False,
+        model_revision: str | None = None,
+        cache_rank: str | None = None,
     ) -> None:
         """Initialize the inference client with API configuration and validation.
 
@@ -91,12 +94,15 @@ class InferenceClient:
         self.max_retries: int = max_retries
         self.tool_choice: str = tool_choice
         self.seed = seed
+        self.model_revision = model_revision
+        self._git_hash = get_git_hash()
         self.cache = (
             ContentAddressedCache(
                 content_cache_dir,
                 "inference",
                 force_recompute=force_recompute,
                 read_only=read_only_cache,
+                rank=cache_rank,
             )
             if content_cache_dir
             else None
@@ -211,7 +217,7 @@ class InferenceClient:
         )
         cache = getattr(self, "cache", None)
         cache_key = (
-            cache.key({"endpoint": self.base_url, "request": call_args})
+            cache.key(self._cache_payload(call_args, "online_chat"))
             if cache is not None
             else None
         )
@@ -225,7 +231,7 @@ class InferenceClient:
         # Reasoning models may return content=None (thinking exhausted
         # max_tokens); normalize to "" so callers can treat it uniformly
         content = completion.choices[0].message.content or ""
-        if cache is not None and cache_key is not None:
+        if cache is not None and cache_key is not None and content.strip():
             cache.set(cache_key, {"content": content})
         return content
 
@@ -282,7 +288,7 @@ class InferenceClient:
         )
         cache = getattr(self, "cache", None)
         cache_key = (
-            cache.key({"endpoint": self.base_url, "request": call_args})
+            cache.key(self._cache_payload(call_args, "online_chat_multi"))
             if cache is not None
             else None
         )
@@ -294,7 +300,12 @@ class InferenceClient:
         if completion is None:
             return []  # context length exceeded (logged in _request_with_retry)
         contents = [choice.message.content or "" for choice in completion.choices]
-        if cache is not None and cache_key is not None:
+        if (
+            cache is not None
+            and cache_key is not None
+            and contents
+            and all(content.strip() for content in contents)
+        ):
             cache.set(cache_key, {"contents": contents})
         return contents
 
@@ -355,6 +366,28 @@ class InferenceClient:
         if is_explicit_tool_choice(self.tool_choice):
             call_args["tool_choice"] = self.tool_choice
         return call_args
+
+    def _cache_payload(self, call_args: dict[str, Any], kind: str) -> dict[str, Any]:
+        """Describe all content-affecting inputs for an online request."""
+        messages = call_args.get("messages", [])
+        return {
+            "backend": kind,
+            "endpoint": self.base_url,
+            "model_name": call_args.get("model"),
+            "model_revision": getattr(self, "model_revision", None),
+            "task_name": None,
+            "task_version": None,
+            "dataset_hash": hash_json(messages),
+            "prompt_hash": hash_json(messages),
+            "generation_params": {
+                key: value
+                for key, value in call_args.items()
+                if key not in {"model", "messages", "timeout"}
+            },
+            "sampling_seed": call_args.get("seed"),
+            "postprocess_version": "online_chat_v1",
+            "git_commit": getattr(self, "_git_hash", None),
+        }
 
     def _request_with_retry(self, call_args: dict[str, Any]) -> Any | None:
         """Execute a chat.completions call under the shared retry policy.
@@ -444,6 +477,8 @@ class InferenceRunner:
                 content_cache_dir=args.content_cache_dir,
                 force_recompute=args.force_recompute,
                 read_only_cache=args.read_only_cache,
+                model_revision=getattr(args, "model_revision", None),
+                cache_rank=getattr(args, "cache_rank", None),
             )
         except (OSError, ValueError) as e:
             raise RuntimeError(f"Failed to initialize inference client: {e}") from e
@@ -871,6 +906,11 @@ class InferenceRunner:
             logger.info(f"Success rate: {success_rate:.2f}%")
             logger.info(f"Total duration: {duration:.2f} seconds")
             logger.info(f"Output file: {self.args.output_file}")
+            if self.client.cache is not None:
+                logger.info(
+                    "Online inference cache statistics: %s",
+                    self.client.cache.stats().to_dict(),
+                )
             logger.info("✅ Inference pipeline completed successfully\n")
 
         except Exception as e:

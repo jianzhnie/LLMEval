@@ -38,7 +38,8 @@ class TestProcessingStats:
         from llmeval.tasks.math_eval.math_score import ProcessingStats
 
         stats = ProcessingStats(total=10, correct=5, timeout=2, error=1)
-        assert stats.correct_rate == pytest.approx(50.0)
+        assert stats.effective == 7
+        assert stats.correct_rate == pytest.approx(5 / 7 * 100)
         assert stats.timeout_rate == pytest.approx(20.0)
         assert stats.error_rate == pytest.approx(10.0)
 
@@ -207,6 +208,27 @@ class TestComputeScores:
             timeout=60,
         )
         assert acc == 0.0
+
+    def test_structured_result_counts_with_skipped_item(self, tmp_path: Path) -> None:
+        from llmeval.tasks.math_eval.math_score import compute_score_result
+
+        data = [
+            _math_item("5", ["$\\boxed{5}$"]),
+            {"prompt": "q", "answer": "3", "task": "math_opensource/aime24"},
+        ]
+        result = compute_score_result(
+            eval_dataset=data,
+            label_key="answer",
+            response_key="gen",
+            cache_path=str(tmp_path / "cache.jsonl"),
+            max_workers=2,
+            timeout=60,
+        )
+        assert result.sample_count == 2
+        assert result.effective_sample_count == 1
+        assert result.skipped_count == 1
+        assert result.observations["accuracy"] == [1.0]
+        assert result.metrics["accuracy"] == 1.0
 
 
 # ===========================================================================

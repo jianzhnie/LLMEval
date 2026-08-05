@@ -711,7 +711,11 @@ class TestMCScoreEdgeCases:
             {"answer": "B", "gen": ["Answer: B"]},
         ]
         acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
-        assert acc == 0.5  # only the second item is correct
+        assert acc == 1.0  # invalid-gold items are skipped from the denominator
+        summary = json.loads((tmp_path / "c.summary.json").read_text())
+        assert summary["sample_count"] == 2
+        assert summary["effective_sample_count"] == 1
+        assert summary["skipped_count"] == 1
 
     def test_loglikelihood_all_neg_inf_counted_wrong(self, tmp_path: Path) -> None:
         """All -inf logprobs (failed inference) must not be argmax-scored."""
@@ -722,7 +726,10 @@ class TestMCScoreEdgeCases:
             {"gold": 1, "logprobs": [-2.0, -1.0], "choices": ["a", "b"]},
         ]
         acc = score_loglikelihood(items, tmp_path / "c.jsonl")
-        assert acc == 0.5
+        assert acc == 1.0
+        summary = json.loads((tmp_path / "c.summary.json").read_text())
+        assert summary["effective_sample_count"] == 1
+        assert summary["failed_count"] == 1
 
     def test_acc_norm_uses_choices_when_present(self, tmp_path: Path) -> None:
         """Length normalization flips the argmax when choices differ in length."""
@@ -758,7 +765,7 @@ class TestMCScoreEdgeCases:
         assert extract_answer("选 c") == "C"
 
     def test_non_numeric_gold_treated_invalid(self, tmp_path: Path) -> None:
-        """A non-numeric gold must not crash scoring; item counts as wrong."""
+        """A non-numeric gold is skipped rather than entering the denominator."""
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
 
         items = [
@@ -766,7 +773,7 @@ class TestMCScoreEdgeCases:
             {"gold": 1, "logprobs": [-2.0, -1.0], "choices": ["a", "b"]},
         ]
         acc = score_loglikelihood(items, tmp_path / "c.jsonl")
-        assert acc == 0.5
+        assert acc == 1.0
 
     def test_generate_bare_string_gen_tolerated(self, tmp_path: Path) -> None:
         """A plain-string gen field (schema expects list) is scored as text."""

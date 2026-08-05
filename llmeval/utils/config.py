@@ -296,6 +296,10 @@ class VLLMEngineArguments:
     model_name_or_path: str = field(
         default="Qwen/Qwen2.5-7B", metadata={"help": "Path to the model directory."}
     )
+    model_revision: str | None = field(
+        default=None,
+        metadata={"help": "Optional model revision used for provenance and caching."},
+    )
     trust_remote_code: bool = field(
         default=True, metadata={"help": "Whether to trust remote code."}
     )
@@ -342,6 +346,22 @@ class VLLMEngineArguments:
         metadata={"help": "Enforce eager execution for debugging purposes."},
     )
     seed: int = field(default=0, metadata={"help": "Random seed for initialization."})
+    content_cache_dir: str = field(
+        default="",
+        metadata={"help": "Optional content-addressed inference cache directory."},
+    )
+    force_recompute: bool = field(
+        default=False, metadata={"help": "Ignore existing inference cache entries."}
+    )
+    read_only_cache: bool = field(
+        default=False, metadata={"help": "Do not write inference cache entries."}
+    )
+    cache_rank: str | None = field(
+        default=None,
+        metadata={
+            "help": "Optional rank-specific cache namespace; defaults to RANK when set."
+        },
+    )
     device: str = field(
         default="cuda",
         metadata={"help": 'Device to use for inference (e.g., "cuda", "auto").'},
@@ -504,6 +524,10 @@ class OnlineInferArguments(
     """
 
     seed: int = field(default=0, metadata={"help": "Generation seed sent to the API."})
+    model_revision: str | None = field(
+        default=None,
+        metadata={"help": "Optional served model revision used in cache provenance."},
+    )
     content_cache_dir: str = field(
         default="",
         metadata={"help": "Optional content-addressed inference cache directory."},
@@ -513,6 +537,10 @@ class OnlineInferArguments(
     )
     read_only_cache: bool = field(
         default=False, metadata={"help": "Do not write inference cache entries."}
+    )
+    cache_rank: str | None = field(
+        default=None,
+        metadata={"help": "Optional rank-specific cache namespace."},
     )
 
     def __post_init__(self) -> None:
@@ -663,6 +691,10 @@ class MCInferConfig:
         default="longcat-flash",
         metadata={"help": "Served model name used in requests."},
     )
+    model_revision: str | None = field(
+        default=None,
+        metadata={"help": "Optional served model revision used in cache provenance."},
+    )
     mode: str = field(
         default="loglikelihood",
         metadata={"help": "Inference mode: 'loglikelihood' or 'generate'."},
@@ -737,6 +769,10 @@ class MCInferConfig:
     read_only_cache: bool = field(
         default=False, metadata={"help": "Do not write inference cache entries."}
     )
+    cache_rank: str | None = field(
+        default=None,
+        metadata={"help": "Optional rank-specific cache namespace."},
+    )
 
     def __post_init__(self) -> None:
         """
@@ -802,7 +838,7 @@ class EvalTaskArguments:
     Attributes:
         input_path (str): Path to the input JSONL file containing evaluation data.
         task_name (str): Name of the evaluation task to run.
-            See valid_tasks list for all supported task names.
+            Validation is delegated to the task registry.
         input_key (str): Key for input text in dataset.
         label_key (str): Key for target/label text in dataset.
         response_key (str): Key for model generated text.
@@ -818,9 +854,7 @@ class EvalTaskArguments:
     )
     task_name: str = field(
         default="math_opensource/aime24",
-        metadata={
-            "help": "Evaluation task name (e.g. math_opensource/aime24). See code for full list."
-        },
+        metadata={"help": "Evaluation task name (e.g. math_opensource/aime24)."},
     )
     input_key: str = field(
         default="prompt", metadata={"help": "Key for input text in dataset."}
@@ -945,29 +979,4 @@ class EvalTaskArguments:
         if self.contamination_path and not Path(self.contamination_path).exists():
             raise ValueError(
                 f"contamination_path {self.contamination_path} does not exist"
-            )
-        valid_tasks = [
-            # Math (math-verify scoring)
-            "math_opensource/math500",
-            "math_opensource/math",
-            "math_opensource/gsm8k",
-            "math_opensource/aime24",
-            "math_opensource/aime25",
-            "math_opensource/aime26",
-            "math_opensource/hmmt25",
-            "math_opensource/gpqa_diamond",
-            "math_opensource/hle_full",
-            # Multiple-choice (simple accuracy)
-            "mc_opensource/mmlu",
-            "mc_opensource/mmlu_pro",
-            "mc_opensource/ceval",
-            # Code generation (pass@k evaluation)
-            "code_opensource/humaneval",
-            "code_opensource/mbpp",
-            "code_opensource/humaneval_plus",
-            "code_opensource/mbpp_plus",
-        ]
-        if self.task_name not in valid_tasks:
-            raise ValueError(
-                f"task_name must be one of {valid_tasks}, got {self.task_name}"
             )

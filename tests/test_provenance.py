@@ -10,6 +10,7 @@ from llmeval.tasks.provenance import (
     build_run_provenance,
     build_sample_provenance,
     get_git_hash,
+    hash_evaluation_inputs,
 )
 
 
@@ -23,6 +24,26 @@ def test_sample_provenance_hashes_prompt_target_and_excludes_response() -> None:
     assert provenance["prompt_hash"]
     assert provenance["target_hash"]
     assert provenance["doc_hash"] == changed_provenance["doc_hash"]
+
+
+def test_evaluation_input_hash_ignores_scorer_annotations() -> None:
+    item = {"doc_id": "math:1", "prompt": "2+2", "answer": "4", "gen": ["4"]}
+    original_hash = hash_evaluation_inputs([item])
+
+    item.update(
+        {
+            "raw_gen": "4",
+            "filtered_gen": "4",
+            "filter_trace": [{"filter": "strip", "output": "4"}],
+            "evaluation_status": "completed",
+            "sample_correct": [True],
+            "sample_count": 1,
+            "effective_sample_count": 1,
+            "inference_provenance": {"seed": 7},
+        }
+    )
+
+    assert hash_evaluation_inputs([item]) == original_hash
 
 
 def test_run_provenance_records_task_version_and_seed() -> None:

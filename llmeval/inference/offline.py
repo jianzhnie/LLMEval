@@ -26,15 +26,22 @@ from transformers import HfArgumentParser
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
+from llmeval.cache import ContentAddressedCache
 from llmeval.inference.common import (
     count_completed_samples,
     count_completed_samples_by_identity,
     expand_data_with_resume,
     load_jsonl,
 )
+from llmeval.tasks.provenance import (
+    get_git_hash,
+    hash_evaluation_inputs,
+    hash_json,
+)
 from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
+from llmeval.utils.reproducibility import seed_everything, seed_provenance
 
 # Initialize logger
 logger = init_logger("offline_vllm_infer", logging.INFO)
@@ -67,9 +74,23 @@ class OfflineInferenceRunner:
             ValueError: If arguments are invalid or missing required fields.
         """
         self.args: OfflineInferArguments = args
+        self.reproducibility = seed_provenance(seed_everything(args.seed))
         self._file_lock: threading.Lock = threading.Lock()
         self.llm: LLM | None = None
         self.sampling_params: SamplingParams | None = None
+        content_cache_dir = getattr(args, "content_cache_dir", "")
+        self.cache: ContentAddressedCache | None = (
+            ContentAddressedCache(
+                content_cache_dir,
+                "inference",
+                force_recompute=getattr(args, "force_recompute", False),
+                read_only=getattr(args, "read_only_cache", False),
+                rank=getattr(args, "cache_rank", None),
+            )
+            if content_cache_dir
+            else None
+        )
+        self._git_hash = get_git_hash()
         self.system_prompt: str | None = SYSTEM_PROMPT_FACTORY.get(
             args.system_prompt_type
         )
@@ -127,6 +148,9 @@ class OfflineInferenceRunner:
                 llm_kwargs["max_num_batched_tokens"] = self.args.max_num_batched_tokens
             if self.args.quantization is not None:
                 llm_kwargs["quantization"] = self.args.quantization
+            model_revision = getattr(self.args, "model_revision", None)
+            if model_revision is not None:
+                llm_kwargs["revision"] = model_revision
             llm: LLM = LLM(**llm_kwargs)
             logger.info("✅ vLLM engine loaded successfully")
 
@@ -142,6 +166,7 @@ class OfflineInferenceRunner:
             top_p=self.args.top_p,
             top_k=self.args.top_k,
             repetition_penalty=self.args.repetition_penalty,
+            seed=self.args.seed,
         )
 
         logger.info("✅ vLLM engine initialization completed")
@@ -249,15 +274,21 @@ class OfflineInferenceRunner:
         Raises:
             IOError: If file writing fails.
         """
+        responses = [self._extract_model_response(output) for output in outputs]
+        self._write_response_results(original_items, responses)
+
+    def _write_response_results(
+        self, original_items: Sequence[dict[str, Any]], responses: Sequence[str]
+    ) -> None:
+        """Persist non-empty responses, whether generated or read from cache."""
+        if len(original_items) != len(responses):
+            raise ValueError("original_items and responses must have equal length")
         with self._file_lock:
             try:
                 with open(self.args.output_file, "a", encoding="utf-8") as f:
-                    for idx, (original_item, output) in enumerate(
-                        zip(original_items, outputs, strict=True)
+                    for idx, (original_item, model_response) in enumerate(
+                        zip(original_items, responses, strict=True)
                     ):
-                        model_response: str = self._extract_model_response(output)
-
-                        # Only write if we got a valid response
                         if model_response and model_response.strip():
                             result: dict[str, Any] = original_item.copy()
                             gen_list: list[str] = list(
@@ -265,16 +296,58 @@ class OfflineInferenceRunner:
                             )
                             gen_list.append(model_response)
                             result[self.args.response_key] = gen_list
-
+                            provenance = getattr(self, "reproducibility", None)
+                            if provenance is not None:
+                                result["inference_provenance"] = provenance
                             f.write(json.dumps(result, ensure_ascii=False) + "\n")
                             f.flush()
                         else:
                             logger.warning(
-                                f"Empty response for item {idx}, skipping write"
+                                "Empty response for item %d, skipping write", idx
                             )
             except Exception as e:
                 logger.error(f"Error writing batch results: {e}")
                 raise OSError(f"Failed to write batch results: {e}") from e
+
+    def _cache_key(
+        self, item: dict[str, Any], messages: list[dict[str, str]]
+    ) -> str | None:
+        """Build a generation key from stable inputs and all output parameters."""
+        cache = getattr(self, "cache", None)
+        if cache is None:
+            return None
+        payload = {
+            "backend": "offline_chat",
+            "model_name": self.args.model_name_or_path,
+            "model_revision": getattr(self.args, "model_revision", None),
+            "task_name": item.get("task", getattr(self.args, "task", None)),
+            "task_version": item.get("task_version"),
+            "dataset_hash": hash_evaluation_inputs(
+                [item], getattr(self.args, "response_key", "gen")
+            ),
+            "prompt_hash": hash_json(messages),
+            "generation_params": {
+                "max_tokens": self.args.max_tokens,
+                "temperature": self.args.temperature,
+                "top_p": self.args.top_p,
+                "top_k": self.args.top_k,
+                "repetition_penalty": self.args.repetition_penalty,
+            },
+            "sampling_seed": self.args.seed,
+            "postprocess_version": "offline_chat_v1",
+            "git_commit": getattr(self, "_git_hash", None),
+            "doc_id": item.get("doc_id"),
+            "sample_index": item.get("_llmeval_sample_index"),
+        }
+        return cache.key(payload)
+
+    def _log_cache_stats(self) -> None:
+        """Log cache counters at the end of a run when caching is enabled."""
+        cache = getattr(self, "cache", None)
+        if cache is not None:
+            logger.info(
+                "Offline inference cache statistics: %s", cache.stats().to_dict()
+            )
 
     def _extract_model_response(self, output: RequestOutput) -> str:
         """Extract text response from vLLM output object.
@@ -398,12 +471,40 @@ class OfflineInferenceRunner:
             )
             return
 
+        cache = getattr(self, "cache", None)
+        responses: list[str] = [""] * len(valid_items)
+        missing_indices: list[int] = []
+        missing_messages: list[list[dict[str, str]]] = []
+        cache_keys: dict[int, str] = {}
+        for index, (item, messages) in enumerate(
+            zip(valid_items, valid_messages, strict=True)
+        ):
+            key = self._cache_key(item, messages)
+            if cache is not None and key is not None:
+                cache_keys[index] = key
+                cached = cache.get(key)
+                cached_response = cached.get("response") if cached else None
+                if isinstance(cached_response, str) and cached_response.strip():
+                    responses[index] = cached_response
+                    continue
+            missing_indices.append(index)
+            missing_messages.append(messages)
+
         try:
-            logger.debug(f"Processing batch of {len(valid_messages)} prompts")
-            outputs: list[RequestOutput] = self.llm.chat(
-                valid_messages, self.sampling_params, use_tqdm=False
-            )
-            self._write_batch_results(valid_items, outputs)
+            if missing_messages:
+                logger.debug("Processing %d uncached prompts", len(missing_messages))
+                outputs: list[RequestOutput] = self.llm.chat(
+                    missing_messages, self.sampling_params, use_tqdm=False
+                )
+                for index, output in zip(missing_indices, outputs, strict=False):
+                    response = self._extract_model_response(output)
+                    responses[index] = response
+                    key = cache_keys.get(index)
+                    if cache is not None and key is not None and response.strip():
+                        cache.set(key, {"response": response})
+            else:
+                logger.debug("All prompts in batch were served from cache")
+            self._write_response_results(valid_items, responses)
         except Exception as e:
             logger.error(f"❌ Error during vLLM processing for this batch: {e}")
             raise RuntimeError(f"Batch processing failed: {e}") from e
@@ -482,6 +583,7 @@ class OfflineInferenceRunner:
 
             # Process data in batches
             self._process_batches(eval_dataset)
+            self._log_cache_stats()
 
             logger.info(
                 f"✨ Final data processing completed. Results saved to {self.args.output_file}"

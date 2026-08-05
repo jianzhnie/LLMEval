@@ -48,10 +48,11 @@ from llmeval.inference.schema import (
     LoglikelihoodRequest,
     LoglikelihoodResult,
 )
+from llmeval.tasks.provenance import get_git_hash, hash_evaluation_inputs, hash_json
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
-from llmeval.utils.reproducibility import seed_everything
+from llmeval.utils.reproducibility import seed_everything, seed_provenance
 from llmeval.utils.retry import ClientError, call_with_retry
 
 logger = init_logger("mc_infer")
@@ -90,6 +91,10 @@ class FewShotFormatter:
         self.seed = seed
         self._few_shot_pool: list[dict[str, Any]] = []
         self._all_formatted: list[str] = []
+        self.source_file: str | None = None
+        self.source_hash: str | None = None
+        self._selected_ids: dict[tuple[str, str], tuple[str, ...]] = {}
+        self._warned_insufficient: set[tuple[str, str]] = set()
 
     def load(self, input_file: str) -> None:
         """Load all demonstrations from an explicit dev file.
@@ -104,8 +109,11 @@ class FewShotFormatter:
         source = self.few_shot_file or input_file
         try:
             items = load_jsonl(source)
-        except Exception:
-            logger.warning(f"Failed to load few-shot from {source}")
+            source_path = Path(source)
+            self.source_file = str(source_path.resolve())
+            self.source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        except Exception as exc:
+            logger.warning("Failed to load few-shot from %s: %s", source, exc)
             return
 
         if len(items) < self.n_shot:
@@ -121,6 +129,7 @@ class FewShotFormatter:
         if self.n_shot <= 0:
             return ""
 
+        identity = (document_id, test_prompt)
         candidates = [
             index
             for index, item in enumerate(self._few_shot_pool)
@@ -128,13 +137,43 @@ class FewShotFormatter:
             and (not document_id or str(item.get("doc_id", "")) != document_id)
         ]
         if len(candidates) < self.n_shot:
+            self._selected_ids[identity] = ()
+            if identity not in self._warned_insufficient:
+                logger.warning(
+                    "Few-shot candidates are insufficient for document %r: "
+                    "available=%d, required=%d; using zero-shot prompt",
+                    document_id or "<unknown>",
+                    len(candidates),
+                    self.n_shot,
+                )
+                self._warned_insufficient.add(identity)
             return ""
         seed_text = f"{self.seed}:{document_id}:{test_prompt}"
         derived_seed = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest(), 16)
         selected = random.Random(derived_seed).sample(candidates, self.n_shot)
         demos = [self._all_formatted[index] for index in selected]
+        self._selected_ids[identity] = tuple(
+            str(self._few_shot_pool[index].get("doc_id") or f"row:{index}")
+            for index in selected
+        )
 
         return "\n\n".join(demos) + "\n\n" if demos else ""
+
+    def provenance(
+        self, test_prompt: str, document_id: str, final_prompt: str
+    ) -> dict[str, Any]:
+        """Describe the demonstration source and deterministic selection."""
+        return {
+            "fewshot_file": self.source_file,
+            "fewshot_file_hash": self.source_hash,
+            "fewshot_seed": self.seed,
+            "fewshot_example_ids": list(
+                self._selected_ids.get((document_id, test_prompt), ())
+            ),
+            "final_prompt_hash": hashlib.sha256(
+                final_prompt.encode("utf-8")
+            ).hexdigest(),
+        }
 
     @staticmethod
     def _format_demo(item: dict[str, Any]) -> str:
@@ -169,6 +208,8 @@ class MCLoglikelihoodClient:
         content_cache_dir: str = "",
         force_recompute: bool = False,
         read_only_cache: bool = False,
+        model_revision: str | None = None,
+        cache_rank: str | None = None,
     ) -> None:
         """Initialize the client with API configuration.
 
@@ -184,12 +225,15 @@ class MCLoglikelihoodClient:
         self.timeout: int = timeout
         self.max_retries: int = max_retries
         self.seed = seed
+        self.model_revision = model_revision
+        self._git_hash = get_git_hash()
         self.cache = (
             ContentAddressedCache(
                 content_cache_dir,
                 "inference",
                 force_recompute=force_recompute,
                 read_only=read_only_cache,
+                rank=cache_rank,
             )
             if content_cache_dir
             else None
@@ -236,11 +280,23 @@ class MCLoglikelihoodClient:
 
         payload = {
             "kind": "mc_first_token_logprobs",
+            "backend": "online_completions",
             "base_url": getattr(self.client, "base_url", None),
-            "model": self.model_name,
-            "prompt": prompt,
-            "choices": choice_texts,
-            "seed": getattr(self, "seed", 0),
+            "model_name": self.model_name,
+            "model_revision": getattr(self, "model_revision", None),
+            "task_name": None,
+            "task_version": None,
+            "dataset_hash": hash_json({"prompt": prompt, "choices": choice_texts}),
+            "prompt_hash": hash_json(prompt),
+            "generation_params": {
+                "max_tokens": 1,
+                "temperature": 0,
+                "logprobs": 20,
+                "echo": False,
+            },
+            "sampling_seed": getattr(self, "seed", 0),
+            "postprocess_version": "mc_first_token_v1",
+            "git_commit": getattr(self, "_git_hash", None),
         }
         cache = getattr(self, "cache", None)
         key = cache.key(payload) if cache is not None else None
@@ -299,10 +355,23 @@ class MCLoglikelihoodClient:
         """Score complete continuations and return a validated typed result."""
         payload = {
             "kind": "mc_continuation_logprobs_v2",
+            "backend": "online_completions",
             "base_url": self.base_url,
-            "model": self.model_name,
-            "request": request.cache_identity(),
-            "seed": getattr(self, "seed", 0),
+            "model_name": self.model_name,
+            "model_revision": getattr(self, "model_revision", None),
+            "task_name": None,
+            "task_version": None,
+            "dataset_hash": hash_json(request.cache_identity()),
+            "prompt_hash": hash_json(request.context),
+            "generation_params": {
+                "max_tokens": 1,
+                "temperature": 0,
+                "logprobs": 20,
+                "echo": True,
+            },
+            "sampling_seed": getattr(self, "seed", 0),
+            "postprocess_version": "mc_continuation_v2",
+            "git_commit": getattr(self, "_git_hash", None),
         }
         cache = getattr(self, "cache", None)
         key = cache.key(payload) if cache is not None else None
@@ -486,7 +555,8 @@ class MCRunner:
             RuntimeError: If the loglikelihood client fails to initialize
         """
         self.config: MCInferConfig = config
-        seed_everything(config.seed)
+        self.reproducibility = seed_provenance(seed_everything(config.seed))
+        self._git_hash = get_git_hash()
 
         # Initialize client with error handling (loglikelihood mode only;
         # generate mode builds a plain OpenAI client per run)
@@ -504,6 +574,8 @@ class MCRunner:
                     content_cache_dir=config.content_cache_dir,
                     force_recompute=config.force_recompute,
                     read_only_cache=config.read_only_cache,
+                    model_revision=config.model_revision,
+                    cache_rank=config.cache_rank,
                 )
             except (OSError, ValueError) as e:
                 raise RuntimeError(f"Failed to initialize MC client: {e}") from e
@@ -513,6 +585,7 @@ class MCRunner:
                 "inference",
                 force_recompute=config.force_recompute,
                 read_only=config.read_only_cache,
+                rank=config.cache_rank,
             )
 
         # Set up system prompt with validation (generate mode)
@@ -688,6 +761,32 @@ class MCRunner:
             else ""
         )
         return fs_prefix + item.get(self.config.input_key, "")
+
+    def _inference_provenance(
+        self, item: dict[str, Any], final_prompt: str
+    ) -> dict[str, Any]:
+        """Return seed and few-shot provenance for one rendered prompt."""
+        # Some lightweight tests construct a runner with ``__new__`` and only
+        # exercise item processing. Treat absent optional provenance as empty.
+        provenance = dict(getattr(self, "reproducibility", {}))
+        raw_prompt = str(item.get(self.config.input_key, ""))
+        document_id = str(item.get("doc_id", ""))
+        if self._few_shot_fmt is not None:
+            provenance.update(
+                self._few_shot_fmt.provenance(raw_prompt, document_id, final_prompt)
+            )
+        else:
+            provenance.update(
+                {
+                    "fewshot_file": None,
+                    "fewshot_file_hash": None,
+                    "fewshot_example_ids": [],
+                    "final_prompt_hash": hashlib.sha256(
+                        final_prompt.encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+        return provenance
 
     # ------------------------------------------------------------------
     # Concurrent processing
@@ -890,6 +989,7 @@ class MCRunner:
             ],
             "pred": pred,
             "correct": is_correct,
+            "inference_provenance": self._inference_provenance(item, prompt),
         }
 
     @staticmethod
@@ -999,9 +1099,18 @@ class MCRunner:
         cache = getattr(self, "cache", None)
         cache_payload = {
             "kind": "mc_generate",
+            "backend": "online_chat",
             "base_url": self.config.base_url,
-            "model": self.config.model_name,
-            "request": call_args,
+            "model_name": self.config.model_name,
+            "model_revision": self.config.model_revision,
+            "task_name": item.get("task", getattr(self.config, "task", None)),
+            "task_version": item.get("task_version"),
+            "dataset_hash": hash_evaluation_inputs([item], self.config.response_key),
+            "prompt_hash": hash_json(messages),
+            "generation_params": call_args,
+            "sampling_seed": self.config.seed,
+            "postprocess_version": "mc_generate_v1",
+            "git_commit": getattr(self, "_git_hash", None),
         }
         cache_key = cache.key(cache_payload) if cache is not None else None
         if cache is not None and cache_key is not None:
@@ -1095,6 +1204,7 @@ class MCRunner:
             self.config.response_key: generations,
             **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
             "_llmeval_sample_indices": sample_indices,
+            "inference_provenance": self._inference_provenance(item, prompt),
         }
 
     # ------------------------------------------------------------------
@@ -1111,6 +1221,11 @@ class MCRunner:
         # Quick accuracy summary for loglikelihood mode
         if self.config.mode == "loglikelihood":
             self.print_loglikelihood_summary()
+        cache = getattr(self, "cache", None)
+        if cache is None and self.client is not None:
+            cache = getattr(self.client, "cache", None)
+        if cache is not None:
+            logger.info("MC inference cache statistics: %s", cache.stats().to_dict())
 
     def print_loglikelihood_summary(self) -> None:
         """Print quick accuracy from in-memory stats."""

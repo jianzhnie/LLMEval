@@ -185,11 +185,11 @@ class TestEvalTaskArguments:
         args = EvalTaskArguments(input_path=str(input_f))
         assert args.content_cache_dir == ""
 
-    def test_invalid_task_raises(self, tmp_path: Path) -> None:
+    def test_task_validation_is_delegated_to_registry(self, tmp_path: Path) -> None:
         input_f = tmp_path / "data.jsonl"
         input_f.write_text("{}\n")
-        with pytest.raises(ValueError, match="task_name"):
-            EvalTaskArguments(input_path=str(input_f), task_name="invalid/task")
+        args = EvalTaskArguments(input_path=str(input_f), task_name="custom/task")
+        assert args.task_name == "custom/task"
 
     def test_missing_input_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="does not exist"):

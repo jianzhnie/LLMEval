@@ -53,11 +53,24 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
 from llmeval.evaluator import (
     evaluate_task,
 )
+from llmeval.tasks.results import ScorerResult
+
+
+def _scorer_result(name: str, value: float) -> ScorerResult:
+    return ScorerResult(
+        metrics={name: value},
+        observations={name: [value]},
+        sample_count=1,
+        effective_sample_count=1,
+    )
 
 
 class TestEvaluateTask:
-    def test_empty_dataset_returns_none(self) -> None:
-        assert evaluate_task([], "task", "a", "g", "/tmp/cache", 4) is None
+    def test_empty_dataset_returns_zero_and_validates_task(self, tmp_path: Path) -> None:
+        assert evaluate_task(
+            [], "mc_opensource/task", "a", "g", tmp_path / "empty.jsonl", 4
+        ) == 0.0
+        assert (tmp_path / "empty.summary.json").exists()
 
     def test_unsupported_task_returns_none(self, tmp_path: Path) -> None:
         data = [{"prompt": "q", "answer": "a", "gen": ["r"], "task": "t"}]
@@ -109,7 +122,7 @@ class TestEvaluateTask:
         def _boom(**_: object) -> float:
             raise RuntimeError("scorer exploded")
 
-        monkeypatch.setattr(ev, "score_generate", _boom)
+        monkeypatch.setattr(ev, "score_generate_result", _boom)
         data = [{"answer": "B", "gen": ["Answer: B"], "task": "mc_opensource/mmlu"}]
         acc = evaluate_task(
             data, "mc_opensource/mmlu", "answer", "gen", tmp_path / "mc.jsonl", 1
@@ -145,7 +158,7 @@ class TestEvaluateTask:
         def _boom(**_: object) -> float:
             raise RuntimeError("scorer exploded")
 
-        monkeypatch.setattr(ev, "score_code", _boom)
+        monkeypatch.setattr(ev, "score_code_result", _boom)
         data = [
             {
                 "prompt": "def f():\n",
@@ -164,12 +177,12 @@ class TestEvaluateTask:
 
         called: dict[str, object] = {}
 
-        def _fake_compute_scores(**kwargs: object) -> float:
+        def _fake_compute_scores(**kwargs: object) -> ScorerResult:
             called.update(kwargs)
-            return 1.0
+            return _scorer_result("accuracy", 1.0)
 
         monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(ev, "compute_scores", _fake_compute_scores)
+        monkeypatch.setattr(ev, "compute_score_result", _fake_compute_scores)
         try:
             data = [
                 {
@@ -202,7 +215,7 @@ class TestEvaluateTask:
         def _boom(**_: object) -> float:
             raise RuntimeError("scorer exploded")
 
-        monkeypatch.setattr(ev, "compute_scores", _boom)
+        monkeypatch.setattr(ev, "compute_score_result", _boom)
         data = [{"answer": "5", "gen": ["5"], "task": "math_opensource/aime24"}]
         acc = evaluate_task(
             data, "math_opensource/aime24", "answer", "gen", tmp_path / "m.jsonl", 1

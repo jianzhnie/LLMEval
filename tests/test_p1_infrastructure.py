@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import random
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ import pytest
 from llmeval.cache import ContentAddressedCache
 from llmeval.inference.mc import FewShotFormatter
 from llmeval.tasks.registry import (
+    CodeTask,
     EvaluationContext,
     MathTask,
     MCTask,
@@ -18,10 +21,88 @@ from llmeval.tasks.registry import (
     evaluate_registered_task,
 )
 from llmeval.tasks.results import (
+    ScorerResult,
     aggregate_metric_values,
     metric_from_samples,
 )
 from llmeval.utils.reproducibility import seed_everything, seed_provenance
+
+
+def test_cache_tracks_hits_misses_corruption_and_lifecycle(tmp_path: Path) -> None:
+    cache = ContentAddressedCache(tmp_path, "evaluation")
+    key = cache.key({"request": 1})
+
+    assert cache.get(key) is None
+    cache.set(key, {"value": 1})
+    assert cache.get(key) == {"value": 1}
+    (tmp_path / "evaluation" / f"{key}.json").write_text("broken", encoding="utf-8")
+    assert cache.get(key) is None
+    stats = cache.stats()
+    assert stats.to_dict() == {"hits": 1, "misses": 2, "corrupt": 1, "writes": 1}
+
+    cache.set(key, {"value": 2})
+    assert cache.clear() == 1
+    assert cache.get(key) is None
+
+
+def test_cache_rank_isolation(tmp_path: Path) -> None:
+    key_payload = {"model_name": "m", "seed": 7}
+    rank_zero = ContentAddressedCache(tmp_path, "inference", rank=0)
+    rank_one = ContentAddressedCache(tmp_path, "inference", rank=1)
+    key = rank_zero.key(key_payload)
+
+    rank_zero.set(key, {"rank": 0})
+    rank_one.set(key, {"rank": 1})
+    assert rank_zero.get(key) == {"rank": 0}
+    assert rank_one.get(key) == {"rank": 1}
+    assert (tmp_path / "inference" / "rank-0" / f"{key}.json").exists()
+    assert (tmp_path / "inference" / "rank-1" / f"{key}.json").exists()
+
+
+def test_cache_atomic_writes_are_valid_across_processes(tmp_path: Path) -> None:
+    cache = ContentAddressedCache(tmp_path, "inference")
+    key = cache.key({"request": "concurrent"})
+    script = (
+        "from llmeval.cache import ContentAddressedCache; "
+        "import sys; "
+        "cache=ContentAddressedCache(sys.argv[1], 'inference'); "
+        "cache.set(sys.argv[3], {'value': sys.argv[2]})"
+    )
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(tmp_path), str(index), key],
+            cwd=Path(__file__).parents[1],
+        )
+        for index in range(8)
+    ]
+    assert all(process.wait(timeout=30) == 0 for process in processes)
+    assert cache.get(key) in ({"value": str(index)} for index in range(8))
+
+
+def test_cache_cleanup_cli_clears_namespace(tmp_path: Path) -> None:
+    cache = ContentAddressedCache(tmp_path, "evaluation")
+    key = cache.key({"request": "cleanup"})
+    cache.set(key, {"value": 1})
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "llmeval.cache",
+            "clear",
+            "--root",
+            str(tmp_path),
+            "--namespace",
+            "evaluation",
+        ],
+        cwd=Path(__file__).parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout)["removed"] == 1
+    assert not (tmp_path / "evaluation" / f"{key}.json").exists()
 
 
 def test_content_cache_round_trip_corruption_and_key_isolation(tmp_path: Path) -> None:
@@ -112,7 +193,14 @@ def test_few_shot_sampling_is_per_document_and_seeded(tmp_path: Path) -> None:
 
 
 def test_registry_reports_registered_families() -> None:
-    task = MathTask(lambda **_: 1.0)
+    task = MathTask(
+        lambda **_: ScorerResult(
+            metrics={"accuracy": 1.0},
+            observations={"accuracy": [1.0]},
+            sample_count=1,
+            effective_sample_count=1,
+        )
+    )
     registry = TaskRegistry({"math_opensource": task})
     assert registry.names == ("math_opensource",)
     with pytest.raises(ValueError, match="registered tasks"):
@@ -122,7 +210,7 @@ def test_registry_reports_registered_families() -> None:
 def test_evaluation_cache_avoids_recomputing_registered_task(tmp_path: Path) -> None:
     calls = 0
 
-    def scorer(**kwargs: object) -> float:
+    def scorer(**kwargs: object) -> ScorerResult:
         nonlocal calls
         calls += 1
         eval_dataset = kwargs["eval_dataset"]
@@ -130,7 +218,13 @@ def test_evaluation_cache_avoids_recomputing_registered_task(tmp_path: Path) -> 
         for item in eval_dataset:
             assert isinstance(item, dict)
             item.update({"accuracy": 1.0, "raw_gen": "4"})
-        return 1.0
+        return ScorerResult(
+            metrics={"accuracy": 1.0},
+            observations={"accuracy": [1.0]},
+            per_item=eval_dataset,
+            sample_count=1,
+            effective_sample_count=1,
+        )
 
     task = MathTask(scorer)
     registry = TaskRegistry({"math_opensource": task})
@@ -161,24 +255,25 @@ def test_evaluation_cache_avoids_recomputing_registered_task(tmp_path: Path) -> 
 def test_mc_registry_uses_one_observation_for_item_aggregation(
     tmp_path: Path, aggregation: str
 ) -> None:
-    def scorer(**kwargs: object) -> float:
-        cache_path = Path(str(kwargs["cache_path"]))
-        cache_path.write_text(
-            json.dumps(
-                {
-                    "correct": True,
-                    "correct_norm": True,
-                    "correct_bytes": True,
-                    "aggregation": aggregation,
-                    "sample_correct": [True, False],
-                }
-            )
-            + "\n"
+    def scorer(**kwargs: object) -> ScorerResult:
+        del kwargs
+        return ScorerResult(
+            metrics={
+                "acc": 1.0,
+                "acc_norm": 1.0,
+                "acc_bytes": 1.0,
+                "exact_match": 1.0,
+            },
+            observations={
+                "acc": [1.0],
+                "acc_norm": [1.0],
+                "acc_bytes": [1.0],
+                "exact_match": [1.0],
+            },
+            per_item=[{"correct": True, "aggregation": aggregation}],
+            sample_count=1,
+            effective_sample_count=1,
         )
-        cache_path.with_suffix(".summary.json").write_text(
-            json.dumps({"acc": 1.0, "acc_norm": 1.0, "acc_bytes": 1.0})
-        )
-        return 1.0
 
     context = EvaluationContext(
         eval_dataset=[{"answer": "A", "gen": ["A", "B"]}],
@@ -198,3 +293,34 @@ def test_mc_registry_uses_one_observation_for_item_aggregation(
 
     assert result.metrics["acc"].value == 1.0
     assert result.metrics["acc"].count == 1
+
+
+def test_code_registry_preserves_scorer_failure_classification(tmp_path: Path) -> None:
+    def scorer(**_: object) -> ScorerResult:
+        return ScorerResult(
+            metrics={"pass@1": 0.0},
+            observations={"pass@1": [0.0]},
+            per_item=[{"passed": False, "result": "failed: AssertionError"}],
+            sample_count=1,
+            effective_sample_count=1,
+            failed_count=0,
+        )
+
+    context = EvaluationContext(
+        eval_dataset=[{"answer": "tests", "gen": ["wrong"]}],
+        task_name="code_opensource/test",
+        label_key="answer",
+        response_key="gen",
+        cache_path=tmp_path / "code.jsonl",
+        max_workers=1,
+        timeout=1,
+        exec_timeout=1.0,
+        seed=1,
+        allow_unsafe_code=True,
+    )
+
+    result = CodeTask(scorer).score(context)
+
+    assert result.metrics["pass@1"].value == 0.0
+    assert result.failed_count == 0
+    assert result.effective_sample_count == 1

@@ -28,6 +28,7 @@ from llmeval.tasks.postprocess import (
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
+from llmeval.tasks.results import ScorerResult
 from llmeval.utils.log import init_logger
 
 logger = init_logger("code_score")
@@ -37,6 +38,7 @@ __all__ = [
     "estimate_pass_at_k",
     "extract_code",
     "score_code",
+    "score_code_result",
     "write_cache",
 ]
 
@@ -237,6 +239,7 @@ def _failure_code_record(
         "sample_index": item.get("_llmeval_sample_index", 0),
         "passed": False,
         "result": "scoring error",
+        "evaluation_status": "failed",
         "stderr": "",
         **build_sample_provenance(item, label_key=label_key, response_key=response_key),
     }
@@ -410,6 +413,7 @@ def _process_code_item(
     exec_result.setdefault("task_id", task_id)
     exec_result.setdefault("group_id", group_id)
     exec_result.setdefault("sample_index", sample_index)
+    exec_result["evaluation_status"] = _code_record_status(exec_result)
     exec_result.update(filter_artifacts)
     exec_result.update(provenance)
     return idx, exec_result
@@ -428,6 +432,9 @@ def _failure(
         "sample_index": sample_index,
         "passed": False,
         "result": reason,
+        # These failures are caused by the generated answer, not the scoring
+        # infrastructure. They remain valid incorrect observations.
+        "evaluation_status": "completed",
         "stderr": "",
     }
 
@@ -567,6 +574,8 @@ def _compute_pass_at_k(
     """Aggregate sample records into problem-level pass@k metrics."""
     grouped: dict[str, list[dict[str, Any]]] = {}
     for record in records:
+        if record.get("evaluation_status", "completed") != "completed":
+            continue
         group_id = str(record.get("group_id") or record.get("task_id") or "")
         grouped.setdefault(group_id, []).append(record)
 
@@ -590,7 +599,7 @@ def _compute_pass_at_k(
 # ===========================================================================
 
 
-def score_code(
+def _score_code_task_result(
     eval_dataset: list[dict[str, Any]],
     label_key: str,
     response_key: str,
@@ -602,8 +611,8 @@ def score_code(
     task_name: str | None = None,
     seed: int | None = None,
     allow_unsafe_code: bool = False,
-) -> float:
-    """Score a code-generation dataset and return Pass@1 accuracy.
+) -> CodeScoreResult:
+    """Score a code-generation dataset and return task-native details.
 
     Parameters
     ----------
@@ -630,14 +639,10 @@ def score_code(
         Explicitly allow execution of generated code.  The CLI defaults to
         ``False`` and should only enable this in a trusted or isolated runtime.
 
-    Returns
-    -------
-    float
-        Pass@1 score in [0.0, 1.0].
     """
     if not eval_dataset:
         logger.warning("Empty dataset — returning 0.0")
-        return 0.0
+        return CodeScoreResult()
     if not allow_unsafe_code:
         raise PermissionError(
             "Code evaluation executes generated code. Pass "
@@ -673,7 +678,7 @@ def score_code(
 
     correct = sum(1 for r in records if r.get("passed"))
     pass_at_k, problems = _compute_pass_at_k(records, k_values)
-    pass_at_1 = pass_at_k.get("pass@1", correct / max(total, 1))
+    pass_at_1 = pass_at_k.get("pass@1", 0.0)
 
     # Log failures for diagnostics (up to 10).
     failures = [r for r in records if not r.get("passed")]
@@ -708,7 +713,139 @@ def score_code(
         total,
         problems,
     )
-    return pass_at_1
+    return result
+
+
+def _code_observations(result: CodeScoreResult) -> dict[str, list[float]]:
+    """Return problem-level observations for every available pass@k metric."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in result.per_item:
+        if record.get("evaluation_status", "completed") != "completed":
+            continue
+        group_id = str(record.get("group_id") or record.get("task_id") or "")
+        grouped.setdefault(group_id, []).append(record)
+
+    observations: dict[str, list[float]] = {}
+    for name in result.pass_at_k:
+        try:
+            k = int(name.removeprefix("pass@"))
+        except ValueError:
+            continue
+        observations[name] = [
+            estimate_pass_at_k(
+                len(records), sum(1 for record in records if record.get("passed")), k
+            )
+            for records in grouped.values()
+            if len(records) >= k
+        ]
+    return observations
+
+
+def _is_code_infrastructure_failure(record: dict[str, Any]) -> bool:
+    """Distinguish scorer/worker failures from ordinary incorrect programs."""
+    result = str(record.get("result", "")).lower()
+    return result in {
+        "scoring error",
+        "failed: could not start worker process",
+        "failed: segmentationfault",
+        "failed: worker did not produce a result",
+    }
+
+
+def _code_record_status(record: dict[str, Any]) -> str:
+    """Classify execution outcomes for denominator accounting.
+
+    Assertion failures, syntax errors, and other candidate-code failures are
+    completed model observations. Only worker/scorer failures and timeouts are
+    excluded from Pass@k metrics.
+    """
+    explicit_status = record.get("evaluation_status")
+    if explicit_status in {"completed", "failed", "skipped", "timeout"}:
+        return str(explicit_status)
+    result = str(record.get("result", "")).lower()
+    if result == "timed out":
+        return "timeout"
+    if _is_code_infrastructure_failure(record):
+        return "failed"
+    return "completed"
+
+
+def score_code_result(
+    eval_dataset: list[dict[str, Any]],
+    label_key: str,
+    response_key: str,
+    cache_path: str | Path,
+    max_workers: int = 8,
+    timeout: int = 20,
+    exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
+    k_values: tuple[int, ...] = (1, 10, 64),
+    task_name: str | None = None,
+    seed: int | None = None,
+    allow_unsafe_code: bool = False,
+) -> ScorerResult:
+    """Score code and return the registry's structured scorer contract."""
+    result = _score_code_task_result(
+        eval_dataset,
+        label_key,
+        response_key,
+        cache_path,
+        max_workers=max_workers,
+        timeout=timeout,
+        exec_timeout=exec_timeout,
+        k_values=k_values,
+        task_name=task_name,
+        seed=seed,
+        allow_unsafe_code=allow_unsafe_code,
+    )
+    metrics = dict(result.pass_at_k)
+    metrics.setdefault("pass@1", result.pass_at_1)
+    observations = _code_observations(result)
+    observations.setdefault("pass@1", [])
+    timeout_count = sum(
+        _code_record_status(record) == "timeout" for record in result.per_item
+    )
+    failed_count = sum(
+        _code_record_status(record) == "failed" for record in result.per_item
+    )
+    return ScorerResult(
+        metrics=metrics,
+        observations=observations,
+        per_item=result.per_item,
+        sample_count=result.total,
+        effective_sample_count=max(result.total - failed_count - timeout_count, 0),
+        failed_count=failed_count,
+        timeout_count=timeout_count,
+        provenance=result.provenance,
+    )
+
+
+def score_code(
+    eval_dataset: list[dict[str, Any]],
+    label_key: str,
+    response_key: str,
+    cache_path: str | Path,
+    max_workers: int = 8,
+    timeout: int = 20,
+    exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
+    k_values: tuple[int, ...] = (1, 10, 64),
+    task_name: str | None = None,
+    seed: int | None = None,
+    allow_unsafe_code: bool = False,
+) -> float:
+    """Compatibility wrapper returning only the primary Pass@1 metric."""
+    return score_code_result(
+        eval_dataset,
+        label_key,
+        response_key,
+        cache_path,
+        max_workers=max_workers,
+        timeout=timeout,
+        exec_timeout=exec_timeout,
+        k_values=k_values,
+        task_name=task_name,
+        seed=seed,
+        allow_unsafe_code=allow_unsafe_code,
+    ).metrics["pass@1"]
 
 
 # ===========================================================================
