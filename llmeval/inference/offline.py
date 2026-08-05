@@ -28,10 +28,9 @@ from vllm.outputs import RequestOutput
 
 from llmeval.cache import ContentAddressedCache, build_cache, log_cache_stats
 from llmeval.inference.common import (
-    completed_sample_indices_by_identity,
-    count_completed_samples,
-    expand_data_with_resume_indices,
+    expand_data_with_resume,
     load_jsonl,
+    load_resume_state,
     sample_seed_for_item,
 )
 from llmeval.utils.config import OfflineInferArguments
@@ -392,29 +391,23 @@ class OfflineInferenceRunner:
         # Check for completed samples. Track the explicit completed index set
         # (not just a count) so a partially-failed sample in the middle of a
         # run is regenerated instead of duplicating the highest contiguous count.
-        completed_indices = completed_sample_indices_by_identity(
+        resume_state = load_resume_state(
             self.args.output_file,
             self.args.input_key,
             self.args.response_key,
         )
-        legacy_counts = count_completed_samples(
-            self.args.output_file,
-            self.args.input_key,
-            self.args.response_key,
-            legacy_only=True,
-        )
-        total_completed: int = sum(
-            len(indices) for indices in completed_indices.values()
-        ) + sum(legacy_counts.values())
 
-        if total_completed > 0:
-            logger.info(f"Found {total_completed} completed samples from previous run")
+        if resume_state.completed_count > 0:
+            logger.info(
+                "Found %d completed samples from previous run",
+                resume_state.completed_count,
+            )
 
         # Expand data according to n_samples and resume functionality
-        expanded_data: list[dict[str, Any]] = expand_data_with_resume_indices(
+        expanded_data: list[dict[str, Any]] = expand_data_with_resume(
             raw_data,
-            completed_indices,
-            legacy_counts,
+            resume_state.completed_indices,
+            resume_state.legacy_counts,
             self.args.input_key,
             self.args.n_samples,
         )

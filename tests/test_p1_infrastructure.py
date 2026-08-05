@@ -18,6 +18,7 @@ from llmeval.tasks.registry import (
     MCTask,
     TaskRegistry,
     evaluate_registered_task,
+    write_per_item_results,
     write_structured_summary,
 )
 from llmeval.tasks.results import (
@@ -45,6 +46,47 @@ def test_evaluation_result_default_serialization_is_compact(tmp_path: Path) -> N
     write_structured_summary(result, tmp_path / "score.jsonl")
     summary = json.loads((tmp_path / "score.summary.json").read_text())
     assert summary["per_item"] == result.per_item
+    assert summary["acc"] == 1.0
+
+
+def test_per_item_output_supports_compact_and_debug_schemas(tmp_path: Path) -> None:
+    record = {
+        "doc_id": "mmlu:0",
+        "prompt": "large prompt",
+        "gold": 1,
+        "pred": 1,
+        "correct": True,
+        "score": 1.0,
+        "scoring_mode": "first_token",
+        "raw_gen": "large response",
+        "logprobs": [-2.0, -0.1],
+        "filter_trace": {"pipeline": "mc"},
+        "unused": None,
+    }
+    result = EvaluationResult(
+        task_name="mc_opensource/mmlu",
+        task_version="mc_v1",
+        metrics={"acc": MetricValue(1.0, 1)},
+        sample_count=1,
+        effective_sample_count=1,
+        per_item=[record],
+    )
+
+    compact_path = tmp_path / "compact.jsonl"
+    write_per_item_results(result, compact_path)
+    compact = json.loads(compact_path.read_text())
+    assert compact == {
+        "doc_id": "mmlu:0",
+        "gold": 1,
+        "pred": 1,
+        "correct": True,
+        "score": 1.0,
+        "scoring_mode": "first_token",
+    }
+
+    debug_path = tmp_path / "debug.jsonl"
+    write_per_item_results(result, debug_path, output_schema="debug")
+    assert json.loads(debug_path.read_text()) == record
 
 
 def test_cache_tracks_hits_misses_corruption_and_lifecycle(tmp_path: Path) -> None:

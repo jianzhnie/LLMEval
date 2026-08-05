@@ -457,6 +457,11 @@ def _error_record(
         gold = str(item.get(label_key, "")).strip().upper()
         pred = ""
     return {
+        **{
+            key: item[key]
+            for key in ("doc_id", "sample_index")
+            if key in item and item[key] is not None
+        },
         "gold": gold,
         "pred": pred,
         "correct": False,
@@ -464,6 +469,7 @@ def _error_record(
         "correct_bytes": False,
         "evaluation_status": status,
         "aggregation": aggregation,
+        "scoring_mode": item.get("scoring_mode", aggregation),
     }
 
 
@@ -487,11 +493,26 @@ def process_item(
     idx, item, mode, label_key, response_key, aggregation = args
     try:
         if mode == "loglikelihood":
-            return idx, score_loglikelihood_item(item)
-        return idx, score_generate_item(item, label_key, response_key, aggregation)
+            record = score_loglikelihood_item(item)
+        else:
+            record = score_generate_item(item, label_key, response_key, aggregation)
+        return idx, _attach_item_metadata(record, item, aggregation)
     except Exception:
         logger.exception("Scoring worker failed for item %d", idx)
         return idx, _error_record(item, mode, label_key, aggregation, "failed")
+
+
+def _attach_item_metadata(
+    record: dict[str, Any], item: dict[str, Any], aggregation: str
+) -> dict[str, Any]:
+    """Carry stable identity and scoring mode into the persisted score row."""
+    metadata = {
+        key: item[key]
+        for key in ("doc_id", "sample_index")
+        if key in item and item[key] is not None
+    }
+    metadata["scoring_mode"] = item.get("scoring_mode", aggregation)
+    return {**metadata, **record}
 
 
 def build_result(records: list[dict[str, Any]]) -> MCScoreResult:

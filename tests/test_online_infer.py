@@ -230,6 +230,16 @@ def test_empty_task_is_omitted_from_online_config_log(tmp_path: Path) -> None:
     assert _config_for_logging(args)["task"] == "code_opensource/humaneval"
 
 
+def test_online_config_log_redacts_api_key(tmp_path: Path) -> None:
+    input_file = tmp_path / "input.jsonl"
+    input_file.write_text('{"prompt": "q"}\n', encoding="utf-8")
+    args = OnlineInferArguments(
+        input_file=str(input_file), api_key="super-secret-api-key"
+    )
+
+    assert _config_for_logging(args)["api_key"] == "***"
+
+
 def test_empty_system_prompt_type_is_not_warned(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -343,6 +353,22 @@ class TestInferenceClientInit:
         InferenceClient("http://example.com/v1", 5, api_key="cli-key")
 
         assert fake_openai.call_args.kwargs["api_key"] == "cli-key"
+
+    def test_organization_is_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from llmeval.inference import online as online_mod
+        from llmeval.inference.online import InferenceClient
+
+        fake_openai = MagicMock()
+        monkeypatch.setattr(online_mod.openai, "OpenAI", fake_openai)
+
+        InferenceClient(
+            "http://example.com/v1",
+            5,
+            api_key="key",
+            organization="org-test",
+        )
+
+        assert fake_openai.call_args.kwargs["organization"] == "org-test"
 
 
 class TestGetContents:

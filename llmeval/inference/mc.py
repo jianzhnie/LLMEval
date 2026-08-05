@@ -35,11 +35,11 @@ from transformers import HfArgumentParser
 
 from llmeval.cache import ContentAddressedCache, build_cache, log_cache_stats
 from llmeval.inference.common import (
-    completed_sample_indices_by_identity,
-    count_completed_samples_by_identity,
     is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
+    load_resume_state,
+    redact_config_for_logging,
     require_document_id,
     save_failed_items,
     validate_document_ids,
@@ -587,7 +587,6 @@ class MCRunner:
             "failed": 0,
             "correct": 0,
             "skipped": 0,
-            "continuation_fallback": 0,
         }
         self._stats_lock: threading.Lock = threading.Lock()
 
@@ -595,65 +594,14 @@ class MCRunner:
     # Resume
     # ------------------------------------------------------------------
 
-    def get_completed_identity_counts(self) -> dict[tuple[str, str], int]:
-        """Return completed counts keyed by prepared ID and rendered prompt."""
-        return count_completed_samples_by_identity(
-            self.config.output_file,
-            self.config.input_key,
-            self.config.response_key,
+    @property
+    def effective_loglikelihood_mode(self) -> str:
+        """Resolve compatibility ``auto`` to the fast first-token path."""
+        return (
+            "continuation"
+            if self.config.loglikelihood_mode == "continuation"
+            else "first_token"
         )
-
-    def get_completed_identity_indices(self) -> dict[tuple[str, str], set[int]]:
-        """Return deduplicated completed sample positions for resume."""
-        return completed_sample_indices_by_identity(
-            self.config.output_file,
-            self.config.input_key,
-            self.config.response_key,
-        )
-
-    def get_completed_document_ids(self) -> set[str]:
-        """Return stable document IDs already written to the output file."""
-        return {document_id for document_id, _ in self.get_completed_identity_counts()}
-
-    def get_completed_prompts(self) -> set[str]:
-        """Get completed legacy prompts from existing output (for resume).
-
-        Scans the output file and collects every written (few-shot prefixed)
-        prompt, enabling resume for interrupted runs. Malformed lines are
-        skipped with a warning instead of aborting the run.
-
-        Returns:
-            Set of prompt strings already present in the output file.
-        """
-        output_path = Path(self.config.output_file)
-        if not output_path.exists() or output_path.stat().st_size == 0:
-            return set()
-        completed = set()
-        try:
-            with open(output_path, encoding="utf-8") as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        item = json.loads(line)
-                        if not isinstance(item, dict):
-                            logger.warning(
-                                "Skipping non-object JSON on output line %d: %s",
-                                line_num,
-                                type(item).__name__,
-                            )
-                            continue
-                        if item.get("doc_id"):
-                            continue
-                        prompt = item.get(self.config.input_key, "")
-                        if prompt:
-                            completed.add(prompt)
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON on line {line_num}: {e}")
-        except Exception as e:
-            logger.error(f"Error reading output file for resume check: {e}")
-        return completed
 
     # ------------------------------------------------------------------
     # Data loading
@@ -676,9 +624,14 @@ class MCRunner:
         validate_document_ids(raw_data)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
-        completed_indices = self.get_completed_identity_indices()
+        resume_state = load_resume_state(
+            self.config.output_file,
+            self.config.input_key,
+            self.config.response_key,
+        )
+        completed_indices = resume_state.completed_indices
         completed_ids = {document_id for document_id, _ in completed_indices}
-        completed_prompts = self.get_completed_prompts()
+        completed_prompts = set(resume_state.legacy_counts)
 
         remaining: list[dict[str, Any]] = []
         for index, raw_item in enumerate(raw_data):
@@ -826,6 +779,10 @@ class MCRunner:
             remaining: Items left after resume filtering (see load_data)
         """
         logger.info(
+            "effective_loglikelihood_mode=%s",
+            self.effective_loglikelihood_mode,
+        )
+        logger.info(
             f"⏳ Processing {len(remaining)} items "
             f"({len(remaining)} batched loglikelihood requests)"
         )
@@ -859,11 +816,11 @@ class MCRunner:
         if self.client is None:
             raise RuntimeError("Loglikelihood client is not initialized")
         choice_tokens = self._choice_tokens(item, len(choices))
-        scoring_mode = self.config.loglikelihood_mode
+        scoring_mode = self.effective_loglikelihood_mode
         choice_logprobs: list[list[float]] = []
         choice_scored_tokens: list[list[str]] = []
         choice_token_ids: list[list[int] | None] | None = None
-        if scoring_mode in ("auto", "continuation"):
+        if scoring_mode == "continuation":
             candidate_scores: list[list[float]]
             try:
                 candidate_scores = self.client.get_choices_continuation_logprobs(
@@ -890,12 +847,8 @@ class MCRunner:
                 ):
                     choice_token_ids = candidate_token_ids
                 scoring_mode = "continuation"
-            elif scoring_mode == "continuation":
-                raise RuntimeError("Continuation logprob request failed")
             else:
-                with self._stats_lock:
-                    self._stats["continuation_fallback"] += 1
-                scoring_mode = "first_token"
+                raise RuntimeError("Continuation logprob request failed")
 
         if scoring_mode == "first_token":
             logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)
@@ -1177,16 +1130,10 @@ class MCRunner:
         processed = self._stats["processed"]
         correct = self._stats.get("correct", 0)
         failed = self._stats["failed"]
-        fallback_count = self._stats.get("continuation_fallback", 0)
         if processed:
             logger.info(
                 f"Accuracy (loglikelihood): {correct}/{processed} = {correct / processed:.2%} "
                 f"(failed={failed})"
-            )
-        if fallback_count:
-            logger.info(
-                "Continuation scoring fallback: %d item(s) used first-token scoring",
-                fallback_count,
             )
 
     def run(self) -> None:
@@ -1214,7 +1161,10 @@ class MCRunner:
 
             # Initialize execution
             logger.info("🚀 Initializing MC inference pipeline")
-            logger.info(f"Configuration: {dataclasses.asdict(self.config)}")
+            logger.info(
+                "Configuration: %s",
+                redact_config_for_logging(dataclasses.asdict(self.config)),
+            )
 
             # Set up output directory
             output_path = Path(self.config.output_file)
@@ -1283,7 +1233,9 @@ def main() -> None:
         # Log initialization with formatted argument display
         logger.info("Initializing MCInferConfig with parsed command line arguments...")
         logger.info("\n--- Parsed Arguments ---")
-        logger.info(json.dumps(dataclasses.asdict(config), indent=2))
+        logger.info(
+            json.dumps(redact_config_for_logging(dataclasses.asdict(config)), indent=2)
+        )
 
         # Initialize and run the inference process
         runner = MCRunner(config)

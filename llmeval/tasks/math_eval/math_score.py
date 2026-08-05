@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 from collections.abc import Iterator
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass
@@ -629,8 +630,12 @@ def compute_score_result(
     result from the in-memory annotated records, without reading those files
     back from disk.
     """
+    # Inference groups multiple generations for one problem in a single row.
+    # The legacy float API intentionally scores the first generation only, but
+    # structured evaluation must account for every requested sample.
+    scoring_dataset = _expand_math_samples(eval_dataset, response_key)
     accuracy = compute_scores(
-        eval_dataset=eval_dataset,
+        eval_dataset=scoring_dataset,
         label_key=label_key,
         response_key=response_key,
         cache_path=cache_path,
@@ -639,28 +644,160 @@ def compute_score_result(
     )
     observations = [
         float(item.get("accuracy", 0.0))
-        for item in eval_dataset
+        for item in scoring_dataset
         if item.get("evaluation_status", "completed") == "completed"
     ]
     timeout_count = sum(
-        item.get("evaluation_status") == "timeout" for item in eval_dataset
+        item.get("evaluation_status") == "timeout" for item in scoring_dataset
     )
     failed_count = sum(
-        item.get("evaluation_status") == "failed" for item in eval_dataset
+        item.get("evaluation_status") == "failed" for item in scoring_dataset
     )
     skipped_count = sum(
-        item.get("evaluation_status") == "skipped" for item in eval_dataset
+        item.get("evaluation_status") == "skipped" for item in scoring_dataset
     )
+    details, extra_metrics, problem_observations = _build_problem_level_metrics(
+        scoring_dataset
+    )
+    metrics = {"accuracy": accuracy, "sample_accuracy": accuracy, **extra_metrics}
     return ScorerResult(
-        metrics={"accuracy": accuracy},
-        observations={"accuracy": observations},
-        per_item=[dict(item) for item in eval_dataset],
-        sample_count=len(eval_dataset),
+        metrics=metrics,
+        observations={
+            "accuracy": observations,
+            "sample_accuracy": observations,
+            **problem_observations,
+        },
+        per_item=[dict(item) for item in scoring_dataset],
+        details={"problem_level": details},
+        sample_count=len(scoring_dataset),
         effective_sample_count=len(observations),
         failed_count=failed_count,
         skipped_count=skipped_count,
         timeout_count=timeout_count,
     )
+
+
+def _expand_math_samples(
+    eval_dataset: list[dict[str, Any]], response_key: str
+) -> list[dict[str, Any]]:
+    """Expand grouped generation rows into one scoring record per sample.
+
+    ``_llmeval_sample_indices`` is an inference-only compatibility field.  It
+    is consumed here and replaced with the public ``sample_index`` field so
+    scoring output has a stable, uniform schema.
+    """
+    expanded: list[dict[str, Any]] = []
+    for row_index, item in enumerate(eval_dataset):
+        responses = item.get(response_key)
+        if not isinstance(responses, list):
+            responses = [responses] if responses is not None else []
+        raw_indices = item.get("_llmeval_sample_indices")
+        valid_indices = (
+            isinstance(raw_indices, list)
+            and len(raw_indices) == len(responses)
+            and all(isinstance(index, int) and index >= 0 for index in raw_indices)
+        )
+        sample_indices = raw_indices if valid_indices else list(range(len(responses)))
+        if not responses:
+            # Preserve a missing-generation record so it is counted as skipped.
+            record = dict(item)
+            record.pop("_llmeval_sample_indices", None)
+            record[response_key] = []
+            record["sample_index"] = 0
+            record["_math_problem_index"] = row_index
+            expanded.append(record)
+            continue
+        for sample_index, response in zip(sample_indices, responses, strict=True):
+            record = dict(item)
+            record.pop("_llmeval_sample_indices", None)
+            record[response_key] = [response]
+            record["sample_index"] = sample_index
+            record["_math_problem_index"] = row_index
+            expanded.append(record)
+    return expanded
+
+
+def _problem_identity(item: dict[str, Any], row_index: int) -> str:
+    """Return a stable grouping key for problem-level aggregation."""
+    document_id = item.get("doc_id")
+    if document_id is not None and str(document_id).strip():
+        return str(document_id)
+    prompt = item.get("prompt")
+    if prompt is not None and str(prompt).strip():
+        return str(prompt)
+    if isinstance(item.get("_math_problem_index"), int):
+        return f"__row_{item['_math_problem_index']}"
+    return f"__row_{row_index}"
+
+
+def _build_problem_level_metrics(
+    scored_dataset: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, float], dict[str, list[float]]]:
+    """Aggregate sample outcomes into pass@k and majority-vote metrics."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row_index, item in enumerate(scored_dataset):
+        grouped.setdefault(_problem_identity(item, row_index), []).append(item)
+        item.pop("_math_problem_index", None)
+
+    problems: list[dict[str, Any]] = []
+    for problem_id, items in grouped.items():
+        completed = [
+            item
+            for item in items
+            if item.get("evaluation_status", "completed") == "completed"
+        ]
+        correct_samples = sum(
+            float(item.get("accuracy", 0.0)) == 1.0 for item in completed
+        )
+        predictions = [
+            str(item["extracted_answer"])
+            for item in completed
+            if item.get("extracted_answer") not in (None, "")
+            and not str(item["extracted_answer"]).startswith(
+                ("Error", "Format Error", "Timeout")
+            )
+        ]
+        majority_prediction = None
+        majority_correct = False
+        if predictions:
+            majority_prediction = Counter(predictions).most_common(1)[0][0]
+            majority_records = [
+                item
+                for item in completed
+                if str(item.get("extracted_answer")) == majority_prediction
+            ]
+            majority_correct = any(
+                float(item.get("accuracy", 0.0)) == 1.0
+                for item in majority_records
+            )
+        sample_count = len(items)
+        problems.append(
+            {
+                "doc_id": problem_id,
+                "correct_samples": correct_samples,
+                "sample_count": sample_count,
+                "correct_fraction": correct_samples / sample_count if sample_count else 0.0,
+                "passed": correct_samples > 0,
+                "majority_prediction": majority_prediction,
+                "majority_correct": majority_correct,
+            }
+        )
+
+    if not problems:
+        return [], {}, {}
+    metrics: dict[str, float] = {}
+    observations: dict[str, list[float]] = {}
+    for k in sorted({problem["sample_count"] for problem in problems}):
+        cohort = [problem for problem in problems if problem["sample_count"] == k]
+        pass_key = f"problem_pass@{k}"
+        majority_key = f"problem_majority@{k}"
+        pass_values = [float(problem["passed"]) for problem in cohort]
+        majority_values = [float(problem["majority_correct"]) for problem in cohort]
+        metrics[pass_key] = sum(pass_values) / len(cohort)
+        metrics[majority_key] = sum(majority_values) / len(cohort)
+        observations[pass_key] = pass_values
+        observations[majority_key] = majority_values
+    return problems, metrics, observations
 
 
 def _filter_artifacts(response: Any) -> dict[str, Any]:

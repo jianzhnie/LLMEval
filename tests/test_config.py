@@ -93,7 +93,7 @@ class TestMCAndEvaluationP0Config:
     def test_mc_generation_defaults_to_one_sample_and_auto_scoring(self) -> None:
         config = MCInferConfig()
         assert config.n_samples == 1
-        assert config.loglikelihood_mode == "auto"
+        assert config.loglikelihood_mode == "first_token"
 
     def test_invalid_mc_aggregation_raises(self, tmp_path: Path) -> None:
         input_path = tmp_path / "input.jsonl"
@@ -184,6 +184,13 @@ class TestEvalTaskArguments:
         input_f.write_text('{"prompt": "q", "answer": "a"}\n')
         args = EvalTaskArguments(input_path=str(input_f))
         assert args.content_cache_dir == ""
+        assert args.output_schema == "compact"
+
+    def test_invalid_output_schema_raises(self, tmp_path: Path) -> None:
+        input_f = tmp_path / "data.jsonl"
+        input_f.write_text("{}\n")
+        with pytest.raises(ValueError, match="output_schema"):
+            EvalTaskArguments(input_path=str(input_f), output_schema="full")
 
     def test_task_validation_is_delegated_to_registry(self, tmp_path: Path) -> None:
         input_f = tmp_path / "data.jsonl"

@@ -89,6 +89,7 @@ def evaluate_task(
     model_name: str | None = None,
     model_revision: str | None = None,
     input_key: str = "prompt",
+    output_schema: str = "compact",
 ) -> float | None:
     """
     Evaluate model outputs against ground truth data for a specific task.
@@ -144,6 +145,7 @@ def evaluate_task(
         model_name=model_name,
         model_revision=model_revision,
         input_key=input_key,
+        output_schema=output_schema,
     )
     return result.primary_value if result is not None else None
 
@@ -193,6 +195,7 @@ def evaluate_task_result(
     model_name: str | None = None,
     model_revision: str | None = None,
     input_key: str = "prompt",
+    output_schema: str = "compact",
 ) -> EvaluationResult | None:
     """Evaluate a task through the registry and return all declared metrics."""
     actual_seed = 0 if seed is None else seed
@@ -217,6 +220,7 @@ def evaluate_task_result(
         force_recompute=force_recompute,
         read_only_cache=read_only_cache,
         input_key=input_key,
+        output_schema=output_schema,
     )
     registry = _default_registry()
     try:
@@ -235,7 +239,9 @@ def evaluate_task_result(
                     for spec in task.metric_specs
                 },
             )
-            write_per_item_results(result, context.cache_path)
+            write_per_item_results(
+                result, context.cache_path, output_schema=context.output_schema
+            )
             write_structured_summary(result, context.cache_path)
         else:
             result = evaluate_registered_task(context, registry)
@@ -340,6 +346,7 @@ def main() -> int:
             args.model_name,
             args.model_revision,
             input_key=args.input_key,
+            output_schema=args.output_schema,
         )
 
         if result is not None:

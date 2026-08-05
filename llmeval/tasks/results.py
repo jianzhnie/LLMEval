@@ -74,6 +74,7 @@ class EvaluationResult:
     skipped_count: int = 0
     timeout_count: int = 0
     per_item: list[dict[str, Any]] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
     cache_key: str | None = None
 
     @property
@@ -97,6 +98,7 @@ class EvaluationResult:
             "failed_count": self.failed_count,
             "skipped_count": self.skipped_count,
             "timeout_count": self.timeout_count,
+            "details": self.details,
             "cache_key": self.cache_key,
         }
         if include_per_item:
@@ -130,6 +132,7 @@ class EvaluationResult:
                 if isinstance(data.get("per_item"), list)
                 else []
             ),
+            details=(dict(data["details"]) if isinstance(data.get("details"), dict) else {}),
             cache_key=(str(data["cache_key"]) if data.get("cache_key") else None),
         )
 
@@ -147,6 +150,7 @@ class ScorerResult:
     metrics: dict[str, float]
     observations: dict[str, list[float]]
     per_item: list[dict[str, Any]] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
     sample_count: int = 0
     effective_sample_count: int = 0
     failed_count: int = 0

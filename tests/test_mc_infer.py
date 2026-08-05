@@ -347,6 +347,19 @@ class TestMCLoglikelihoodClient:
 
 
 class TestProcessLoglikelihoodItem:
+    def test_run_logs_effective_mode(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner._process_concurrently = MagicMock()
+        runner.log_stats = MagicMock()
+
+        with patch("llmeval.inference.mc.logger.info") as log_info:
+            runner.run_loglikelihood([{"prompt": "q"}])
+
+        assert log_info.call_args_list[0].args == (
+            "effective_loglikelihood_mode=%s",
+            "first_token",
+        )
+
     def test_all_neg_inf_raises(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
         runner.client = MagicMock()
@@ -376,12 +389,12 @@ class TestProcessLoglikelihoodItem:
         assert result["choice_tokens"] == ["A", "B"]
         assert result["sample_index"] == 2
 
-    def test_auto_falls_back_when_any_continuation_is_incomplete(
+    def test_auto_uses_first_token_without_probing_continuation(
         self, tmp_path: Path
     ) -> None:
         runner = _make_mc_runner(tmp_path)
+        runner.config.loglikelihood_mode = "auto"
         runner.client = MagicMock()
-        runner.client.get_choices_continuation_logprobs.return_value = [[], [-0.1]]
         runner.client.get_choices_logprobs.return_value = [-0.2, -1.0]
 
         result = runner.process_loglikelihood_item(
@@ -392,7 +405,25 @@ class TestProcessLoglikelihoodItem:
         assert result["logprobs"] == [-0.2, -1.0]
         assert result["loglikelihood_exact"] is False
         assert result["scoring_approximation"] == "first_token_top_logprobs"
-        assert runner._stats["continuation_fallback"] == 1
+        runner.client.get_choices_continuation_logprobs.assert_not_called()
+
+    def test_explicit_continuation_uses_exact_scoring(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.config.loglikelihood_mode = "continuation"
+        runner.client = MagicMock()
+        runner.client.get_choices_continuation_logprobs.return_value = [
+            [-0.5, -0.1],
+            [-0.2],
+        ]
+
+        result = runner.process_loglikelihood_item(
+            {"prompt": "q", "choices": ["a", "b"], "gold": 1}
+        )
+
+        assert result["scoring_mode"] == "continuation"
+        assert result["loglikelihood_exact"] is True
+        runner.client.get_choices_continuation_logprobs.assert_called_once()
+        runner.client.get_choices_logprobs.assert_not_called()
 
 
 class TestProcessGenerateItem:
@@ -459,6 +490,27 @@ class TestProcessGenerateItem:
         assert result["gen"] == ["a", "c"]
         assert result["_llmeval_sample_indices"] == [0, 2]
         assert client.chat.completions.create.call_args.kwargs["n"] == 3
+
+    def test_non_contiguous_requested_indices_are_preserved(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="b")),
+            MagicMock(message=MagicMock(content="d")),
+        ]
+
+        result = runner.process_generate_item(
+            {
+                "prompt": "q",
+                "answer": "A",
+                "_llmeval_remaining_samples": 2,
+                "_llmeval_requested_sample_indices": [1, 3],
+            },
+            client,
+            [],
+        )
+
+        assert result["_llmeval_sample_indices"] == [1, 3]
 
 
 class TestMCStableResume:

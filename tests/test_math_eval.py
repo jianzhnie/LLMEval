@@ -267,6 +267,50 @@ class TestComputeScores:
         assert result.observations["accuracy"] == [1.0]
         assert result.metrics["accuracy"] == 1.0
 
+    def test_multi_sample_problem_metrics(self, tmp_path: Path) -> None:
+        from llmeval.tasks.math_eval.math_score import compute_score_result
+
+        data = [
+            {
+                **_math_item(
+                    "5",
+                    ["$\\boxed{5}$", "$\\boxed{6}$", "$\\boxed{5}$"],
+                ),
+                "doc_id": "aime24:0",
+                "_llmeval_sample_indices": [0, 1, 2],
+            },
+            {
+                **_math_item(
+                    "7",
+                    ["$\\boxed{8}$", "$\\boxed{7}$", "$\\boxed{8}$"],
+                ),
+                "doc_id": "aime24:1",
+                "_llmeval_sample_indices": [0, 1, 2],
+            },
+        ]
+
+        result = compute_score_result(
+            eval_dataset=data,
+            label_key="answer",
+            response_key="gen",
+            cache_path=str(tmp_path / "multi.jsonl"),
+            max_workers=2,
+            timeout=60,
+        )
+
+        assert result.sample_count == 6
+        assert result.effective_sample_count == 6
+        assert result.metrics["sample_accuracy"] == pytest.approx(0.5)
+        assert result.metrics["problem_pass@3"] == pytest.approx(1.0)
+        assert result.metrics["problem_majority@3"] == pytest.approx(0.5)
+        assert [item["sample_index"] for item in result.per_item] == [0, 1, 2, 0, 1, 2]
+        problems = result.details["problem_level"]
+        assert problems[0]["correct_samples"] == 2
+        assert problems[0]["sample_count"] == 3
+        assert problems[0]["majority_correct"] is True
+        assert problems[1]["correct_samples"] == 1
+        assert problems[1]["majority_correct"] is False
+
 
 # ===========================================================================
 # save_cache

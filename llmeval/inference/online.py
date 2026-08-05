@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import httpx
 import openai
@@ -26,13 +26,13 @@ from transformers import HfArgumentParser
 
 from llmeval.cache import build_cache, log_cache_stats
 from llmeval.inference.common import (
-    count_completed_samples,
-    count_completed_samples_by_identity,
     expand_group_for_sampling,
     is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
+    load_resume_state,
     prepare_data_with_resume,
+    redact_config_for_logging,
     sample_count_for_item,
     save_failed_items,
 )
@@ -46,7 +46,7 @@ logger = init_logger("online_vllm_server", logging.INFO)
 
 def _config_for_logging(args: OnlineInferArguments) -> dict[str, Any]:
     """Return online configuration without misleading empty optional fields."""
-    payload = dataclasses.asdict(args)
+    payload = redact_config_for_logging(dataclasses.asdict(args))
     if not payload.get("task"):
         payload.pop("task", None)
     return payload
@@ -79,6 +79,7 @@ class InferenceClient:
         read_only_cache: bool = False,
         model_revision: str | None = None,
         cache_rank: str | None = None,
+        organization: str | None = None,
     ) -> None:
         """Initialize the inference client with API configuration and validation.
 
@@ -120,6 +121,7 @@ class InferenceClient:
             api_key=self.api_key,
             base_url=base_url,
             timeout=httpx.Timeout(self.timeout),
+            organization=organization,
         )
         masked_key = f"{self.api_key[:4]}***" if len(self.api_key) > 4 else "***"
         logger.info(
@@ -475,6 +477,7 @@ class InferenceRunner:
                 read_only_cache=args.read_only_cache,
                 model_revision=getattr(args, "model_revision", None),
                 cache_rank=getattr(args, "cache_rank", None),
+                organization=args.organization,
             )
         except (OSError, ValueError) as e:
             raise RuntimeError(f"Failed to initialize inference client: {e}") from e
@@ -522,35 +525,24 @@ class InferenceRunner:
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
         # Resume functionality handling
-        completed_counts = cast(
-            dict[object, int],
-            count_completed_samples_by_identity(
-                self.args.output_file,
-                self.args.input_key,
-                self.args.response_key,
-            ),
-        )
-        legacy_counts = count_completed_samples(
+        resume_state = load_resume_state(
             self.args.output_file,
             self.args.input_key,
             self.args.response_key,
-            legacy_only=True,
         )
-        if legacy_counts:
-            # Preserve prompt-based resume for legacy records while allowing
-            # stable-ID records in the same file to remain independently keyed.
-            completed_counts.update(legacy_counts)
-        total_completed = sum(completed_counts.values())
 
-        if total_completed > 0:
-            logger.info(f"Found {total_completed} completed samples from previous run.")
+        if resume_state.completed_count > 0:
+            logger.info(
+                "Found %d completed samples from previous run.",
+                resume_state.completed_count,
+            )
 
         prepared_data = prepare_data_with_resume(
             raw_data,
-            completed_counts,
+            resume_state.completed_indices,
+            resume_state.legacy_counts,
             self.args.input_key,
             self.args.n_samples,
-            stable_ids=True,
         )
         total_remaining = sum(sample_count_for_item(item) for item in prepared_data)
 
@@ -628,6 +620,7 @@ class InferenceRunner:
         result = item.copy()
         result.pop("n_samples", None)
         result.pop("_llmeval_sample_start", None)
+        result.pop("_llmeval_requested_sample_indices", None)
         gen_list = list(result.get(self.args.response_key, []))
         gen_list.append(response)
         result[self.args.response_key] = gen_list

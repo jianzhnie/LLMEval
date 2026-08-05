@@ -81,6 +81,7 @@ class EvaluationContext(PreparationContext):
     force_recompute: bool = False
     read_only_cache: bool = False
     input_key: str = "prompt"
+    output_schema: str = "compact"
 
 
 class EvaluationTask(Protocol):
@@ -144,6 +145,7 @@ def _build_evaluation_result(
         skipped_count=scored.skipped_count,
         timeout_count=scored.timeout_count,
         per_item=[dict(item) for item in scored.per_item],
+        details=dict(scored.details),
     )
 
 
@@ -153,20 +155,59 @@ def write_structured_summary(result: EvaluationResult, cache_path: Path) -> None
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     payload = result.to_dict(include_per_item=True)
     payload["summary_version"] = 1
-    payload["metric_values"] = {
+    metric_values = {
         name: metric.value for name, metric in result.metrics.items()
     }
+    payload["metric_values"] = metric_values
+    for name, value in metric_values.items():
+        payload.setdefault(name, value)
     summary_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
-def write_per_item_results(result: EvaluationResult, cache_path: Path) -> None:
-    """Persist detailed records so content-cache hits reproduce normal outputs."""
+def _compact_per_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep stable scoring fields while dropping prompt/generation payloads."""
+    aliases = {
+        "doc_id": ("doc_id",),
+        "sample_index": ("sample_index",),
+        "gold": ("gold", "extracted_gold", "answer"),
+        "pred": ("pred", "extracted_answer", "prediction"),
+        "correct": ("correct", "passed", "accuracy"),
+        "score": ("score", "accuracy", "pass@1", "acc"),
+        "scoring_mode": ("scoring_mode", "aggregation"),
+        "evaluation_status": ("evaluation_status",),
+    }
+    compact: dict[str, Any] = {}
+    for output_key, candidates in aliases.items():
+        for key in candidates:
+            value = item.get(key)
+            if value is None or value == "" or value == []:
+                continue
+            if output_key == "correct" and key == "accuracy":
+                value = float(value) == 1.0
+            compact[output_key] = value
+            break
+    if "score" not in compact and "correct" in compact:
+        compact["score"] = 1.0 if compact["correct"] else 0.0
+    for key in ("id", "task", "task_id", "correct_norm", "correct_bytes"):
+        value = item.get(key)
+        if value is not None and value != "" and value != []:
+            compact[key] = value
+    return compact
+
+
+def write_per_item_results(
+    result: EvaluationResult, cache_path: Path, *, output_schema: str = "compact"
+) -> None:
+    """Persist per-item records using the requested compact/debug schema."""
+    if output_schema not in {"compact", "debug"}:
+        raise ValueError("output_schema must be 'compact' or 'debug'")
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with cache_path.open("w", encoding="utf-8") as handle:
         for item in result.per_item:
-            handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+            record = item if output_schema == "debug" else _compact_per_item(item)
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 @dataclass
@@ -394,13 +435,17 @@ def evaluate_registered_task(
                 and result.task_version == task.version
                 and (result.per_item or result.sample_count == 0)
             ):
-                write_per_item_results(result, context.cache_path)
+                write_per_item_results(
+                    result, context.cache_path, output_schema=context.output_schema
+                )
                 write_structured_summary(result, context.cache_path)
                 return result
 
     result = task.score(context)
     result.cache_key = cache_key
-    write_per_item_results(result, context.cache_path)
+    write_per_item_results(
+        result, context.cache_path, output_schema=context.output_schema
+    )
     write_structured_summary(result, context.cache_path)
     if cache is not None and cache_key is not None:
         cache.set(cache_key, result.to_dict(include_per_item=True))

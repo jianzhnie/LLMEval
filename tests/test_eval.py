@@ -129,6 +129,7 @@ class TestEvaluateTask:
         assert json.loads(output_path.read_text(encoding="utf-8")) == {
             "id": "item-1",
             "correct": True,
+            "score": 1.0,
         }
 
     def test_empty_dataset_returns_zero_and_validates_task(
