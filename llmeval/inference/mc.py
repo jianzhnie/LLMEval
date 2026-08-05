@@ -38,6 +38,7 @@ from llmeval.inference.common import (
     completed_sample_indices_by_identity,
     count_completed_samples_by_identity,
     is_explicit_tool_choice,
+    is_local_endpoint,
     load_jsonl,
     require_document_id,
     save_failed_items,
@@ -48,14 +49,16 @@ from llmeval.inference.schema import (
     LoglikelihoodRequest,
     LoglikelihoodResult,
 )
-from llmeval.tasks.provenance import get_git_hash, hash_evaluation_inputs, hash_json
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
-from llmeval.utils.reproducibility import seed_everything, seed_provenance
 from llmeval.utils.retry import ClientError, call_with_retry
 
 logger = init_logger("mc_infer")
+
+
+class ContinuationAlignmentError(ValueError):
+    """A deterministic backend token-offset mismatch that should not be retried."""
 
 
 class ContinuationLogprobs(list[list[float]]):
@@ -67,10 +70,12 @@ class ContinuationLogprobs(list[list[float]]):
         *,
         token_texts: list[list[str]] | None = None,
         token_ids: list[list[int] | None] | None = None,
+        error: str | None = None,
     ) -> None:
         super().__init__(scores)
         self.token_texts = token_texts or [[] for _ in scores]
         self.token_ids = token_ids or [None for _ in scores]
+        self.error = error
 
 
 # ===========================================================================
@@ -91,13 +96,10 @@ class FewShotFormatter:
         self.seed = seed
         self._few_shot_pool: list[dict[str, Any]] = []
         self._all_formatted: list[str] = []
-        self.source_file: str | None = None
-        self.source_hash: str | None = None
-        self._selected_ids: dict[tuple[str, str], tuple[str, ...]] = {}
         self._warned_insufficient: set[tuple[str, str]] = set()
 
-    def load(self, input_file: str) -> None:
-        """Load all demonstrations from an explicit dev file.
+    def load(self) -> None:
+        """Load all demonstrations from the configured dev file.
 
         Sampling happens per test document in :meth:`get_prefix`, matching
         lm-evaluation-harness semantics and preventing one global pool from
@@ -106,14 +108,12 @@ class FewShotFormatter:
         if self.n_shot <= 0:
             return
 
-        source = self.few_shot_file or input_file
         try:
-            items = load_jsonl(source)
-            source_path = Path(source)
-            self.source_file = str(source_path.resolve())
-            self.source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            items = load_jsonl(self.few_shot_file)
         except Exception as exc:
-            logger.warning("Failed to load few-shot from %s: %s", source, exc)
+            logger.warning(
+                "Failed to load few-shot from %s: %s", self.few_shot_file, exc
+            )
             return
 
         if len(items) < self.n_shot:
@@ -137,7 +137,6 @@ class FewShotFormatter:
             and (not document_id or str(item.get("doc_id", "")) != document_id)
         ]
         if len(candidates) < self.n_shot:
-            self._selected_ids[identity] = ()
             if identity not in self._warned_insufficient:
                 logger.warning(
                     "Few-shot candidates are insufficient for document %r: "
@@ -152,28 +151,8 @@ class FewShotFormatter:
         derived_seed = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest(), 16)
         selected = random.Random(derived_seed).sample(candidates, self.n_shot)
         demos = [self._all_formatted[index] for index in selected]
-        self._selected_ids[identity] = tuple(
-            str(self._few_shot_pool[index].get("doc_id") or f"row:{index}")
-            for index in selected
-        )
 
         return "\n\n".join(demos) + "\n\n" if demos else ""
-
-    def provenance(
-        self, test_prompt: str, document_id: str, final_prompt: str
-    ) -> dict[str, Any]:
-        """Describe the demonstration source and deterministic selection."""
-        return {
-            "fewshot_file": self.source_file,
-            "fewshot_file_hash": self.source_hash,
-            "fewshot_seed": self.seed,
-            "fewshot_example_ids": list(
-                self._selected_ids.get((document_id, test_prompt), ())
-            ),
-            "final_prompt_hash": hashlib.sha256(
-                final_prompt.encode("utf-8")
-            ).hexdigest(),
-        }
 
     @staticmethod
     def _format_demo(item: dict[str, Any]) -> str:
@@ -226,7 +205,6 @@ class MCLoglikelihoodClient:
         self.max_retries: int = max_retries
         self.seed = seed
         self.model_revision = model_revision
-        self._git_hash = get_git_hash()
         self.cache = build_cache(
             content_cache_dir,
             "inference",
@@ -236,9 +214,9 @@ class MCLoglikelihoodClient:
         )
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
-        # Warn if using default EMPTY key
         if self.api_key == "EMPTY":
-            logger.warning("Using default 'EMPTY' API key. This may not be secure.")
+            log = logger.debug if is_local_endpoint(base_url) else logger.warning
+            log("Using default 'EMPTY' API key.")
 
         # Initialize OpenAI client with validated configuration
         self.client: openai.OpenAI = openai.OpenAI(
@@ -280,10 +258,8 @@ class MCLoglikelihoodClient:
             "base_url": getattr(self.client, "base_url", None),
             "model_name": self.model_name,
             "model_revision": getattr(self, "model_revision", None),
-            "task_name": None,
-            "task_version": None,
-            "dataset_hash": hash_json({"prompt": prompt, "choices": choice_texts}),
-            "prompt_hash": hash_json(prompt),
+            "prompt": prompt,
+            "choices": choice_texts,
             "generation_params": {
                 "max_tokens": 1,
                 "temperature": 0,
@@ -292,7 +268,6 @@ class MCLoglikelihoodClient:
             },
             "sampling_seed": getattr(self, "seed", 0),
             "postprocess_version": "mc_first_token_v1",
-            "git_commit": getattr(self, "_git_hash", None),
         }
         cache = getattr(self, "cache", None)
         key = cache.key(payload) if cache is not None else None
@@ -355,10 +330,7 @@ class MCLoglikelihoodClient:
             "base_url": self.base_url,
             "model_name": self.model_name,
             "model_revision": getattr(self, "model_revision", None),
-            "task_name": None,
-            "task_version": None,
-            "dataset_hash": hash_json(request.cache_identity()),
-            "prompt_hash": hash_json(request.context),
+            "request": request.cache_identity(),
             "generation_params": {
                 "max_tokens": 1,
                 "temperature": 0,
@@ -367,7 +339,6 @@ class MCLoglikelihoodClient:
             },
             "sampling_seed": getattr(self, "seed", 0),
             "postprocess_version": "mc_continuation_v2",
-            "git_commit": getattr(self, "_git_hash", None),
         }
         cache = getattr(self, "cache", None)
         key = cache.key(payload) if cache is not None else None
@@ -449,7 +420,9 @@ class MCLoglikelihoodClient:
                     not selected_indices
                     or offsets[selected_indices[0]] != scoring_context_length
                 ):
-                    raise ValueError("continuation does not start on a token boundary")
+                    raise ContinuationAlignmentError(
+                        "continuation does not start on a token boundary"
+                    )
 
                 tokens = getattr(logprobs, "tokens", None)
                 if not isinstance(tokens, list | tuple) or len(tokens) != len(
@@ -464,12 +437,12 @@ class MCLoglikelihoodClient:
                     selected_indices, selected_tokens, strict=True
                 ):
                     if offsets[selected_index] != expected_offset:
-                        raise ValueError(
+                        raise ContinuationAlignmentError(
                             "continuation token offsets do not match token text"
                         )
                     expected_offset += len(token)
                 if expected_offset != choice_end:
-                    raise ValueError(
+                    raise ContinuationAlignmentError(
                         "continuation token offsets do not cover the choice"
                     )
 
@@ -502,7 +475,14 @@ class MCLoglikelihoodClient:
             )
 
         try:
-            result = call_with_retry(do_request, self.max_retries)
+            result = call_with_retry(
+                do_request,
+                self.max_retries,
+                fail_fast_exceptions=(ContinuationAlignmentError,),
+            )
+        except ContinuationAlignmentError as exc:
+            logger.debug("Continuation scoring fallback: %s", exc)
+            return LoglikelihoodResult.failure(request, str(exc))
         except ClientError as exc:
             logger.warning("Continuation logprob request failed: %s", exc)
             return LoglikelihoodResult.failure(request, str(exc))
@@ -525,6 +505,7 @@ class MCLoglikelihoodClient:
                 list(choice.token_ids) if choice.token_ids is not None else None
                 for choice in result.choices
             ],
+            error=result.error,
         )
 
 
@@ -551,8 +532,6 @@ class MCRunner:
             RuntimeError: If the loglikelihood client fails to initialize
         """
         self.config: MCInferConfig = config
-        self.reproducibility = seed_provenance(seed_everything(config.seed))
-        self._git_hash = get_git_hash()
 
         # Initialize client with error handling (loglikelihood mode only;
         # generate mode builds a plain OpenAI client per run)
@@ -599,7 +578,7 @@ class MCRunner:
             self._few_shot_fmt = FewShotFormatter(
                 config.n_shot, config.few_shot_file, seed=config.seed
             )
-            self._few_shot_fmt.load(config.few_shot_file)
+            self._few_shot_fmt.load()
 
         # Initialize thread safety and monitoring
         self._file_lock: threading.Lock = threading.Lock()
@@ -608,6 +587,7 @@ class MCRunner:
             "failed": 0,
             "correct": 0,
             "skipped": 0,
+            "continuation_fallback": 0,
         }
         self._stats_lock: threading.Lock = threading.Lock()
 
@@ -727,7 +707,7 @@ class MCRunner:
                     item["_llmeval_requested_sample_indices"] = missing_indices
                     item["_llmeval_sample_start"] = missing_indices[0]
                 else:
-                    item["_llmeval_sample_index"] = completed
+                    item["sample_index"] = completed
                 remaining.append(item)
 
         if completed_ids or completed_prompts:
@@ -757,32 +737,6 @@ class MCRunner:
             else ""
         )
         return fs_prefix + item.get(self.config.input_key, "")
-
-    def _inference_provenance(
-        self, item: dict[str, Any], final_prompt: str
-    ) -> dict[str, Any]:
-        """Return seed and few-shot provenance for one rendered prompt."""
-        # Some lightweight tests construct a runner with ``__new__`` and only
-        # exercise item processing. Treat absent optional provenance as empty.
-        provenance = dict(getattr(self, "reproducibility", {}))
-        raw_prompt = str(item.get(self.config.input_key, ""))
-        document_id = str(item.get("doc_id", ""))
-        if self._few_shot_fmt is not None:
-            provenance.update(
-                self._few_shot_fmt.provenance(raw_prompt, document_id, final_prompt)
-            )
-        else:
-            provenance.update(
-                {
-                    "fewshot_file": None,
-                    "fewshot_file_hash": None,
-                    "fewshot_example_ids": [],
-                    "final_prompt_hash": hashlib.sha256(
-                        final_prompt.encode("utf-8")
-                    ).hexdigest(),
-                }
-            )
-        return provenance
 
     # ------------------------------------------------------------------
     # Concurrent processing
@@ -939,6 +893,8 @@ class MCRunner:
             elif scoring_mode == "continuation":
                 raise RuntimeError("Continuation logprob request failed")
             else:
+                with self._stats_lock:
+                    self._stats["continuation_fallback"] += 1
                 scoring_mode = "first_token"
 
         if scoring_mode == "first_token":
@@ -959,7 +915,7 @@ class MCRunner:
         return {
             self.config.input_key: prompt,
             **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
-            "_llmeval_sample_index": item.get("_llmeval_sample_index", 0),
+            "sample_index": item.get("sample_index", 0),
             "choices": choices,
             "choice_tokens": choice_tokens,
             "gold": gold,
@@ -985,7 +941,6 @@ class MCRunner:
             ],
             "pred": pred,
             "correct": is_correct,
-            "inference_provenance": self._inference_provenance(item, prompt),
         }
 
     @staticmethod
@@ -1099,14 +1054,10 @@ class MCRunner:
             "base_url": self.config.base_url,
             "model_name": self.config.model_name,
             "model_revision": self.config.model_revision,
-            "task_name": item.get("task", getattr(self.config, "task", None)),
-            "task_version": item.get("task_version"),
-            "dataset_hash": hash_evaluation_inputs([item], self.config.response_key),
-            "prompt_hash": hash_json(messages),
+            "messages": messages,
             "generation_params": call_args,
             "sampling_seed": self.config.seed,
             "postprocess_version": "mc_generate_v1",
-            "git_commit": getattr(self, "_git_hash", None),
         }
         cache_key = cache.key(cache_payload) if cache is not None else None
         if cache is not None and cache_key is not None:
@@ -1200,7 +1151,6 @@ class MCRunner:
             self.config.response_key: generations,
             **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
             "_llmeval_sample_indices": sample_indices,
-            "inference_provenance": self._inference_provenance(item, prompt),
         }
 
     # ------------------------------------------------------------------
@@ -1227,10 +1177,16 @@ class MCRunner:
         processed = self._stats["processed"]
         correct = self._stats.get("correct", 0)
         failed = self._stats["failed"]
+        fallback_count = self._stats.get("continuation_fallback", 0)
         if processed:
             logger.info(
                 f"Accuracy (loglikelihood): {correct}/{processed} = {correct / processed:.2%} "
                 f"(failed={failed})"
+            )
+        if fallback_count:
+            logger.info(
+                "Continuation scoring fallback: %d item(s) used first-token scoring",
+                fallback_count,
             )
 
     def run(self) -> None:

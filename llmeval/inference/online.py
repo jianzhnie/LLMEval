@@ -30,19 +30,26 @@ from llmeval.inference.common import (
     count_completed_samples_by_identity,
     expand_group_for_sampling,
     is_explicit_tool_choice,
+    is_local_endpoint,
     load_jsonl,
     prepare_data_with_resume,
     sample_count_for_item,
     save_failed_items,
 )
-from llmeval.tasks.provenance import get_git_hash, hash_json
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
-from llmeval.utils.reproducibility import seed_everything, seed_provenance
 from llmeval.utils.retry import call_with_retry
 
 logger = init_logger("online_vllm_server", logging.INFO)
+
+
+def _config_for_logging(args: OnlineInferArguments) -> dict[str, Any]:
+    """Return online configuration without misleading empty optional fields."""
+    payload = dataclasses.asdict(args)
+    if not payload.get("task"):
+        payload.pop("task", None)
+    return payload
 
 
 class InferenceClient:
@@ -95,7 +102,6 @@ class InferenceClient:
         self.tool_choice: str = tool_choice
         self.seed = seed
         self.model_revision = model_revision
-        self._git_hash = get_git_hash()
         self.cache = build_cache(
             content_cache_dir,
             "inference",
@@ -105,9 +111,9 @@ class InferenceClient:
         )
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
-        # Warn if using default EMPTY key
         if self.api_key == "EMPTY":
-            logger.warning("Using default 'EMPTY' API key. This may not be secure.")
+            log = logger.debug if is_local_endpoint(base_url) else logger.warning
+            log("Using default 'EMPTY' API key.")
 
         # Initialize OpenAI client with validated configuration
         self.client: openai.OpenAI = openai.OpenAI(
@@ -365,16 +371,12 @@ class InferenceClient:
 
     def _cache_payload(self, call_args: dict[str, Any], kind: str) -> dict[str, Any]:
         """Describe all content-affecting inputs for an online request."""
-        messages = call_args.get("messages", [])
         return {
             "backend": kind,
             "endpoint": self.base_url,
             "model_name": call_args.get("model"),
             "model_revision": getattr(self, "model_revision", None),
-            "task_name": None,
-            "task_version": None,
-            "dataset_hash": hash_json(messages),
-            "prompt_hash": hash_json(messages),
+            "messages": call_args.get("messages", []),
             "generation_params": {
                 key: value
                 for key, value in call_args.items()
@@ -382,7 +384,6 @@ class InferenceClient:
             },
             "sampling_seed": call_args.get("seed"),
             "postprocess_version": "online_chat_v1",
-            "git_commit": getattr(self, "_git_hash", None),
         }
 
     def _request_with_retry(self, call_args: dict[str, Any]) -> Any | None:
@@ -459,7 +460,6 @@ class InferenceRunner:
             proper resource management and progress tracking.
         """
         self.args: OnlineInferArguments = args
-        self.reproducibility = seed_provenance(seed_everything(args.seed))
 
         # Initialize client with error handling
         try:
@@ -483,7 +483,11 @@ class InferenceRunner:
         self.system_prompt: str | None = SYSTEM_PROMPT_FACTORY.get(
             args.system_prompt_type
         )
-        if args.system_prompt_type and not self.system_prompt:
+        if (
+            args.system_prompt_type
+            and args.system_prompt_type != "empty"
+            and not self.system_prompt
+        ):
             logger.warning(f"Unknown system_prompt_type: {args.system_prompt_type}")
 
         # Initialize thread safety and monitoring
@@ -627,9 +631,6 @@ class InferenceRunner:
         gen_list = list(result.get(self.args.response_key, []))
         gen_list.append(response)
         result[self.args.response_key] = gen_list
-        provenance = getattr(self, "reproducibility", None)
-        if provenance is not None:
-            result["inference_provenance"] = provenance
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
@@ -876,7 +877,7 @@ class InferenceRunner:
 
             # Initialize execution
             logger.info("🚀 Initializing inference pipeline")
-            logger.info(f"Configuration: {dataclasses.asdict(self.args)}")
+            logger.info("Configuration: %s", _config_for_logging(self.args))
 
             # Load and prepare data
             eval_dataset: list[dict[str, Any]] = self.load_data()
@@ -947,7 +948,7 @@ def main() -> None:
             "Initializing OnlineInferArguments with parsed command line arguments..."
         )
         logger.info("\n--- Parsed Arguments ---")
-        logger.info(json.dumps(dataclasses.asdict(eval_args), indent=2))
+        logger.info(json.dumps(_config_for_logging(eval_args), indent=2))
 
         # Initialize and run the inference process
         runner = InferenceRunner(eval_args)

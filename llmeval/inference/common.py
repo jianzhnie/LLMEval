@@ -26,6 +26,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from llmeval.utils.log import init_logger
 
@@ -37,6 +38,7 @@ __all__ = [
     "expand_data_with_resume",
     "expand_group_for_sampling",
     "is_explicit_tool_choice",
+    "is_local_endpoint",
     "load_jsonl",
     "prepare_data_with_resume",
     "require_document_id",
@@ -47,6 +49,14 @@ __all__ = [
 ]
 
 logger = init_logger("inference_common")
+
+
+def is_local_endpoint(base_url: str) -> bool:
+    """Return whether an API URL targets the local machine."""
+    hostname = urlparse(base_url).hostname
+    return hostname in {"localhost", "127.0.0.1", "::1"} or bool(
+        hostname and hostname.endswith(".localhost")
+    )
 
 
 def require_document_id(item: dict[str, Any], index: int | None = None) -> str:
@@ -90,7 +100,7 @@ def sample_seed_for_item(base_seed: int, item: dict[str, Any]) -> int:
         raise ValueError(f"base_seed must be non-negative, got {base_seed}")
     document_id = str(item.get("doc_id") or item.get("llmeval_verifier_id") or "")
     prompt = str(item.get("prompt") or item.get("question") or "")
-    sample_index = item.get("_llmeval_sample_index", 0)
+    sample_index = item.get("sample_index", 0)
     try:
         sample_index = int(sample_index)
     except (TypeError, ValueError):
@@ -332,8 +342,8 @@ def completed_sample_indices_by_identity(
                     )
                 ):
                     indices = raw_indices
-                elif isinstance(item.get("_llmeval_sample_index"), int):
-                    indices = [int(item["_llmeval_sample_index"])]
+                elif isinstance(item.get("sample_index"), int):
+                    indices = [int(item["sample_index"])]
                 else:
                     indices = []
                     next_index = 0
@@ -405,7 +415,7 @@ def expand_data_with_resume(
         for sample_index in range(completed, n_samples):
             expanded_item = copy.deepcopy(item)
             if stable_ids:
-                expanded_item["_llmeval_sample_index"] = sample_index
+                expanded_item["sample_index"] = sample_index
             expanded_data.append(expanded_item)
 
     if skipped_items > 0:
@@ -516,7 +526,7 @@ def expand_group_for_sampling(
         for offset in range(sample_count):
             sample_item = item.copy()
             if "doc_id" in item:
-                sample_item["_llmeval_sample_index"] = sample_start + offset
+                sample_item["sample_index"] = sample_start + offset
             sample_items.append(sample_item)
     return sample_items
 

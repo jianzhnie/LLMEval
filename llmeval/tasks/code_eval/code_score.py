@@ -27,7 +27,6 @@ from llmeval.tasks.postprocess import (
     TextFilterPipeline,
     strip_reasoning_wrappers,
 )
-from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
 from llmeval.tasks.results import ScorerResult
 from llmeval.utils.log import init_logger
 
@@ -220,30 +219,22 @@ class CodeScoreResult:
     per_item: list[dict[str, Any]] = field(default_factory=list)
     """Per-item execution records (``task_id``, ``passed``, ``result``, ``stderr``)."""
 
-    provenance: dict[str, Any] = field(default_factory=dict)
-    """Run-level provenance metadata written to the summary cache."""
-
 
 # ===========================================================================
 # Internal helpers
 # ===========================================================================
 
 
-def _failure_code_record(
-    item: dict[str, Any],
-    label_key: str = "answer",
-    response_key: str = "gen",
-) -> dict[str, Any]:
+def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
     """Build a placeholder record for items that could not be scored."""
     return {
         "task_id": item.get("task_id", item.get("_llmeval_group_id", "")),
         "group_id": item.get("_llmeval_group_id", item.get("task_id", "")),
-        "sample_index": item.get("_llmeval_sample_index", 0),
+        "sample_index": item.get("sample_index", 0),
         "passed": False,
         "result": "scoring error",
         "evaluation_status": "failed",
         "stderr": "",
-        **build_sample_provenance(item, label_key=label_key, response_key=response_key),
     }
 
 
@@ -353,14 +344,11 @@ def _process_code_item(
     group_id: str = str(
         item.get("_llmeval_group_id") or item.get("task_id", f"task_{idx}")
     )
-    sample_index: int = int(item.get("_llmeval_sample_index", 0))
+    sample_index: int = int(item.get("sample_index", 0))
     task_id: str = str(item.get("task_id") or group_id)
     prompt: str = str(item.get("prompt", ""))
     test_code: str = str(item.get(label_key, ""))
     prompt_mode: str = _resolve_prompt_mode(item)
-    provenance = build_sample_provenance(
-        item, label_key=label_key, response_key=response_key
-    )
 
     # -- extract model output ---------------------------------------------------
     gen_raw = item.get(response_key)
@@ -381,13 +369,11 @@ def _process_code_item(
     if not gen_str.strip():
         record = _failure(task_id, "failed: empty generation", group_id, sample_index)
         record.update(filter_artifacts)
-        record.update(provenance)
         return idx, record
 
     if not code.strip():
         record = _failure(task_id, "failed: no code extracted", group_id, sample_index)
         record.update(filter_artifacts)
-        record.update(provenance)
         return idx, record
 
     # -- construct and execute --------------------------------------------------
@@ -410,14 +396,12 @@ def _process_code_item(
             task_id, "failed: no executable candidate", group_id, sample_index
         )
         record.update(filter_artifacts)
-        record.update(provenance)
         return idx, record
     exec_result.setdefault("task_id", task_id)
     exec_result.setdefault("group_id", group_id)
     exec_result.setdefault("sample_index", sample_index)
     exec_result["evaluation_status"] = _code_record_status(exec_result)
     exec_result.update(filter_artifacts)
-    exec_result.update(provenance)
     return idx, exec_result
 
 
@@ -529,7 +513,7 @@ def _score_items(
             pbar.update(1)
 
     return [
-        results_by_index.get(i) or _failure_code_record(item, label_key, response_key)
+        results_by_index.get(i) or _failure_code_record(item)
         for i, item in enumerate(eval_dataset)
     ]
 
@@ -565,7 +549,7 @@ def _expand_code_samples(
             sample_item = item.copy()
             sample_item[response_key] = [sample]
             sample_item["_llmeval_group_id"] = group_id
-            sample_item["_llmeval_sample_index"] = sample_idx
+            sample_item["sample_index"] = sample_idx
             expanded.append(sample_item)
     return expanded
 
@@ -610,8 +594,6 @@ def _score_code_task_result(
     timeout: int = 20,
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
     k_values: tuple[int, ...] = (1, 10, 64),
-    task_name: str | None = None,
-    seed: int | None = None,
     allow_unsafe_code: bool = False,
 ) -> CodeScoreResult:
     """Score a code-generation dataset and return task-native details.
@@ -698,13 +680,6 @@ def _score_code_task_result(
         correct=correct,
         problems=problems,
         per_item=records,
-        provenance=build_run_provenance(
-            eval_dataset,
-            task_name=task_name,
-            label_key=label_key,
-            response_key=response_key,
-            seed=seed,
-        ),
     )
     write_cache(result, cache_path)
 
@@ -781,8 +756,6 @@ def score_code_result(
     timeout: int = 20,
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
     k_values: tuple[int, ...] = (1, 10, 64),
-    task_name: str | None = None,
-    seed: int | None = None,
     allow_unsafe_code: bool = False,
 ) -> ScorerResult:
     """Score code and return the registry's structured scorer contract."""
@@ -795,8 +768,6 @@ def score_code_result(
         timeout=timeout,
         exec_timeout=exec_timeout,
         k_values=k_values,
-        task_name=task_name,
-        seed=seed,
         allow_unsafe_code=allow_unsafe_code,
     )
     metrics = dict(result.pass_at_k)
@@ -817,7 +788,6 @@ def score_code_result(
         effective_sample_count=max(result.total - failed_count - timeout_count, 0),
         failed_count=failed_count,
         timeout_count=timeout_count,
-        provenance=result.provenance,
     )
 
 
@@ -830,8 +800,6 @@ def score_code(
     timeout: int = 20,
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
     k_values: tuple[int, ...] = (1, 10, 64),
-    task_name: str | None = None,
-    seed: int | None = None,
     allow_unsafe_code: bool = False,
 ) -> float:
     """Compatibility wrapper returning only the primary Pass@1 metric."""
@@ -844,8 +812,6 @@ def score_code(
         timeout=timeout,
         exec_timeout=exec_timeout,
         k_values=k_values,
-        task_name=task_name,
-        seed=seed,
         allow_unsafe_code=allow_unsafe_code,
     ).metrics["pass@1"]
 
@@ -878,7 +844,6 @@ def write_cache(result: CodeScoreResult, cache_path: str | Path) -> None:
                 "total": result.total,
                 "correct": result.correct,
                 "problems": result.problems,
-                "provenance": result.provenance,
             },
             fh,
             indent=2,

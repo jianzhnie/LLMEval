@@ -93,7 +93,13 @@ def _make_mc_runner(
     runner._few_shot_fmt = None
     runner._file_lock = threading.Lock()
     runner._stats_lock = threading.Lock()
-    runner._stats = {"processed": 0, "failed": 0, "correct": 0, "skipped": 0}
+    runner._stats = {
+        "processed": 0,
+        "failed": 0,
+        "correct": 0,
+        "skipped": 0,
+        "continuation_fallback": 0,
+    }
     return runner
 
 
@@ -118,8 +124,20 @@ def _write_input(path: Path) -> None:
 
 
 class TestMCLoglikelihoodClient:
+    def test_empty_key_is_quiet_for_local_endpoint(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import llmeval.inference.mc as mc_mod
+
+        monkeypatch.setattr(mc_mod.openai, "OpenAI", MagicMock())
+        MCLoglikelihoodClient("http://localhost:8021/v1", "model", api_key="EMPTY")
+
+        assert "Using default 'EMPTY' API key" not in caplog.text
+
     def test_single_request_with_top_logprobs(self) -> None:
-        client = _make_ll_client()
+        client = _make_ll_client(max_retries=3)
         client.client.completions.create.return_value = _fake_top_probs_resp(
             {" A": -3.0, " B": -0.5, " C": -4.2}
         )
@@ -278,7 +296,7 @@ class TestMCLoglikelihoodClient:
         assert result.token_texts == [[" A"]]
 
     def test_continuation_rejects_token_crossing_prompt_boundary(self) -> None:
-        client = _make_ll_client()
+        client = _make_ll_client(max_retries=3)
         choice = MagicMock()
         choice.index = 0
         choice.logprobs.text_offset = [0, 5]
@@ -287,6 +305,7 @@ class TestMCLoglikelihoodClient:
         client.client.completions.create.return_value.choices = [choice]
 
         assert client.get_choices_continuation_logprobs("prompt", [" A"]) == [[]]
+        assert client.client.completions.create.call_count == 1
 
     def test_continuation_rejects_misaligned_token_offsets(self) -> None:
         client = _make_ll_client()
@@ -344,12 +363,18 @@ class TestProcessLoglikelihoodItem:
         runner.client.get_choices_logprobs.return_value = [-5.0, -1.0]
 
         result = runner.process_loglikelihood_item(
-            {"prompt": "q", "choices": ["a", "b"], "gold": 1}
+            {
+                "prompt": "q",
+                "choices": ["a", "b"],
+                "gold": 1,
+                "sample_index": 2,
+            }
         )
 
         assert result["pred"] == 1
         assert result["correct"] is True
         assert result["choice_tokens"] == ["A", "B"]
+        assert result["sample_index"] == 2
 
     def test_auto_falls_back_when_any_continuation_is_incomplete(
         self, tmp_path: Path
@@ -367,6 +392,7 @@ class TestProcessLoglikelihoodItem:
         assert result["logprobs"] == [-0.2, -1.0]
         assert result["loglikelihood_exact"] is False
         assert result["scoring_approximation"] == "first_token_top_logprobs"
+        assert runner._stats["continuation_fallback"] == 1
 
 
 class TestProcessGenerateItem:

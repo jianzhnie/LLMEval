@@ -63,7 +63,9 @@ if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
 
 from llmeval.inference.online import (
     InferenceRunner,
+    _config_for_logging,
 )
+from llmeval.utils.config import OnlineInferArguments
 
 # ── helpers ───────────────────────────────────────────────────────
 
@@ -218,6 +220,36 @@ def _fake_completion(contents: list[str | None]) -> MagicMock:
     return completion
 
 
+def test_empty_task_is_omitted_from_online_config_log(tmp_path: Path) -> None:
+    input_file = tmp_path / "input.jsonl"
+    input_file.write_text('{"prompt": "q"}\n', encoding="utf-8")
+    args = OnlineInferArguments(input_file=str(input_file), task="")
+
+    assert "task" not in _config_for_logging(args)
+
+    args.task = "code_opensource/humaneval"
+    assert _config_for_logging(args)["task"] == "code_opensource/humaneval"
+
+
+def test_empty_system_prompt_type_is_not_warned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import llmeval.inference.online as online_mod
+
+    input_file = tmp_path / "input.jsonl"
+    input_file.write_text('{"prompt": "q"}\n', encoding="utf-8")
+    args = OnlineInferArguments(
+        input_file=str(input_file), system_prompt_type="empty"
+    )
+    monkeypatch.setattr(online_mod, "InferenceClient", MagicMock())
+
+    InferenceRunner(args)
+
+    assert "Unknown system_prompt_type: empty" not in caplog.text
+
+
 class TestGetContent:
     def test_null_content_normalized_to_empty(self) -> None:
         """Reasoning model truncation returns content=None → ""."""
@@ -288,6 +320,19 @@ class TestGetContent:
 
 
 class TestInferenceClientInit:
+    def test_empty_key_is_quiet_for_local_endpoint(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from llmeval.inference import online as online_mod
+        from llmeval.inference.online import InferenceClient
+
+        monkeypatch.setattr(online_mod.openai, "OpenAI", MagicMock())
+        InferenceClient("http://127.0.0.1:8021/v1", 5, api_key="EMPTY")
+
+        assert "Using default 'EMPTY' API key" not in caplog.text
+
     def test_api_key_argument_takes_priority(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

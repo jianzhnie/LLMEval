@@ -152,7 +152,7 @@ class TestExpandDataWithResume:
         )
         assert len(expanded) == 1
         assert expanded[0]["doc_id"] == "q1"
-        assert expanded[0]["_llmeval_sample_index"] == 1
+        assert expanded[0]["sample_index"] == 1
 
     def test_stable_resume_falls_back_to_legacy_prompt_count(self) -> None:
         expanded = expand_data_with_resume(
@@ -164,7 +164,7 @@ class TestExpandDataWithResume:
         )
 
         assert len(expanded) == 1
-        assert expanded[0]["_llmeval_sample_index"] == 1
+        assert expanded[0]["sample_index"] == 1
 
     def test_missing_document_id_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="missing required 'doc_id'"):
@@ -217,7 +217,7 @@ class TestSampleCountHelpers:
         expanded = expand_group_for_sampling(items)
         assert len(expanded) == 2
         assert expanded[0] is not items[0]
-        assert [item["_llmeval_sample_index"] for item in expanded] == [3, 4]
+        assert [item["sample_index"] for item in expanded] == [3, 4]
 
 
 class TestSampleSeed:
@@ -225,13 +225,13 @@ class TestSampleSeed:
         item = {
             "doc_id": "doc:1",
             "prompt": "What is 2+2?",
-            "_llmeval_sample_index": 2,
+            "sample_index": 2,
         }
         assert sample_seed_for_item(123, item) == sample_seed_for_item(123, item)
 
     def test_seed_changes_with_sample_index_and_document_id(self) -> None:
-        item = {"doc_id": "doc:1", "prompt": "q", "_llmeval_sample_index": 0}
-        next_sample = {**item, "_llmeval_sample_index": 1}
+        item = {"doc_id": "doc:1", "prompt": "q", "sample_index": 0}
+        next_sample = {**item, "sample_index": 1}
         other_document = {**item, "doc_id": "doc:2"}
         assert sample_seed_for_item(123, item) != sample_seed_for_item(123, next_sample)
         assert sample_seed_for_item(123, item) != sample_seed_for_item(

@@ -9,11 +9,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from llmeval.cache import ContentAddressedCache
-from llmeval.tasks.provenance import (
-    build_run_provenance,
-    get_git_hash,
-    hash_evaluation_inputs,
-)
 from llmeval.tasks.results import (
     EvaluationResult,
     MetricValue,
@@ -22,6 +17,31 @@ from llmeval.tasks.results import (
 )
 
 StructuredScorer = Callable[..., ScorerResult]
+
+_EVALUATION_RUNTIME_FIELDS = {
+    "accuracy",
+    "evaluation_status",
+    "extracted_answer",
+    "extracted_gold",
+    "fallback_matched",
+    "filter_trace",
+    "filtered_gen",
+    "raw_gen",
+}
+
+
+def _evaluation_cache_inputs(
+    dataset: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Copy stable evaluator inputs without fields added by scoring."""
+    return [
+        {
+            key: value
+            for key, value in item.items()
+            if key not in _EVALUATION_RUNTIME_FIELDS
+        }
+        for item in dataset
+    ]
 
 
 @dataclass(frozen=True)
@@ -61,7 +81,6 @@ class EvaluationContext(PreparationContext):
     force_recompute: bool = False
     read_only_cache: bool = False
     input_key: str = "prompt"
-    extra_provenance: dict[str, Any] | None = None
 
 
 class EvaluationTask(Protocol):
@@ -90,31 +109,6 @@ def _metric(
         confidence_level=context.confidence_level,
         higher_is_better=higher_is_better,
     )
-
-
-def _base_provenance(
-    context: EvaluationContext, task: EvaluationTask
-) -> dict[str, Any]:
-    provenance = build_run_provenance(
-        context.eval_dataset,
-        task_name=context.task_name,
-        input_key=context.input_key,
-        label_key=context.label_key,
-        response_key=context.response_key,
-        seed=context.seed,
-    )
-    provenance.update(
-        {
-            "task_registry_family": task.family,
-            "task_registry_version": task.version,
-            "pipeline_version": task.pipeline_version,
-            "model_name": context.model_name,
-            "model_revision": context.model_revision,
-        }
-    )
-    if context.extra_provenance:
-        provenance.update(context.extra_provenance)
-    return provenance
 
 
 def _build_evaluation_result(
@@ -150,7 +144,6 @@ def _build_evaluation_result(
         skipped_count=scored.skipped_count,
         timeout_count=scored.timeout_count,
         per_item=[dict(item) for item in scored.per_item],
-        provenance={**scored.provenance, **_base_provenance(context, task)},
     )
 
 
@@ -158,7 +151,7 @@ def write_structured_summary(result: EvaluationResult, cache_path: Path) -> None
     """Write the registry result in one schema shared by all task families."""
     summary_path = cache_path.with_suffix(".summary.json")
     summary_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = result.to_dict()
+    payload = result.to_dict(include_per_item=True)
     payload["summary_version"] = 1
     payload["metric_values"] = {
         name: metric.value for name, metric in result.metrics.items()
@@ -205,8 +198,6 @@ class MathTask:
             cache_path=str(context.cache_path),
             max_workers=context.max_workers,
             timeout=context.timeout,
-            task_name=context.task_name,
-            seed=context.seed,
         )
         return _build_evaluation_result(scored, context, self)
 
@@ -258,8 +249,6 @@ class MCTask:
             "cache_path": context.cache_path,
             "max_workers": context.max_workers,
             "timeout": context.timeout,
-            "task_name": context.task_name,
-            "seed": context.seed,
         }
         if not is_loglikelihood:
             kwargs.update(
@@ -268,12 +257,6 @@ class MCTask:
                 aggregation=context.mc_aggregation,
             )
         scored = scorer(**kwargs)
-        scored.provenance.update(
-            {
-                "mc_mode": "loglikelihood" if is_loglikelihood else "generate",
-                "mc_aggregation": context.mc_aggregation,
-            }
-        )
         return _build_evaluation_result(scored, context, self)
 
 
@@ -307,8 +290,6 @@ class CodeTask:
             max_workers=context.max_workers,
             timeout=context.timeout,
             exec_timeout=context.exec_timeout,
-            task_name=context.task_name,
-            seed=context.seed,
             allow_unsafe_code=context.allow_unsafe_code,
         )
         return _build_evaluation_result(scored, context, self)
@@ -381,34 +362,18 @@ def evaluate_registered_task(
             read_only=context.read_only_cache,
             force_recompute=context.force_recompute,
         )
-        run_provenance = build_run_provenance(
-            context.eval_dataset,
-            task_name=context.task_name,
-            input_key=context.input_key,
-            label_key=context.label_key,
-            response_key=context.response_key,
-        )
         payload = {
             "model_name": context.model_name,
             "model_revision": context.model_revision,
             "task_name": context.task_name,
             "task_version": task.version,
-            "dataset_hash": hash_evaluation_inputs(
-                context.eval_dataset, context.response_key
-            ),
-            "prompt_hash": run_provenance.get("prompt_hash"),
-            "evaluation_input_hash": hash_evaluation_inputs(
-                context.eval_dataset, context.response_key
-            ),
-            "git_commit": get_git_hash(),
+            "eval_dataset": _evaluation_cache_inputs(context.eval_dataset),
             "postprocess_version": task.pipeline_version,
             "generation_params": {
                 "label_key": context.label_key,
                 "response_key": context.response_key,
                 "mc_aggregation": context.mc_aggregation,
                 "seed": context.seed,
-                "prompt_hash": run_provenance.get("prompt_hash"),
-                "target_hash": run_provenance.get("target_hash"),
             },
             "evaluation": {
                 "max_workers": context.max_workers,
@@ -419,7 +384,6 @@ def evaluate_registered_task(
                 "bootstrap_samples": context.bootstrap_samples,
                 "confidence_level": context.confidence_level,
             },
-            "sampling_seed": context.seed,
         }
         cache_key = cache.key(payload)
         cached = cache.get(cache_key)
@@ -439,5 +403,5 @@ def evaluate_registered_task(
     write_per_item_results(result, context.cache_path)
     write_structured_summary(result, context.cache_path)
     if cache is not None and cache_key is not None:
-        cache.set(cache_key, result.to_dict())
+        cache.set(cache_key, result.to_dict(include_per_item=True))
     return result

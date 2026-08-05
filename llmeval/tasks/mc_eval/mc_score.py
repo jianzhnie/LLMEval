@@ -53,7 +53,6 @@ from llmeval.tasks.postprocess import (
     TextFilterPipeline,
     strip_reasoning_wrappers,
 )
-from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
 from llmeval.tasks.results import ScorerResult
 from llmeval.utils.log import init_logger
 
@@ -127,7 +126,6 @@ class MCScoreResult:
     correct_norm: int = 0
     correct_bytes: int = 0
     per_item: list[dict[str, Any]] = field(default_factory=list)
-    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 # ===========================================================================
@@ -140,8 +138,6 @@ def score_loglikelihood_result(
     cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
-    task_name: str | None = None,
-    seed: int | None = None,
 ) -> ScorerResult:
     """Score loglikelihood-based MC results and return structured metrics.
 
@@ -180,16 +176,7 @@ def score_loglikelihood_result(
         max_workers=max_workers,
         timeout=timeout,
     )
-    metrics = build_result(
-        records,
-        provenance=build_run_provenance(
-            eval_dataset,
-            task_name=task_name,
-            label_key="gold",
-            response_key="logprobs",
-            seed=seed,
-        ),
-    )
+    metrics = build_result(records)
     write_cache(metrics, cache_path)
     return _to_scorer_result(metrics)
 
@@ -199,8 +186,6 @@ def score_loglikelihood(
     cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
-    task_name: str | None = None,
-    seed: int | None = None,
 ) -> float:
     """Compatibility wrapper returning only the primary ``acc`` metric."""
     return score_loglikelihood_result(
@@ -208,8 +193,6 @@ def score_loglikelihood(
         cache_path,
         max_workers=max_workers,
         timeout=timeout,
-        task_name=task_name,
-        seed=seed,
     ).metrics["acc"]
 
 
@@ -304,8 +287,6 @@ def score_generate_result(
     cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
-    task_name: str | None = None,
-    seed: int | None = None,
     aggregation: str = "first",
 ) -> ScorerResult:
     """Score generation-based MC results and return structured metrics.
@@ -352,17 +333,7 @@ def score_generate_result(
         timeout=timeout,
         aggregation=aggregation,
     )
-    metrics = build_result(
-        records,
-        provenance=build_run_provenance(
-            merged_dataset,
-            task_name=task_name,
-            label_key=label_key,
-            response_key=response_key,
-            seed=seed,
-        ),
-    )
-    metrics.provenance["mc_aggregation"] = aggregation
+    metrics = build_result(records)
     write_cache(metrics, cache_path)
     return _to_scorer_result(metrics)
 
@@ -374,8 +345,6 @@ def score_generate(
     cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
-    task_name: str | None = None,
-    seed: int | None = None,
     aggregation: str = "first",
 ) -> float:
     """Compatibility wrapper returning only the primary ``acc`` metric."""
@@ -386,8 +355,6 @@ def score_generate(
         cache_path,
         max_workers=max_workers,
         timeout=timeout,
-        task_name=task_name,
-        seed=seed,
         aggregation=aggregation,
     ).metrics["acc"]
 
@@ -467,9 +434,7 @@ def score_items(
     for i, item in enumerate(eval_dataset):
         record = results_by_index.get(i)
         if record is None:
-            record = _error_record(
-                item, mode, label_key, response_key, aggregation, "timeout"
-            )
+            record = _error_record(item, mode, label_key, aggregation, "timeout")
         records.append(record)
     return records
 
@@ -478,7 +443,6 @@ def _error_record(
     item: dict[str, Any],
     mode: Literal["loglikelihood", "generate"],
     label_key: str,
-    response_key: str,
     aggregation: str,
     status: str,
 ) -> dict[str, Any]:
@@ -489,15 +453,9 @@ def _error_record(
         except (TypeError, ValueError):
             gold = -1
         pred: int | str = -1
-        provenance = build_sample_provenance(
-            item, label_key="gold", response_key="logprobs"
-        )
     else:
         gold = str(item.get(label_key, "")).strip().upper()
         pred = ""
-        provenance = build_sample_provenance(
-            item, label_key=label_key, response_key=response_key
-        )
     return {
         "gold": gold,
         "pred": pred,
@@ -506,7 +464,6 @@ def _error_record(
         "correct_bytes": False,
         "evaluation_status": status,
         "aggregation": aggregation,
-        **provenance,
     }
 
 
@@ -534,14 +491,10 @@ def process_item(
         return idx, score_generate_item(item, label_key, response_key, aggregation)
     except Exception:
         logger.exception("Scoring worker failed for item %d", idx)
-        return idx, _error_record(
-            item, mode, label_key, response_key, aggregation, "failed"
-        )
+        return idx, _error_record(item, mode, label_key, aggregation, "failed")
 
 
-def build_result(
-    records: list[dict[str, Any]], provenance: dict[str, Any] | None = None
-) -> MCScoreResult:
+def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
     """Aggregate per-item records into :class:`MCScoreResult`.
 
     ``correct_norm`` is only present in loglikelihood records; generate-mode
@@ -590,7 +543,6 @@ def build_result(
         correct_norm=n_correct_norm,
         correct_bytes=n_correct_bytes,
         per_item=records,
-        provenance=provenance or {},
     )
 
 
@@ -655,7 +607,6 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         failed_count=failed_count,
         skipped_count=skipped_count,
         timeout_count=timeout_count,
-        provenance=result.provenance,
     )
 
 
@@ -678,9 +629,6 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
             f"Invalid gold index {item.get('gold')!r} — treating as -1 (always wrong)."
         )
         gold = -1
-    provenance = build_sample_provenance(
-        item, label_key="gold", response_key="logprobs"
-    )
     logprobs: list[float] = item.get("logprobs", [])
     choice_logprobs = item.get("choice_logprobs")
     if isinstance(choice_logprobs, list) and len(choice_logprobs) == len(logprobs):
@@ -708,7 +656,6 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
             "correct_norm": False,
             "correct_bytes": False,
             "evaluation_status": "skipped" if gold < 0 else "failed",
-            **provenance,
         }
 
     # acc — argmax over raw logprobs (ties broken by smallest index).
@@ -766,7 +713,6 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         "correct": is_correct,
         "correct_norm": is_correct_norm,
         "correct_bytes": is_correct_bytes,
-        **provenance,
     }
 
 
@@ -832,10 +778,6 @@ def score_generate_item(
         pred = predictions[0] if predictions else ""
         is_correct = bool(gold) and bool(pred) and pred == gold
 
-    provenance = build_sample_provenance(
-        item, label_key=label_key, response_key=response_key
-    )
-
     return {
         "gold": gold,
         "pred": pred,
@@ -853,7 +795,6 @@ def score_generate_item(
         "sample_correct_count": sum(sample_correct),
         "sample_correct_norm_count": sum(sample_correct),
         "sample_correct_bytes_count": sum(sample_correct),
-        **provenance,
     }
 
 
@@ -953,8 +894,9 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
                 "failed_count": failed_count,
                 "skipped_count": skipped_count,
                 "timeout_count": timeout_count,
-                "aggregation": result.provenance.get("mc_aggregation"),
-                "provenance": result.provenance,
+                "aggregation": (
+                    result.per_item[0].get("aggregation") if result.per_item else None
+                ),
             },
             fh,
             indent=2,

@@ -41,11 +41,6 @@ from llmeval.tasks.mc_eval.mc_score import (
     score_generate_result,
     score_loglikelihood_result,
 )
-from llmeval.tasks.provenance import (
-    annotate_dataset_contamination,
-    build_run_provenance,
-    load_contamination_sources,
-)
 from llmeval.tasks.registry import (
     EvaluationContext,
     EvaluationResult,
@@ -59,7 +54,6 @@ from llmeval.tasks.registry import (
 from llmeval.tasks.results import MetricValue
 from llmeval.utils.config import EvalTaskArguments
 from llmeval.utils.log import init_logger
-from llmeval.utils.reproducibility import seed_everything, seed_provenance
 
 # Initialize logger for the evaluation orchestrator
 logger = init_logger("evaluator")
@@ -115,7 +109,7 @@ def evaluate_task(
         max_workers: Maximum number of parallel workers for processing
         timeout: Maximum time in seconds to wait for each evaluation (default: 20)
         exec_timeout: Per-item code execution timeout in seconds (code tasks only)
-        seed: Random seed recorded in scorer provenance summaries
+        seed: Random seed for bootstrap uncertainty
         mc_aggregation: Generate-mode MC aggregation strategy.
         allow_unsafe_code: Explicit opt-in required for code execution.
 
@@ -202,8 +196,6 @@ def evaluate_task_result(
 ) -> EvaluationResult | None:
     """Evaluate a task through the registry and return all declared metrics."""
     actual_seed = 0 if seed is None else seed
-    seed_state = seed_everything(actual_seed)
-    seed_prov = seed_provenance(seed_state)
     resolved_cache_path = _resolve_cache_path(cache_path, task_name)
     context = EvaluationContext(
         eval_dataset=eval_dataset,
@@ -225,7 +217,6 @@ def evaluate_task_result(
         force_recompute=force_recompute,
         read_only_cache=read_only_cache,
         input_key=input_key,
-        extra_provenance=seed_prov,
     )
     registry = _default_registry()
     try:
@@ -242,17 +233,6 @@ def evaluate_task_result(
                         higher_is_better=spec.higher_is_better,
                     )
                     for spec in task.metric_specs
-                },
-                provenance={
-                    **build_run_provenance(
-                        [],
-                        task_name=task_name,
-                        input_key=input_key,
-                        label_key=label_key,
-                        response_key=response_key,
-                        seed=actual_seed,
-                    ),
-                    **seed_prov,
                 },
             )
             write_per_item_results(result, context.cache_path)
@@ -338,25 +318,6 @@ def main() -> int:
         except (ValueError, TypeError) as e:
             logger.error(f"❌ Error processing data: {e!s}")
             return 1
-
-        if args.contamination_path:
-            try:
-                contamination_sources = load_contamination_sources(
-                    args.contamination_path
-                )
-                annotate_dataset_contamination(
-                    processed_data,
-                    contamination_sources,
-                    input_key=args.input_key,
-                    min_length=args.contamination_min_length,
-                )
-                logger.info(
-                    "Loaded %d contamination reference string(s)",
-                    len(contamination_sources),
-                )
-            except Exception as e:
-                logger.error(f"❌ Error checking contamination: {e!s}", exc_info=True)
-                return 1
 
         # Run evaluation and retain the complete metric result.
         result = evaluate_task_result(

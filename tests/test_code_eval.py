@@ -318,7 +318,6 @@ class TestScoreCode:
             summary = json.loads(summary_path.read_text())
             assert summary["pass_at_1"] == 1.0
             assert summary["correct"] == 2
-            assert summary["provenance"]["schema_version"] == 1
         finally:
             cache_path.unlink(missing_ok=True)
             cache_path.with_suffix(".summary.json").unlink(missing_ok=True)
@@ -405,11 +404,13 @@ class TestScoreCode:
         )
 
         summary = json.loads(cache_path.with_suffix(".summary.json").read_text())
+        records = [json.loads(line) for line in cache_path.read_text().splitlines()]
         assert acc == pytest.approx(0.5)
         assert summary["pass_at_k"]["pass@1"] == 0.5
         assert summary["pass_at_k"]["pass@2"] == 1.0
         assert summary["total"] == 2
         assert summary["problems"] == 1
+        assert [record["sample_index"] for record in records] == [0, 1]
 
     def test_failure_record(self) -> None:
         """_failure_code_record marks every item as failed."""

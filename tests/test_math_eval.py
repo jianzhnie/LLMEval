@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -58,6 +59,26 @@ class TestProcessingStats:
 
 
 class TestProcessAnswers:
+    def test_value_error_fallback_is_marked_without_error_log(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import llmeval.tasks.math_eval.math_score as math_mod
+
+        monkeypatch.setattr(
+            math_mod, "_verify_func", MagicMock(side_effect=ValueError("symbolic"))
+        )
+        monkeypatch.setattr(math_mod, "_math_text_equiv", lambda *_: True)
+
+        result = math_mod.process_answers(
+            (0, _math_item("p - q", ["p - q"]), "answer", "gen")
+        )
+
+        assert result is not None
+        assert result.fallback_matched is True
+        assert not [record for record in caplog.records if record.levelname == "ERROR"]
+
     def test_correct_answer(self) -> None:
         from llmeval.tasks.math_eval.math_score import process_answers
 
@@ -193,7 +214,6 @@ class TestComputeScores:
         assert data[0]["filter_trace"]["pipeline"] == "math_response"
         summary = json.loads((tmp_path / "cache.summary.json").read_text())
         assert summary["accuracy"] == pytest.approx(0.5)
-        assert summary["provenance"]["seed"] is None
         # Cache written as valid JSONL
         lines = cache.read_text(encoding="utf-8").strip().split("\n")
         assert len(lines) == 2

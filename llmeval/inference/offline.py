@@ -34,15 +34,9 @@ from llmeval.inference.common import (
     load_jsonl,
     sample_seed_for_item,
 )
-from llmeval.tasks.provenance import (
-    get_git_hash,
-    hash_evaluation_inputs,
-    hash_json,
-)
 from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
-from llmeval.utils.reproducibility import seed_everything, seed_provenance
 
 # Initialize logger
 logger = init_logger("offline_vllm_infer", logging.INFO)
@@ -75,7 +69,6 @@ class OfflineInferenceRunner:
             ValueError: If arguments are invalid or missing required fields.
         """
         self.args: OfflineInferArguments = args
-        self.reproducibility = seed_provenance(seed_everything(args.seed))
         self._file_lock: threading.Lock = threading.Lock()
         self.llm: LLM | None = None
         self.sampling_params: SamplingParams | None = None
@@ -86,7 +79,6 @@ class OfflineInferenceRunner:
             read_only=getattr(args, "read_only_cache", False),
             rank=getattr(args, "cache_rank", None),
         )
-        self._git_hash = get_git_hash()
         self.system_prompt: str | None = SYSTEM_PROMPT_FACTORY.get(
             args.system_prompt_type
         )
@@ -309,9 +301,6 @@ class OfflineInferenceRunner:
                             )
                             gen_list.append(model_response)
                             result[self.args.response_key] = gen_list
-                            provenance = getattr(self, "reproducibility", None)
-                            if provenance is not None:
-                                result["inference_provenance"] = provenance
                             f.write(json.dumps(result, ensure_ascii=False) + "\n")
                             f.flush()
                         else:
@@ -333,12 +322,7 @@ class OfflineInferenceRunner:
             "backend": "offline_chat",
             "model_name": self.args.model_name_or_path,
             "model_revision": getattr(self.args, "model_revision", None),
-            "task_name": item.get("task", getattr(self.args, "task", None)),
-            "task_version": item.get("task_version"),
-            "dataset_hash": hash_evaluation_inputs(
-                [item], getattr(self.args, "response_key", "gen")
-            ),
-            "prompt_hash": hash_json(messages),
+            "messages": messages,
             "generation_params": {
                 "max_tokens": self.args.max_tokens,
                 "temperature": self.args.temperature,
@@ -351,9 +335,8 @@ class OfflineInferenceRunner:
             },
             "sampling_seed": sample_seed_for_item(self.args.seed, item),
             "postprocess_version": "offline_chat_v1",
-            "git_commit": getattr(self, "_git_hash", None),
             "doc_id": item.get("doc_id"),
-            "sample_index": item.get("_llmeval_sample_index"),
+            "sample_index": item.get("sample_index"),
         }
         return cache.key(payload)
 

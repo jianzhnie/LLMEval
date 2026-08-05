@@ -58,7 +58,8 @@ class DataArguments:
         input_file (str): Path to the input JSONL file containing prompts.
         cache_dir (str): Path to the directory for caching models and data.
         output_file (str): Path to the output JSONL file to save results.
-        task (str): Name of the evaluation task (e.g., 'aime24').
+        task (str): Optional evaluation task name. Callers should pass the
+            actual benchmark when task-specific provenance is needed.
         batch_size (int): The number of samples to process in each batch.
     """
 
@@ -73,7 +74,7 @@ class DataArguments:
         default="output.jsonl", metadata={"help": "Output JSONL file to save results."}
     )
     task: str = field(
-        default="aime24", metadata={"help": "Name of the evaluation task."}
+        default="", metadata={"help": "Optional name of the evaluation task."}
     )
     batch_size: int = field(
         default=128, metadata={"help": "Batch size for data loading."}
@@ -298,7 +299,7 @@ class VLLMEngineArguments:
     )
     model_revision: str | None = field(
         default=None,
-        metadata={"help": "Optional model revision used for provenance and caching."},
+        metadata={"help": "Optional model revision used for cache keys."},
     )
     trust_remote_code: bool = field(
         default=True, metadata={"help": "Whether to trust remote code."}
@@ -526,7 +527,7 @@ class OnlineInferArguments(
     seed: int = field(default=0, metadata={"help": "Generation seed sent to the API."})
     model_revision: str | None = field(
         default=None,
-        metadata={"help": "Optional served model revision used in cache provenance."},
+        metadata={"help": "Optional served model revision used in cache keys."},
     )
     content_cache_dir: str = field(
         default="",
@@ -693,7 +694,7 @@ class MCInferConfig:
     )
     model_revision: str | None = field(
         default=None,
-        metadata={"help": "Optional served model revision used in cache provenance."},
+        metadata={"help": "Optional served model revision used in cache keys."},
     )
     mode: str = field(
         default="loglikelihood",
@@ -897,17 +898,7 @@ class EvalTaskArguments:
         },
     )
     seed: int = field(
-        default=0, metadata={"help": "Random seed recorded in run provenance."}
-    )
-    contamination_path: str = field(
-        default="",
-        metadata={
-            "help": "Optional local JSONL/text file used to flag exact prompt contamination."
-        },
-    )
-    contamination_min_length: int = field(
-        default=32,
-        metadata={"help": "Minimum normalized prompt length for contamination checks."},
+        default=0, metadata={"help": "Random seed for bootstrap uncertainty."}
     )
     content_cache_dir: str = field(
         default="",
@@ -927,10 +918,10 @@ class EvalTaskArguments:
         default=0.95, metadata={"help": "Bootstrap confidence level."}
     )
     model_name: str = field(
-        default="", metadata={"help": "Optional model identifier for cache provenance."}
+        default="", metadata={"help": "Optional model identifier for cache keys."}
     )
     model_revision: str = field(
-        default="", metadata={"help": "Optional model revision for cache provenance."}
+        default="", metadata={"help": "Optional model revision for cache keys."}
     )
 
     def __post_init__(self) -> None:
@@ -964,11 +955,6 @@ class EvalTaskArguments:
                 "mc_aggregation must be one of ('first', 'majority_vote', "
                 f"'any_correct', 'per_sample'), got: {self.mc_aggregation!r}"
             )
-        if self.contamination_min_length <= 0:
-            raise ValueError(
-                "contamination_min_length must be positive, "
-                f"got {self.contamination_min_length}"
-            )
         if self.bootstrap_samples < 0:
             raise ValueError(
                 f"bootstrap_samples must be non-negative, got {self.bootstrap_samples}"
@@ -976,8 +962,4 @@ class EvalTaskArguments:
         if not 0.0 < self.confidence_level < 1.0:
             raise ValueError(
                 f"confidence_level must be between 0 and 1, got {self.confidence_level}"
-            )
-        if self.contamination_path and not Path(self.contamination_path).exists():
-            raise ValueError(
-                f"contamination_path {self.contamination_path} does not exist"
             )

@@ -1,9 +1,8 @@
-"""Regression tests for P1 registry, reproducibility, metrics, and caches."""
+"""Regression tests for P1 registry, metrics, and caches."""
 
 from __future__ import annotations
 
 import json
-import random
 import subprocess
 import sys
 from pathlib import Path
@@ -19,13 +18,33 @@ from llmeval.tasks.registry import (
     MCTask,
     TaskRegistry,
     evaluate_registered_task,
+    write_structured_summary,
 )
 from llmeval.tasks.results import (
+    EvaluationResult,
+    MetricValue,
     ScorerResult,
     aggregate_metric_values,
     metric_from_samples,
 )
-from llmeval.utils.reproducibility import seed_everything, seed_provenance
+
+
+def test_evaluation_result_default_serialization_is_compact(tmp_path: Path) -> None:
+    result = EvaluationResult(
+        task_name="mc_opensource/mmlu",
+        task_version="mc_v1",
+        metrics={"acc": MetricValue(1.0, 1)},
+        sample_count=1,
+        effective_sample_count=1,
+        per_item=[{"prompt": "large generated content"}],
+    )
+
+    assert "per_item" not in result.to_dict()
+    assert result.to_dict(include_per_item=True)["per_item"] == result.per_item
+
+    write_structured_summary(result, tmp_path / "score.jsonl")
+    summary = json.loads((tmp_path / "score.summary.json").read_text())
+    assert summary["per_item"] == result.per_item
 
 
 def test_cache_tracks_hits_misses_corruption_and_lifecycle(tmp_path: Path) -> None:
@@ -160,16 +179,6 @@ def test_bootstrap_and_aggregation_are_deterministic() -> None:
     assert aggregate_metric_values([first], mode="macro").value == pytest.approx(0.5)
 
 
-def test_seed_everything_does_not_change_seed_contract() -> None:
-    state = seed_everything(123)
-    first = random.random()
-    seed_everything(123)
-    assert random.random() == first
-    assert state.seed == state.python_seed == 123
-    provenance = seed_provenance(state)
-    assert provenance["fewshot_seed"] == provenance["generation_seed"] == 123
-
-
 def test_few_shot_sampling_is_per_document_and_seeded(tmp_path: Path) -> None:
     source = tmp_path / "dev.jsonl"
     examples = [
@@ -184,7 +193,7 @@ def test_few_shot_sampling_is_per_document_and_seeded(tmp_path: Path) -> None:
         "\n".join(json.dumps(example) for example in examples), encoding="utf-8"
     )
     formatter = FewShotFormatter(2, str(source), seed=9)
-    formatter.load(str(source))
+    formatter.load()
     first = formatter.get_prefix("test prompt", "test:0")
     repeat = formatter.get_prefix("test prompt", "test:0")
     other = formatter.get_prefix("test prompt", "test:1")
@@ -232,7 +241,7 @@ def test_evaluation_cache_avoids_recomputing_registered_task(tmp_path: Path) -> 
 
     def context() -> EvaluationContext:
         return EvaluationContext(
-            eval_dataset=dataset,
+            eval_dataset=[dict(item) for item in dataset],
             task_name="math_opensource/test",
             label_key="answer",
             response_key="gen",

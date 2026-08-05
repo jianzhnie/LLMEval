@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterator
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +27,6 @@ from llmeval.tasks.postprocess import (
     DEFAULT_FILTER_REGISTRY,
     TextFilterPipeline,
 )
-from llmeval.tasks.provenance import build_run_provenance, build_sample_provenance
 from llmeval.tasks.results import ScorerResult
 from llmeval.utils.log import init_logger
 
@@ -160,6 +160,23 @@ class ProcessingStats:
         return (self.error / self.total * 100) if self.total > 0 else 0.0
 
 
+@dataclass(frozen=True)
+class MathAnswerResult:
+    """Worker result with a non-breaking marker for successful fallback matching."""
+
+    index: int
+    grade: float
+    predicted: str | None
+    gold: str | None
+    fallback_matched: bool = False
+
+    def __iter__(self) -> Iterator[int | float | str | None]:
+        yield self.index
+        yield self.grade
+        yield self.predicted
+        yield self.gold
+
+
 def _last_boxed_only_string(text: str) -> str:
     """Return the last boxed/fboxed expression from a string."""
     idx = text.rfind("\\boxed")
@@ -272,7 +289,7 @@ def _math_text_equiv(gold_text: Any, pred_text: Any) -> bool:
 
 def process_answers(
     args: tuple[int, dict[str, Any], str, str],
-) -> tuple[int, float, str | None, str | None] | None:
+) -> tuple[int, float, str | None, str | None] | MathAnswerResult | None:
     """
     Process a single model output by extracting and comparing with ground truth.
 
@@ -332,11 +349,15 @@ def process_answers(
         grade, extracted_answers = _verify_func([gold_answer_text], [generated_text])
 
         if not extracted_answers:
-            logger.warning(
-                f"⚠️ No answers could be extracted for job {index}; using fallback normalization"
-            )
             if _math_text_equiv(gold_answer_text, generated_text):
-                return index, 1.0, generated_text, gold_answer_text
+                logger.debug("Fallback normalization matched job %d", index)
+                return MathAnswerResult(
+                    index, 1.0, generated_text, gold_answer_text, fallback_matched=True
+                )
+            logger.warning(
+                "No answers could be extracted for job %d; fallback did not match",
+                index,
+            )
             return index, 0.0, None, None
 
         # Extract answers with validation
@@ -360,17 +381,23 @@ def process_answers(
         logger.warning(f"⏰ [Timeout] Job {index} timed out")
         return index, 0.0, "Timeout", "Timeout"
     except ValueError as ve:
-        logger.error(f"❌ [Value Error] Invalid input format for job {index}: {ve}")
         if _math_text_equiv(gold_answer_text, generated_text):
-            return index, 1.0, generated_text, gold_answer_text
+            logger.debug("Fallback normalization matched job %d after: %s", index, ve)
+            return MathAnswerResult(
+                index, 1.0, generated_text, gold_answer_text, fallback_matched=True
+            )
+        logger.warning("Math verification value error for job %d: %s", index, ve)
         return index, 0.0, f"Format Error: {ve}", None
     except Exception as e:
+        if _math_text_equiv(gold_answer_text, generated_text):
+            logger.debug("Fallback normalization matched job %d after %s", index, e)
+            return MathAnswerResult(
+                index, 1.0, generated_text, gold_answer_text, fallback_matched=True
+            )
         logger.error(
             f"❌ [Error] An unexpected error occurred for job {index}: {e}",
             exc_info=True,
         )
-        if _math_text_equiv(gold_answer_text, generated_text):
-            return index, 1.0, generated_text, gold_answer_text
         return index, 0.0, f"Error: {e}", f"Error: {e}"
 
 
@@ -413,8 +440,6 @@ def compute_scores(
     cache_path: str,
     max_workers: int,
     timeout: int,
-    task_name: str | None = None,
-    seed: int | None = None,
 ) -> float:
     """
     Computes accuracy scores for a batch of mathematical evaluation jobs using parallel processing.
@@ -498,6 +523,7 @@ def compute_scores(
 
             pbar.update(1)
             if result is not None:
+                fallback_matched = bool(getattr(result, "fallback_matched", False))
                 idx, is_correct, extracted_answer, extracted_gold = result
                 status = _math_record_status(
                     eval_dataset[idx], label_key, response_key, extracted_answer
@@ -510,12 +536,8 @@ def compute_scores(
                         "extracted_gold": extracted_gold,
                         "extracted_answer": extracted_answer,
                         "evaluation_status": status,
+                        "fallback_matched": fallback_matched,
                         **_filter_artifacts(eval_dataset[idx].get(response_key)),
-                        **build_sample_provenance(
-                            eval_dataset[idx],
-                            label_key=label_key,
-                            response_key=response_key,
-                        ),
                     }
                 )
                 processed_indices.add(idx)
@@ -542,11 +564,6 @@ def compute_scores(
                     "extracted_answer": "Timeout",
                     "evaluation_status": "timeout",
                     **_filter_artifacts(eval_dataset[idx].get(response_key)),
-                    **build_sample_provenance(
-                        eval_dataset[idx],
-                        label_key=label_key,
-                        response_key=response_key,
-                    ),
                 }
             )
             stats.timeout += 1
@@ -591,13 +608,6 @@ def compute_scores(
     save_summary(
         accuracy=accuracy,
         metadata=metadata,
-        provenance=build_run_provenance(
-            eval_dataset,
-            task_name=task_name,
-            label_key=label_key,
-            response_key=response_key,
-            seed=seed,
-        ),
         cache_path=cache_path,
     )
     logger.info(f"Final Accuracy: {accuracy:.4f}")
@@ -611,8 +621,6 @@ def compute_score_result(
     cache_path: str,
     max_workers: int,
     timeout: int,
-    task_name: str | None = None,
-    seed: int | None = None,
 ) -> ScorerResult:
     """Return math scores through the registry's structured scorer contract.
 
@@ -628,8 +636,6 @@ def compute_score_result(
         cache_path=cache_path,
         max_workers=max_workers,
         timeout=timeout,
-        task_name=task_name,
-        seed=seed,
     )
     observations = [
         float(item.get("accuracy", 0.0))
@@ -654,13 +660,6 @@ def compute_score_result(
         failed_count=failed_count,
         skipped_count=skipped_count,
         timeout_count=timeout_count,
-        provenance=build_run_provenance(
-            eval_dataset,
-            task_name=task_name,
-            label_key=label_key,
-            response_key=response_key,
-            seed=seed,
-        ),
     )
 
 
@@ -702,10 +701,9 @@ def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:
 def save_summary(
     accuracy: float,
     metadata: dict[str, Any],
-    provenance: dict[str, Any],
     cache_path: str,
 ) -> None:
-    """Save aggregated math metrics and provenance next to the JSONL cache."""
+    """Save aggregated math metrics next to the JSONL cache."""
     summary_path = Path(cache_path).with_suffix(".summary.json")
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     with open(summary_path, "w", encoding="utf-8") as f:
@@ -713,7 +711,6 @@ def save_summary(
             {
                 "accuracy": round(accuracy, 6),
                 **metadata,
-                "provenance": provenance,
             },
             f,
             ensure_ascii=False,

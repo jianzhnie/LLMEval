@@ -29,10 +29,8 @@ from vllm.outputs import RequestOutput
 
 from llmeval.cache import ContentAddressedCache, build_cache, log_cache_stats
 from llmeval.inference.common import load_jsonl, sample_seed_for_item
-from llmeval.tasks.provenance import get_git_hash, hash_evaluation_inputs, hash_string
 from llmeval.utils.config import VerifierInferArguments
 from llmeval.utils.log import init_logger
-from llmeval.utils.reproducibility import seed_everything, seed_provenance
 from llmeval.utils.verifier_prompts import VERIFY_PROMPT_FACTORY
 
 # Initialize logger
@@ -237,7 +235,6 @@ class VerifierOfflineInferenceRunner:
             ValueError: If required arguments are invalid.
         """
         self.args: VerifierInferArguments = args
-        self.reproducibility = seed_provenance(seed_everything(args.seed))
         self._file_lock: threading.Lock = threading.Lock()
         self.llm: LLM | None = None
         self.tokenizer: AutoTokenizer | None = None
@@ -249,7 +246,6 @@ class VerifierOfflineInferenceRunner:
             read_only=getattr(args, "read_only_cache", False),
             rank=getattr(args, "cache_rank", None),
         )
-        self._git_hash = get_git_hash()
         self.verifier_prompt: str | None = VERIFY_PROMPT_FACTORY.get(
             args.verifier_prompt_type
         )
@@ -549,12 +545,7 @@ class VerifierOfflineInferenceRunner:
             "backend": "verifier_generate",
             "model_name": self.args.model_name_or_path,
             "model_revision": getattr(self.args, "model_revision", None),
-            "task_name": item.get("task", getattr(self.args, "task", None)),
-            "task_version": item.get("task_version"),
-            "dataset_hash": hash_evaluation_inputs(
-                [item], getattr(self.args, "response_key", "gen")
-            ),
-            "prompt_hash": hash_string(rendered_prompt),
+            "rendered_prompt": rendered_prompt,
             "generation_params": {
                 "max_tokens": self.args.max_tokens,
                 "temperature": self.args.temperature,
@@ -566,9 +557,8 @@ class VerifierOfflineInferenceRunner:
             },
             "sampling_seed": sample_seed_for_item(self.args.seed, item),
             "postprocess_version": f"verifier:{self.args.verifier_prompt_type}:v1",
-            "git_commit": getattr(self, "_git_hash", None),
             "doc_id": item.get("doc_id"),
-            "sample_index": item.get("_llmeval_sample_index"),
+            "sample_index": item.get("sample_index"),
         }
         return cache.key(payload)
 
@@ -610,10 +600,6 @@ class VerifierOfflineInferenceRunner:
         result = original_item.copy()
         result[_VERIFIER_RESUME_KEY] = self._resume_id(original_item)
         result["Verifier_response"] = model_response
-        # getattr: tests construct the runner via __new__ without __init__.
-        provenance = getattr(self, "reproducibility", None)
-        if provenance is not None:
-            result["inference_provenance"] = provenance
 
         # Optionally strip original large fields to reduce output size
         if not self.args.keep_origin_data:
@@ -676,7 +662,7 @@ class VerifierOfflineInferenceRunner:
                         # judgment parser could classify the model response.
                         if prompt_key is not None and item.get("Verifier_response"):
                             key = str(prompt_key)
-                            raw_index = item.get("_llmeval_sample_index")
+                            raw_index = item.get("sample_index")
                             if isinstance(raw_index, int) and raw_index >= 0:
                                 sample_index = raw_index
                             else:
@@ -742,7 +728,7 @@ class VerifierOfflineInferenceRunner:
                     continue
                 expanded_item = copy.deepcopy(item)
                 expanded_item[_VERIFIER_RESUME_KEY] = resume_id
-                expanded_item["_llmeval_sample_index"] = sample_index
+                expanded_item["sample_index"] = sample_index
                 expanded_data.append(expanded_item)
         if skipped_items > 0:
             logger.warning(f"Skipped {skipped_items} non-dict item(s)")

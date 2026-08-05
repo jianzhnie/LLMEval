@@ -74,7 +74,6 @@ class EvaluationResult:
     skipped_count: int = 0
     timeout_count: int = 0
     per_item: list[dict[str, Any]] = field(default_factory=list)
-    provenance: dict[str, Any] = field(default_factory=dict)
     cache_key: str | None = None
 
     @property
@@ -84,9 +83,9 @@ class EvaluationResult:
             return 0.0
         return next(iter(self.metrics.values())).value
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the complete result for the content-addressed cache."""
-        return {
+    def to_dict(self, *, include_per_item: bool = False) -> dict[str, Any]:
+        """Serialize a compact result, optionally including detailed records."""
+        payload: dict[str, Any] = {
             "schema_version": 1,
             "task_name": self.task_name,
             "task_version": self.task_version,
@@ -98,10 +97,11 @@ class EvaluationResult:
             "failed_count": self.failed_count,
             "skipped_count": self.skipped_count,
             "timeout_count": self.timeout_count,
-            "per_item": self.per_item,
-            "provenance": self.provenance,
             "cache_key": self.cache_key,
         }
+        if include_per_item:
+            payload["per_item"] = self.per_item
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvaluationResult:
@@ -130,11 +130,6 @@ class EvaluationResult:
                 if isinstance(data.get("per_item"), list)
                 else []
             ),
-            provenance=(
-                dict(data["provenance"])
-                if isinstance(data.get("provenance"), dict)
-                else {}
-            ),
             cache_key=(str(data["cache_key"]) if data.get("cache_key") else None),
         )
 
@@ -157,7 +152,6 @@ class ScorerResult:
     failed_count: int = 0
     skipped_count: int = 0
     timeout_count: int = 0
-    provenance: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if any(not math.isfinite(float(value)) for value in self.metrics.values()):

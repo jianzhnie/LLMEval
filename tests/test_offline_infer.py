@@ -111,8 +111,8 @@ class TestOfflineInferenceRunner:
             skip_special_tokens=False,
         )
         items = [
-            {"doc_id": "doc:1", "prompt": "q", "_llmeval_sample_index": 0},
-            {"doc_id": "doc:1", "prompt": "q", "_llmeval_sample_index": 1},
+            {"doc_id": "doc:1", "prompt": "q", "sample_index": 0},
+            {"doc_id": "doc:1", "prompt": "q", "sample_index": 1},
         ]
 
         params = runner._sampling_params_for_items(items)

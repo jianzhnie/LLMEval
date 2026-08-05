@@ -233,8 +233,8 @@ class TestVerifierResume:
         runner.args.do_sample = False
         runner.args.skip_special_tokens = False
         items = [
-            {"doc_id": "doc:1", "prompt": "q", "_llmeval_sample_index": 0},
-            {"doc_id": "doc:1", "prompt": "q", "_llmeval_sample_index": 1},
+            {"doc_id": "doc:1", "prompt": "q", "sample_index": 0},
+            {"doc_id": "doc:1", "prompt": "q", "sample_index": 1},
         ]
 
         runner._sampling_params_for_items(items)
@@ -294,7 +294,7 @@ class TestVerifierResume:
         rows = []
         for index in (0, 2):
             row = runner._prepare_result_item(item, f"response-{index}")
-            row["_llmeval_sample_index"] = index
+            row["sample_index"] = index
             rows.append(row)
         Path(runner.args.output_file).write_text(
             "".join(json.dumps(row) + "\n" for row in rows)
@@ -303,7 +303,7 @@ class TestVerifierResume:
         remaining = runner.load_data()
 
         assert len(remaining) == 1
-        assert remaining[0]["_llmeval_sample_index"] == 1
+        assert remaining[0]["sample_index"] == 1
 
     def test_verifier_content_cache_reuses_raw_response(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)

@@ -100,7 +100,6 @@ class TestScoreLoglikelihood:
             assert s["acc"] == 1.0
             assert s["acc_norm"] == 1.0
             assert s["acc_bytes"] == 1.0
-            assert s["provenance"]["task_name"] is None
         finally:
             Path(cache).unlink(missing_ok=True)
             Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
@@ -311,8 +310,8 @@ class TestFewShotFormatter:
 
         tmp = self._make_examples(10)
         try:
-            fmt = FewShotFormatter(n_shot=3, seed=42)
-            fmt.load(tmp)
+            fmt = FewShotFormatter(n_shot=3, few_shot_file=tmp, seed=42)
+            fmt.load()
             prefix = fmt.get_prefix("some other prompt")
             # Should contain 3 examples separated by \n\n
             assert prefix.count("\n\n") >= 3
@@ -326,8 +325,8 @@ class TestFewShotFormatter:
 
         tmp = self._make_examples(10)
         try:
-            fmt = FewShotFormatter(n_shot=3, seed=42)
-            fmt.load(tmp)
+            fmt = FewShotFormatter(n_shot=3, few_shot_file=tmp, seed=42)
+            fmt.load()
             # Get the raw prompt from one of the few-shot pool
             test_prompt = fmt._few_shot_pool[0]["prompt"]
             prefix_with_dedup = fmt.get_prefix(test_prompt)
@@ -347,8 +346,8 @@ class TestFewShotFormatter:
 
         tmp = self._make_examples(3)
         try:
-            fmt = FewShotFormatter(n_shot=10)
-            fmt.load(tmp)
+            fmt = FewShotFormatter(n_shot=10, few_shot_file=tmp)
+            fmt.load()
             # Should warn and return empty
             assert fmt.get_prefix("test") == ""
         finally:
@@ -450,7 +449,13 @@ def _make_mc_runner(tmp_path: Path, mode: str = "loglikelihood", max_retries: in
     runner._few_shot_fmt = None
     runner._file_lock = _threading.Lock()
     runner._stats_lock = _threading.Lock()
-    runner._stats = {"processed": 0, "failed": 0, "correct": 0, "skipped": 0}
+    runner._stats = {
+        "processed": 0,
+        "failed": 0,
+        "correct": 0,
+        "skipped": 0,
+        "continuation_fallback": 0,
+    }
     return runner
 
 

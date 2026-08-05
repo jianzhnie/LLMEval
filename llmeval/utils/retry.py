@@ -123,7 +123,12 @@ def should_retry(exc: Exception, attempt: int, max_retries: int) -> bool | None:
     return True
 
 
-def call_with_retry(fn: Callable[[], T], max_retries: int) -> T | None:
+def call_with_retry(
+    fn: Callable[[], T],
+    max_retries: int,
+    *,
+    fail_fast_exceptions: tuple[type[BaseException], ...] = (),
+) -> T | None:
     """Run *fn* under the shared retry policy (see :func:`should_retry`).
 
     This is the single attempt loop shared by the online and MC clients; the
@@ -143,6 +148,8 @@ def call_with_retry(fn: Callable[[], T], max_retries: int) -> T | None:
         try:
             return fn()
         except Exception as e:
+            if isinstance(e, fail_fast_exceptions):
+                raise
             if should_retry(e, attempt, max_retries) is None:
                 return None  # context-length rejection → empty result
     return None  # unreachable: should_retry raises once retries are exhausted

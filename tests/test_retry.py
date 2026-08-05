@@ -147,6 +147,15 @@ class TestShouldRetry:
 
 
 class TestCallWithRetry:
+    def test_fail_fast_exception_is_not_retried(self) -> None:
+        class AlignmentError(ValueError):
+            pass
+
+        fn = MagicMock(side_effect=AlignmentError("token boundary"))
+        with pytest.raises(AlignmentError):
+            call_with_retry(fn, 3, fail_fast_exceptions=(AlignmentError,))
+        assert fn.call_count == 1
+
     def test_success_first_attempt(self) -> None:
         fn = MagicMock(return_value="ok")
         assert call_with_retry(fn, 3) == "ok"
