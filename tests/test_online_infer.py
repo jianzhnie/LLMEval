@@ -240,9 +240,7 @@ def test_empty_system_prompt_type_is_not_warned(
 
     input_file = tmp_path / "input.jsonl"
     input_file.write_text('{"prompt": "q"}\n', encoding="utf-8")
-    args = OnlineInferArguments(
-        input_file=str(input_file), system_prompt_type="empty"
-    )
+    args = OnlineInferArguments(input_file=str(input_file), system_prompt_type="empty")
     monkeypatch.setattr(online_mod, "InferenceClient", MagicMock())
 
     InferenceRunner(args)

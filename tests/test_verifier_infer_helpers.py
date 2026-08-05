@@ -197,7 +197,7 @@ class TestVerifierResume:
         args.output_file = str(tmp_path / "verifier.jsonl")
         args.input_file = str(tmp_path / "input.jsonl")
         args.n_samples = 1
-        args.verifier_prompt_type = "fdd_prompt_cursor"
+        args.verifier_prompt_type = "compassverify_prompt"
         args.model_name_or_path = "verifier-model"
         args.model_revision = "revision-1"
         args.task = "math_opensource/test"
@@ -210,7 +210,6 @@ class TestVerifierResume:
         runner.args = args
         runner._file_lock = threading.Lock()
         runner.cache = None
-        runner._git_hash = "test-git"
         runner.verifier_prompt = "{question}\n{gold_answer}\n{llm_response}"
         runner.llm = None
         runner.tokenizer = None

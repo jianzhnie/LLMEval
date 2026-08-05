@@ -596,14 +596,12 @@ class VerifierInferArguments(
     """
 
     verifier_prompt_type: str = field(
-        default="fdd_prompt_cursor",
+        default="compassverify_prompt",
         metadata={
             "help": (
                 "The type of verifier prompt to use. "
                 "Valid options: compassverify_prompt, compassverify_prompt_zh, "
-                "compassverify_cot_prompt, compassverify_cot_prompt_zh, "
-                "fdd_prompt_cursor, fdd_prompt, "
-                "fdd_verify_prompt, fdd_verify_prompt_zh"
+                "compassverify_cot_prompt, compassverify_cot_prompt_zh"
             )
         },
     )

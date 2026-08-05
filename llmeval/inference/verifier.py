@@ -186,14 +186,10 @@ def process_judgment_cursor(judgment_str: str) -> str:
 # Map verifier prompt types to their judgment extraction functions.
 # When adding a new prompt type to VERIFY_PROMPT_FACTORY, add its entry here too.
 JUDGMENT_EXTRACTOR: dict[str, Callable[[str], str]] = {
-    "fdd_prompt_cursor": process_judgment_cursor,
-    "fdd_prompt": process_judgment_cursor,
     "compassverify_prompt": process_judgment,
     "compassverify_prompt_zh": process_judgment,
     "compassverify_cot_prompt": process_judgment,
     "compassverify_cot_prompt_zh": process_judgment,
-    "fdd_verify_prompt": process_judgment_cursor,
-    "fdd_verify_prompt_zh": process_judgment_cursor,
 }
 
 # Fail fast at import time if a prompt type was added to VERIFY_PROMPT_FACTORY
