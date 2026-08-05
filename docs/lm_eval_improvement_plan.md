@@ -184,6 +184,7 @@ metrics:
 2. 保留命令行参数覆盖配置文件的能力，并明确覆盖优先级。
 3. 配置加载时只做 schema 和类型校验，通用参数校验继续放在 config 中，不在 scorer 重复实现。
 4. 将配置文件 hash 写入 provenance 和 cache key。
+5. 将数据准备 schema 版本纳入 `task_version` 或 dataset provenance。MC 数据已经历过一次字段语义变更（`choices` 从答案字母改为选项全文，字母移入 `choice_tokens`）；此类变更应使相关缓存失效，而不是依赖下游 fallback 兼容。
 
 ### 6.3 验收标准
 
@@ -258,7 +259,7 @@ class ModelBackend(Protocol):
 
 ### 9.1 当前缺口
 
-- code registry adapter 把正常错误答案（`passed=False`）计入 `failed_count`，混淆模型错误与执行基础设施失败（超时、沙箱错误）。
+- code registry adapter（`registry.py` 的 `CodeTask.score`）把正常错误答案（`passed=False`）计入 `failed_count`，混淆模型错误与执行基础设施失败（超时、沙箱错误）。
 - code Pass@1 的 uncertainty 使用 sample-level observation，而 legacy Pass@k 是 problem-level，两者口径不一致。
 - 空数据集在 `evaluate_task()` 返回 `None` 与结构化结果之间的约定不统一。
 - math/MC/code 的空数据、失败、跳过、超时 denominator 规则尚未统一。
@@ -374,14 +375,15 @@ git_commit
 
 #### MC 任务
 
-- 单 token A-D 选项
+以下已由 `tests/test_mc_harness_parity.py` 通过本地 harness oracle 覆盖：单/多 token 选项、中文选项、context/continuation 空白边界、`acc` / `acc_norm` / `acc_bytes` 聚合。
+
+仍需补充的 fixture：
+
 - A-J 选项
-- 多 token 英文选项
-- 中文选项
-- 选项长度不同的 `acc_norm`
 - 目标 token 不在 top-k
-- 空响应和请求失败
+- 空响应和请求失败的 denominator
 - 多目标答案
+- harness greedy `exact_match` 语义（LLMEval 当前的 `exact_match` 是 `acc` 别名，见第 3 节）
 
 #### 代码任务
 
@@ -392,7 +394,14 @@ git_commit
 - 多个生成样本
 - 超时、语法错误、运行时错误和测试失败
 
-### 12.3 验收标准
+### 12.3 剩余工作
+
+1. 复用 MC oracle 的模式，为数学任务建立 harness oracle fixture（直接调用 harness 的 math 处理链路比较 per-item 结果）。
+2. 为代码任务确定 oracle 策略：harness 的 humaneval/mbpp 评测与本地沙箱执行环境对齐后比较 pass@1。
+3. 补齐上述 MC 缺失 fixture。
+4. 将 parity suite 和现有回归测试接入 CI——仓库当前没有任何 CI 配置（无 `.github/workflows`），需要先建立运行 `pytest` + `ruff` + `mypy` 的最小工作流。
+
+### 12.4 验收标准
 
 - golden fixture 的 per-item prediction 一致。
 - aggregate metric 一致，或每个差异都有明确文档说明。
@@ -511,11 +520,11 @@ MetricAggregator -> EvaluationResult
 | 5. Task Registry 收口 | 部分完成 | config whitelist；legacy scorer 回读 JSONL/summary，无统一 scorer contract |
 | 6. TaskConfig/YAML | 未完成 | schema、覆盖优先级、config hash、provenance/cache key 接入 |
 | 7. 统一模型请求接口 | 未完成 | 无统一 `ModelBackend` 与 typed Request/Result |
-| 8. 种子与复现 | 部分完成 | offline/verifier 未接入；few-shot provenance 和端到端证据不足；few-shot 不足时静默降级 |
+| 8. 种子与复现 | 部分完成 | `--seed` 已在 config 定义但未接入 offline/verifier 的 `SamplingParams`；few-shot provenance 和端到端证据不足；few-shot 不足时静默降级 |
 | 9. 指标与不确定性 | 部分完成 | code 失败分类与 problem-level uncertainty；三类任务 denominator 未统一 |
 | 10. 内容寻址缓存 | 部分完成 | offline/verifier 未接入；无统计、清理、rank 隔离和并发测试 |
 | 11. contamination | 部分完成 | 无 task-specific query、ngram/token overlap、三态和排除口径 |
-| 12. harness golden parity | 部分完成 | MC 核心指标和空白边界已有 harness oracle；缺数学、代码、多目标、失败 denominator 和 MC greedy `exact_match` parity |
+| 12. harness golden parity | 部分完成 | MC 核心指标和空白边界已有 harness oracle；缺数学、代码、多目标、失败 denominator 和 MC greedy `exact_match` parity；仓库尚无 CI 配置 |
 | 13. 多任务/分布式 | 未完成 | 无 task group、limit、rank 输出与合并链路 |
 
 ### 17.2 最近验证结果
