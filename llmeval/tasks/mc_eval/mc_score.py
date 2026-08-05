@@ -83,7 +83,7 @@ MC_GENERATION_PIPELINE: TextFilterPipeline
 
 # Precompiled answer-extraction regexes.
 _ANSWER_MARKER_RE: re.Pattern[str] = re.compile(
-    r"(?:Answer|答案)\s*[:：]\s*([A-J])\s*$",
+    r"(?:Answer|答案)\s*[:：]\s*([A-J])\s*[.。]?\s*$",
     re.MULTILINE | re.IGNORECASE,
 )
 _LAST_LETTER_RE: re.Pattern[str] = re.compile(r"\b([A-Ja-j])\b")
@@ -467,38 +467,47 @@ def score_items(
     for i, item in enumerate(eval_dataset):
         record = results_by_index.get(i)
         if record is None:
-            if mode == "loglikelihood":
-                try:
-                    gold = int(item.get("gold", -1))
-                except (TypeError, ValueError):
-                    gold = -1
-                record = {
-                    "gold": gold,
-                    "pred": -1,
-                    "correct": False,
-                    "correct_norm": False,
-                    "correct_bytes": False,
-                    "evaluation_status": "timeout",
-                    "aggregation": aggregation,
-                    **build_sample_provenance(
-                        item, label_key="gold", response_key="logprobs"
-                    ),
-                }
-            else:
-                record = {
-                    "gold": str(item.get(label_key, "")).strip().upper(),
-                    "pred": "",
-                    "correct": False,
-                    "correct_norm": False,
-                    "correct_bytes": False,
-                    "evaluation_status": "timeout",
-                    "aggregation": aggregation,
-                    **build_sample_provenance(
-                        item, label_key=label_key, response_key=response_key
-                    ),
-                }
+            record = _error_record(
+                item, mode, label_key, response_key, aggregation, "timeout"
+            )
         records.append(record)
     return records
+
+
+def _error_record(
+    item: dict[str, Any],
+    mode: Literal["loglikelihood", "generate"],
+    label_key: str,
+    response_key: str,
+    aggregation: str,
+    status: str,
+) -> dict[str, Any]:
+    """Build an explicit non-scored record for timed-out or crashed items."""
+    if mode == "loglikelihood":
+        try:
+            gold: int | str = int(item.get("gold", -1))
+        except (TypeError, ValueError):
+            gold = -1
+        pred: int | str = -1
+        provenance = build_sample_provenance(
+            item, label_key="gold", response_key="logprobs"
+        )
+    else:
+        gold = str(item.get(label_key, "")).strip().upper()
+        pred = ""
+        provenance = build_sample_provenance(
+            item, label_key=label_key, response_key=response_key
+        )
+    return {
+        "gold": gold,
+        "pred": pred,
+        "correct": False,
+        "correct_norm": False,
+        "correct_bytes": False,
+        "evaluation_status": status,
+        "aggregation": aggregation,
+        **provenance,
+    }
 
 
 def process_item(
@@ -515,12 +524,19 @@ def process_item(
 
     Takes an ``(index, item, mode, label_key, response_key, aggregation)`` tuple and returns
     ``(original_index, scored_record)`` so results can be re-ordered after
-    parallel execution.
+    parallel execution. Worker errors are returned as ``failed`` records so a
+    missing result in the collector unambiguously means a pool-level timeout.
     """
     idx, item, mode, label_key, response_key, aggregation = args
-    if mode == "loglikelihood":
-        return idx, score_loglikelihood_item(item)
-    return idx, score_generate_item(item, label_key, response_key, aggregation)
+    try:
+        if mode == "loglikelihood":
+            return idx, score_loglikelihood_item(item)
+        return idx, score_generate_item(item, label_key, response_key, aggregation)
+    except Exception:
+        logger.exception("Scoring worker failed for item %d", idx)
+        return idx, _error_record(
+            item, mode, label_key, response_key, aggregation, "failed"
+        )
 
 
 def build_result(

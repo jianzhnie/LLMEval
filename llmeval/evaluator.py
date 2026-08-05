@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,7 @@ from llmeval.tasks.registry import (
     TaskRegistry,
     build_default_registry,
     evaluate_registered_task,
+    write_per_item_results,
     write_structured_summary,
 )
 from llmeval.tasks.results import MetricValue
@@ -61,6 +63,16 @@ from llmeval.utils.reproducibility import seed_everything, seed_provenance
 
 # Initialize logger for the evaluation orchestrator
 logger = init_logger("evaluator")
+
+
+def _resolve_cache_path(cache_path: str | Path, task_name: str) -> Path:
+    """Resolve legacy directory-style cache paths to a JSONL output file."""
+    raw_path = str(cache_path)
+    path = Path(cache_path)
+    if (path.exists() and path.is_dir()) or raw_path.endswith((os.sep, "/")):
+        filename = task_name.replace("/", "_") or "evaluation"
+        return path / f"{filename}.jsonl"
+    return path
 
 
 def evaluate_task(
@@ -192,12 +204,13 @@ def evaluate_task_result(
     actual_seed = 0 if seed is None else seed
     seed_state = seed_everything(actual_seed)
     seed_prov = seed_provenance(seed_state)
+    resolved_cache_path = _resolve_cache_path(cache_path, task_name)
     context = EvaluationContext(
         eval_dataset=eval_dataset,
         task_name=task_name,
         label_key=label_key,
         response_key=response_key,
-        cache_path=Path(cache_path),
+        cache_path=resolved_cache_path,
         max_workers=max_workers,
         timeout=timeout,
         exec_timeout=exec_timeout,
@@ -242,6 +255,7 @@ def evaluate_task_result(
                     **seed_prov,
                 },
             )
+            write_per_item_results(result, context.cache_path)
             write_structured_summary(result, context.cache_path)
         else:
             result = evaluate_registered_task(context, registry)

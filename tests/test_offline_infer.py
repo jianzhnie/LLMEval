@@ -92,6 +92,37 @@ def _runner(tmp_path: Path, **overrides: object) -> OfflineInferenceRunner:
 
 
 class TestOfflineInferenceRunner:
+    def test_sampling_params_are_independent_and_honor_decoding_flags(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.inference.offline as offline_mod
+
+        constructed: list[dict[str, object]] = []
+
+        def _sampling_params(**kwargs: object) -> SimpleNamespace:
+            constructed.append(kwargs)
+            return SimpleNamespace(**kwargs)
+
+        monkeypatch.setattr(offline_mod, "SamplingParams", _sampling_params)
+        runner = _runner(
+            tmp_path,
+            n_samples=2,
+            do_sample=False,
+            skip_special_tokens=False,
+        )
+        items = [
+            {"doc_id": "doc:1", "prompt": "q", "_llmeval_sample_index": 0},
+            {"doc_id": "doc:1", "prompt": "q", "_llmeval_sample_index": 1},
+        ]
+
+        params = runner._sampling_params_for_items(items)
+
+        assert len(params) == 2
+        first, second = constructed
+        assert first["seed"] != second["seed"]
+        assert first["temperature"] == second["temperature"] == 0.0
+        assert first["skip_special_tokens"] is False
+
     def test_convert_to_messages_format(self, tmp_path: Path) -> None:
         runner = _runner(tmp_path)
 

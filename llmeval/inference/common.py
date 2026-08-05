@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import collections
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -40,6 +41,7 @@ __all__ = [
     "prepare_data_with_resume",
     "require_document_id",
     "sample_count_for_item",
+    "sample_seed_for_item",
     "save_failed_items",
     "validate_document_ids",
 ]
@@ -75,6 +77,29 @@ def validate_document_ids(items: list[dict[str, Any]]) -> None:
                 f"Duplicate doc_id {document_id!r} at indices {previous} and {index}. "
                 "Each prepared question must have a unique ID."
             )
+
+
+def sample_seed_for_item(base_seed: int, item: dict[str, Any]) -> int:
+    """Derive a stable independent backend seed for one generated sample.
+
+    The document ID and sample index are part of the seed so repeated requests
+    for the same prompt do not accidentally reuse one deterministic sequence,
+    while resume runs still reproduce the same sample.
+    """
+    if base_seed < 0:
+        raise ValueError(f"base_seed must be non-negative, got {base_seed}")
+    document_id = str(item.get("doc_id") or item.get("llmeval_verifier_id") or "")
+    prompt = str(item.get("prompt") or item.get("question") or "")
+    sample_index = item.get("_llmeval_sample_index", 0)
+    try:
+        sample_index = int(sample_index)
+    except (TypeError, ValueError):
+        sample_index = 0
+    payload = f"{base_seed}\0{document_id}\0{prompt}\0{sample_index}".encode(
+        "utf-8", errors="replace"
+    )
+    # Keep the value within the range accepted by common vLLM backends.
+    return int.from_bytes(hashlib.sha256(payload).digest()[:4], "big") & 0x7FFFFFFF
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:

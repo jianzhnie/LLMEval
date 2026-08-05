@@ -181,6 +181,8 @@ def estimate_pass_at_k(num_samples: int, num_correct: int, k: int) -> float:
     n, c = int(num_samples), int(num_correct)
     if n < 1:
         return 0.0
+    if k < 1 or k > n:
+        raise ValueError(f"pass@k requires 1 <= k <= n, got k={k}, n={n}")
     if c < 0:
         c = 0
     if n - c < k:

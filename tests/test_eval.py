@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -51,7 +52,9 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
     sys.modules["transformers"] = _tf
 
 from llmeval.evaluator import (
+    _resolve_cache_path,
     evaluate_task,
+    evaluate_task_result,
 )
 from llmeval.tasks.results import ScorerResult
 
@@ -66,6 +69,68 @@ def _scorer_result(name: str, value: float) -> ScorerResult:
 
 
 class TestEvaluateTask:
+    def test_cache_directory_path_resolves_to_task_jsonl(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        resolved = _resolve_cache_path(cache_dir, "math_opensource/aime24")
+        assert resolved == cache_dir / "math_opensource_aime24.jsonl"
+
+    def test_cache_file_path_is_preserved(self, tmp_path: Path) -> None:
+        cache_file = tmp_path / "results.jsonl"
+        assert _resolve_cache_path(cache_file, "math_opensource/aime24") == cache_file
+
+    def test_content_cache_hit_restores_per_item_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.evaluator as ev
+
+        calls = {"count": 0}
+
+        def _score(**kwargs: object) -> ScorerResult:
+            calls["count"] += 1
+            return ScorerResult(
+                metrics={"accuracy": 1.0},
+                observations={"accuracy": [1.0]},
+                per_item=[{"id": "item-1", "correct": True}],
+                sample_count=1,
+                effective_sample_count=1,
+            )
+
+        monkeypatch.setattr(ev, "compute_score_result", _score)
+        content_cache = tmp_path / "content"
+        cache_dir = tmp_path / "results"
+        cache_dir.mkdir()
+        first = evaluate_task_result(
+            [{"answer": "5", "gen": ["5"]}],
+            "math_opensource/aime24",
+            "answer",
+            "gen",
+            cache_dir,
+            1,
+            content_cache_dir=content_cache,
+        )
+        assert first is not None
+        output_path = cache_dir / "math_opensource_aime24.jsonl"
+        output_path.unlink()
+
+        second = evaluate_task_result(
+            [{"answer": "5", "gen": ["5"]}],
+            "math_opensource/aime24",
+            "answer",
+            "gen",
+            cache_dir,
+            1,
+            content_cache_dir=content_cache,
+        )
+
+        assert second is not None
+        assert calls["count"] == 1
+        assert output_path.exists()
+        assert json.loads(output_path.read_text(encoding="utf-8")) == {
+            "id": "item-1",
+            "correct": True,
+        }
+
     def test_empty_dataset_returns_zero_and_validates_task(
         self, tmp_path: Path
     ) -> None:

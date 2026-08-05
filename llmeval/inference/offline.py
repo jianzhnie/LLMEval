@@ -32,6 +32,7 @@ from llmeval.inference.common import (
     count_completed_samples_by_identity,
     expand_data_with_resume,
     load_jsonl,
+    sample_seed_for_item,
 )
 from llmeval.tasks.provenance import (
     get_git_hash,
@@ -155,17 +156,34 @@ class OfflineInferenceRunner:
             raise RuntimeError(f"Engine initialization failed: {e}") from e
 
         # Configure sampling parameters
-        sampling_params: SamplingParams = SamplingParams(
-            max_tokens=self.args.max_tokens,
-            temperature=self.args.temperature,
-            top_p=self.args.top_p,
-            top_k=self.args.top_k,
-            repetition_penalty=self.args.repetition_penalty,
-            seed=self.args.seed,
-        )
+        sampling_params = self._build_sampling_params(self.args.seed)
 
         logger.info("✅ vLLM engine initialization completed")
         return llm, sampling_params
+
+    def _build_sampling_params(self, seed: int) -> SamplingParams:
+        """Build generation parameters for one deterministic sample stream."""
+        temperature = (
+            self.args.temperature if getattr(self.args, "do_sample", True) else 0.0
+        )
+        return SamplingParams(
+            max_tokens=self.args.max_tokens,
+            temperature=temperature,
+            top_p=self.args.top_p,
+            top_k=self.args.top_k,
+            repetition_penalty=self.args.repetition_penalty,
+            seed=seed,
+            skip_special_tokens=getattr(self.args, "skip_special_tokens", True),
+        )
+
+    def _sampling_params_for_items(
+        self, items: Sequence[dict[str, Any]]
+    ) -> list[SamplingParams]:
+        """Return independent, resume-stable sampling parameters per item."""
+        return [
+            self._build_sampling_params(sample_seed_for_item(self.args.seed, item))
+            for item in items
+        ]
 
     def _prepare_hf_overrides(self) -> dict[str, Any]:
         """Prepare HuggingFace model overrides from arguments.
@@ -327,8 +345,11 @@ class OfflineInferenceRunner:
                 "top_p": self.args.top_p,
                 "top_k": self.args.top_k,
                 "repetition_penalty": self.args.repetition_penalty,
+                "do_sample": getattr(self.args, "do_sample", True),
+                "skip_special_tokens": getattr(self.args, "skip_special_tokens", True),
+                "enable_thinking": getattr(self.args, "enable_thinking", False),
             },
-            "sampling_seed": self.args.seed,
+            "sampling_seed": sample_seed_for_item(self.args.seed, item),
             "postprocess_version": "offline_chat_v1",
             "git_commit": getattr(self, "_git_hash", None),
             "doc_id": item.get("doc_id"),
@@ -480,10 +501,16 @@ class OfflineInferenceRunner:
         try:
             if missing_messages:
                 logger.debug("Processing %d uncached prompts", len(missing_messages))
+                missing_items = [valid_items[index] for index in missing_indices]
                 outputs: list[RequestOutput] = self.llm.chat(
-                    missing_messages, self.sampling_params, use_tqdm=False
+                    missing_messages,
+                    self._sampling_params_for_items(missing_items),
+                    use_tqdm=False,
+                    chat_template_kwargs={
+                        "enable_thinking": getattr(self.args, "enable_thinking", False)
+                    },
                 )
-                for index, output in zip(missing_indices, outputs, strict=False):
+                for index, output in zip(missing_indices, outputs, strict=True):
                     response = self._extract_model_response(output)
                     responses[index] = response
                     key = cache_keys.get(index)

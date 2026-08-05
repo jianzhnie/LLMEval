@@ -213,25 +213,27 @@ def reliability_guard() -> None:
     _bi = _get_builtins_module()
 
     # -- builtins ---------------------------------------------------------------
+    # ``setdefault`` keeps the first saved value so a repeated guard call does
+    # not snapshot the already-disabled ``None`` sentinels.
     for _name in _DISABLED_BUILTINS:
-        _ORIGINAL_BUILTINS[_name] = getattr(_bi, _name, None)
+        _ORIGINAL_BUILTINS.setdefault(_name, getattr(_bi, _name, None))
         setattr(_bi, _name, None)
 
     # -- os ---------------------------------------------------------------------
     for _name in _FORBIDDEN_OS_FUNCTIONS:
         if hasattr(os, _name):
-            _ORIGINAL_OS_FUNCS[_name] = getattr(os, _name)
+            _ORIGINAL_OS_FUNCS.setdefault(_name, getattr(os, _name))
             setattr(os, _name, None)
 
     # -- shutil -----------------------------------------------------------------
     for _name in _FORBIDDEN_SHUTIL_FUNCTIONS:
         if hasattr(shutil, _name):
-            _ORIGINAL_SHUTIL_FUNCS[_name] = getattr(shutil, _name)
+            _ORIGINAL_SHUTIL_FUNCS.setdefault(_name, getattr(shutil, _name))
             setattr(shutil, _name, None)
 
     # -- dangerous modules (block re-import) ------------------------------------
     for _mod in _BLOCKED_MODULES:
-        _ORIGINAL_MODULES[_mod] = sys.modules.get(_mod)
+        _ORIGINAL_MODULES.setdefault(_mod, sys.modules.get(_mod))
         # ``None`` is a supported runtime sentinel for blocking imports, but
         # typeshed models ``sys.modules`` as containing modules only.
         sys.modules[_mod] = None  # type: ignore[assignment]
@@ -255,6 +257,11 @@ def reliability_restore() -> None:
             sys.modules.pop(_name, None)
         else:
             sys.modules[_name] = _val
+    # Clear the snapshots so a later guard/restore pair starts fresh.
+    _ORIGINAL_BUILTINS.clear()
+    _ORIGINAL_OS_FUNCS.clear()
+    _ORIGINAL_SHUTIL_FUNCS.clear()
+    _ORIGINAL_MODULES.clear()
 
 
 # ===========================================================================

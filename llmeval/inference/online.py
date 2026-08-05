@@ -39,7 +39,7 @@ from llmeval.tasks.provenance import get_git_hash, hash_json
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
-from llmeval.utils.reproducibility import seed_everything
+from llmeval.utils.reproducibility import seed_everything, seed_provenance
 from llmeval.utils.retry import call_with_retry
 
 logger = init_logger("online_vllm_server", logging.INFO)
@@ -459,7 +459,7 @@ class InferenceRunner:
             proper resource management and progress tracking.
         """
         self.args: OnlineInferArguments = args
-        seed_everything(args.seed)
+        self.reproducibility = seed_provenance(seed_everything(args.seed))
 
         # Initialize client with error handling
         try:
@@ -627,6 +627,9 @@ class InferenceRunner:
         gen_list = list(result.get(self.args.response_key, []))
         gen_list.append(response)
         result[self.args.response_key] = gen_list
+        provenance = getattr(self, "reproducibility", None)
+        if provenance is not None:
+            result["inference_provenance"] = provenance
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
@@ -784,8 +787,8 @@ class InferenceRunner:
             key: Any = None
             if isinstance(item, dict):
                 candidate = item.get("doc_id")
-                if isinstance(candidate, str) and candidate:
-                    key = candidate
+                if candidate is not None and str(candidate).strip():
+                    key = str(candidate)
                 else:
                     # Direct callers and legacy in-memory inputs may not carry
                     # an ID yet; preserve the old prompt grouping in that case.

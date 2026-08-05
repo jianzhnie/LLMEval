@@ -89,6 +89,7 @@ run_eval() {
         --max_workers "$MAX_WORKERS" \
         --timeout "$TIMEOUT" \
         --exec_timeout "$EXEC_TIMEOUT" \
+        --allow_unsafe_code \
         > "$result_file" 2>&1; then
         echo "[OK] $task 评分完成"
         # 从结果文件中提取 Pass@1

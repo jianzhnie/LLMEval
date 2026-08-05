@@ -149,6 +149,7 @@ def _build_evaluation_result(
         failed_count=scored.failed_count,
         skipped_count=scored.skipped_count,
         timeout_count=scored.timeout_count,
+        per_item=[dict(item) for item in scored.per_item],
         provenance={**scored.provenance, **_base_provenance(context, task)},
     )
 
@@ -165,6 +166,14 @@ def write_structured_summary(result: EvaluationResult, cache_path: Path) -> None
     summary_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+
+def write_per_item_results(result: EvaluationResult, cache_path: Path) -> None:
+    """Persist detailed records so content-cache hits reproduce normal outputs."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("w", encoding="utf-8") as handle:
+        for item in result.per_item:
+            handle.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
 @dataclass
@@ -419,12 +428,15 @@ def evaluate_registered_task(
             if (
                 result.task_name == context.task_name
                 and result.task_version == task.version
+                and (result.per_item or result.sample_count == 0)
             ):
+                write_per_item_results(result, context.cache_path)
                 write_structured_summary(result, context.cache_path)
                 return result
 
     result = task.score(context)
     result.cache_key = cache_key
+    write_per_item_results(result, context.cache_path)
     write_structured_summary(result, context.cache_path)
     if cache is not None and cache_key is not None:
         cache.set(cache_key, result.to_dict())

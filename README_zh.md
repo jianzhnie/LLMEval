@@ -208,7 +208,8 @@ python ./llmeval/evaluator.py \
     --cache_path "./output/humaneval_scores.jsonl" \
     --task_name "code_opensource/humaneval" \
     --max_workers 32 \
-    --exec_timeout 5.0
+    --exec_timeout 5.0 \
+    --allow_unsafe_code
 ```
 
 ## 详细使用说明

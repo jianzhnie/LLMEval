@@ -73,6 +73,7 @@ class EvaluationResult:
     failed_count: int = 0
     skipped_count: int = 0
     timeout_count: int = 0
+    per_item: list[dict[str, Any]] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
     cache_key: str | None = None
 
@@ -97,6 +98,7 @@ class EvaluationResult:
             "failed_count": self.failed_count,
             "skipped_count": self.skipped_count,
             "timeout_count": self.timeout_count,
+            "per_item": self.per_item,
             "provenance": self.provenance,
             "cache_key": self.cache_key,
         }
@@ -123,6 +125,11 @@ class EvaluationResult:
             failed_count=int(data.get("failed_count", 0)),
             skipped_count=int(data.get("skipped_count", 0)),
             timeout_count=int(data.get("timeout_count", 0)),
+            per_item=(
+                [dict(item) for item in data["per_item"] if isinstance(item, dict)]
+                if isinstance(data.get("per_item"), list)
+                else []
+            ),
             provenance=(
                 dict(data["provenance"])
                 if isinstance(data.get("provenance"), dict)

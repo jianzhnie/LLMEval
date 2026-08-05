@@ -33,6 +33,14 @@ from llmeval.utils.log import init_logger
 # Configure a dedicated logger for the math scoring module
 logger = init_logger("math_score")
 
+
+def _is_math_task_name(task_name: Any) -> bool:
+    """Accept the registered family itself or one of its named tasks."""
+    return isinstance(task_name, str) and (
+        task_name == "math_opensource" or task_name.startswith("math_opensource/")
+    )
+
+
 try:
     from math_verify.metric import math_metric
     from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
@@ -294,12 +302,12 @@ def process_answers(
     """
     index, input_data, label_key, response_key = args
 
-    # Validate and extract task name
-    try:
-        data_name = input_data.get("task", "").split("/")[1]
-    except (IndexError, AttributeError):
+    # Family-only names are valid registry inputs and use generic gold parsing.
+    task_name = input_data.get("task", "")
+    if not _is_math_task_name(task_name):
         logger.warning(f"⚠️ Invalid task format for job {index}")
         return index, 0.0, None, None
+    _, _, data_name = task_name.partition("/")
 
     # Parse the ground truth answer from the input data
     # The first return value (cot_answer) is unused for this metric
@@ -308,7 +316,7 @@ def process_answers(
         _, gold_answer_text = parse_ground_truth(input_data, data_name, label_key)
     except (ValueError, NotImplementedError, KeyError) as e:
         logger.error(f"❌ [Error] Parsing gold truth for job {index} failed: {e}")
-        return index, 0.0, None, None
+        return index, 0.0, f"Error: {e}", None
 
     # Get the generated text. Handles cases where response might be missing or empty.
     generated_text = input_data.get(response_key, [])
@@ -385,7 +393,15 @@ def _math_record_status(
     ):
         return "failed"
     response = item.get(response_key)
-    if not response or not item.get(label_key) or "/" not in str(item.get("task", "")):
+    label = item.get(label_key)
+    task_name = item.get("task")
+    if (
+        not response
+        or label is None
+        or (isinstance(label, str) and not label.strip())
+        or not isinstance(task_name, str)
+        or not _is_math_task_name(task_name)
+    ):
         return "skipped"
     return "completed"
 
@@ -514,15 +530,17 @@ def compute_scores(
                 elif status == "skipped":
                     stats.skipped += 1
 
-    # Handle any jobs that were not processed (e.g., due to a process crash or other unforeseen error).
+    # Handle any jobs that were not processed. Workers convert their own
+    # errors into sentinel results, so a missing index means the pool-level
+    # timeout killed the worker (or an unrecoverable crash).
     for idx in range(total):
         if idx not in processed_indices:
             eval_dataset[idx].update(
                 {
                     "accuracy": 0.0,
-                    "extracted_gold": "Error",
-                    "extracted_answer": "Error",
-                    "evaluation_status": "failed",
+                    "extracted_gold": "Timeout",
+                    "extracted_answer": "Timeout",
+                    "evaluation_status": "timeout",
                     **_filter_artifacts(eval_dataset[idx].get(response_key)),
                     **build_sample_provenance(
                         eval_dataset[idx],
@@ -531,7 +549,7 @@ def compute_scores(
                     ),
                 }
             )
-            stats.error += 1
+            stats.timeout += 1
 
     logger.info(f"Summary: {total} eval_dataset processed.")
 

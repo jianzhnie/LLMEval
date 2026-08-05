@@ -842,7 +842,8 @@ class EvalTaskArguments:
         input_key (str): Key for input text in dataset.
         label_key (str): Key for target/label text in dataset.
         response_key (str): Key for model generated text.
-        cache_path (str): Directory path for saving cached results.
+        cache_path (str): JSONL file path for saving cached results. Existing
+            directory paths are resolved to a task-specific JSONL file.
         max_workers (int): Maximum number of worker threads for parallel processing.
 
 
@@ -879,8 +880,8 @@ class EvalTaskArguments:
     )
 
     cache_path: str = field(
-        default="./cache",
-        metadata={"help": "Directory path for saving cached results."},
+        default="./cache/results.jsonl",
+        metadata={"help": "JSONL file path for saving detailed evaluation results."},
     )
     max_workers: int = field(
         default=128,

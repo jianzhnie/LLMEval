@@ -240,7 +240,8 @@ python ./llmeval/evaluator.py \
     --cache_path "./output/longcat-flash/eval_score/humaneval_bz1.jsonl" \
     --task_name "code_opensource/humaneval" \
     --max_workers 32 \
-    --exec_timeout 5.0
+    --exec_timeout 5.0 \
+    --allow_unsafe_code
 ```
 
 ## Detailed Usage

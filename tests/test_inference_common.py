@@ -24,6 +24,7 @@ from llmeval.inference.common import (
     prepare_data_with_resume,
     require_document_id,
     sample_count_for_item,
+    sample_seed_for_item,
     save_failed_items,
 )
 
@@ -217,6 +218,29 @@ class TestSampleCountHelpers:
         assert len(expanded) == 2
         assert expanded[0] is not items[0]
         assert [item["_llmeval_sample_index"] for item in expanded] == [3, 4]
+
+
+class TestSampleSeed:
+    def test_seed_is_stable_for_same_item(self) -> None:
+        item = {
+            "doc_id": "doc:1",
+            "prompt": "What is 2+2?",
+            "_llmeval_sample_index": 2,
+        }
+        assert sample_seed_for_item(123, item) == sample_seed_for_item(123, item)
+
+    def test_seed_changes_with_sample_index_and_document_id(self) -> None:
+        item = {"doc_id": "doc:1", "prompt": "q", "_llmeval_sample_index": 0}
+        next_sample = {**item, "_llmeval_sample_index": 1}
+        other_document = {**item, "doc_id": "doc:2"}
+        assert sample_seed_for_item(123, item) != sample_seed_for_item(123, next_sample)
+        assert sample_seed_for_item(123, item) != sample_seed_for_item(
+            123, other_document
+        )
+
+    def test_negative_base_seed_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="non-negative"):
+            sample_seed_for_item(-1, {"prompt": "q"})
 
 
 class TestStableResumeCounts:

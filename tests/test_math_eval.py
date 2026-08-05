@@ -120,6 +120,23 @@ class TestProcessAnswers:
         idx, grade, pred, gold = process_answers((7, item, "answer", "gen"))
         assert (idx, grade, pred, gold) == (7, 0.0, None, None)
 
+    def test_invalid_math_task_prefix_is_rejected(self) -> None:
+        from llmeval.tasks.math_eval.math_score import process_answers
+
+        item = _math_item("5", ["5"], task="math_opensource_evil/task")
+        idx, grade, pred, gold = process_answers((7, item, "answer", "gen"))
+        assert (idx, grade, pred, gold) == (7, 0.0, None, None)
+
+    def test_family_only_task_uses_generic_parser(self) -> None:
+        from llmeval.tasks.math_eval.math_score import process_answers
+
+        item = _math_item("5", ["The answer is $\\boxed{5}$"], task="math_opensource")
+        idx, grade, pred, gold = process_answers((8, item, "answer", "gen"))
+        assert idx == 8
+        assert grade == 1.0
+        assert pred is not None
+        assert gold is not None
+
     def test_missing_task_field(self) -> None:
         from llmeval.tasks.math_eval.math_score import process_answers
 
