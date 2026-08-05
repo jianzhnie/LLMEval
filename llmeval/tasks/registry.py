@@ -61,6 +61,7 @@ class EvaluationContext(PreparationContext):
     force_recompute: bool = False
     read_only_cache: bool = False
     input_key: str = "prompt"
+    extra_provenance: dict[str, Any] | None = None
 
 
 class EvaluationTask(Protocol):
@@ -111,6 +112,8 @@ def _base_provenance(
             "model_revision": context.model_revision,
         }
     )
+    if context.extra_provenance:
+        provenance.update(context.extra_provenance)
     return provenance
 
 

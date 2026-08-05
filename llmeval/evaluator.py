@@ -191,6 +191,7 @@ def evaluate_task_result(
     """Evaluate a task through the registry and return all declared metrics."""
     actual_seed = 0 if seed is None else seed
     seed_state = seed_everything(actual_seed)
+    seed_prov = seed_provenance(seed_state)
     context = EvaluationContext(
         eval_dataset=eval_dataset,
         task_name=task_name,
@@ -211,6 +212,7 @@ def evaluate_task_result(
         force_recompute=force_recompute,
         read_only_cache=read_only_cache,
         input_key=input_key,
+        extra_provenance=seed_prov,
     )
     registry = _default_registry()
     try:
@@ -228,20 +230,21 @@ def evaluate_task_result(
                     )
                     for spec in task.metric_specs
                 },
-                provenance=build_run_provenance(
-                    [],
-                    task_name=task_name,
-                    input_key=input_key,
-                    label_key=label_key,
-                    response_key=response_key,
-                    seed=actual_seed,
-                ),
+                provenance={
+                    **build_run_provenance(
+                        [],
+                        task_name=task_name,
+                        input_key=input_key,
+                        label_key=label_key,
+                        response_key=response_key,
+                        seed=actual_seed,
+                    ),
+                    **seed_prov,
+                },
             )
             write_structured_summary(result, context.cache_path)
         else:
             result = evaluate_registered_task(context, registry)
-        result.provenance.update(seed_provenance(seed_state))
-        write_structured_summary(result, context.cache_path)
         for name, metric in result.metrics.items():
             logger.info(
                 "Task %s metric %s=%.4f (n=%d, stderr=%s)",
