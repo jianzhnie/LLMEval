@@ -819,14 +819,14 @@ def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None
             "prompt": "q",
             "answer": "B",
             "gen": ["Answer: A", "Answer: B"],
-            "_llmeval_sample_indices": [0, 2],
+            "sample_indices": [0, 2],
         },
         {
             "doc_id": "mmlu:0",
             "prompt": "q",
             "answer": "B",
             "gen": ["Answer: B"],
-            "_llmeval_sample_indices": [1],
+            "sample_indices": [1],
         },
     ]
     cache = tmp_path / "resumed.jsonl"

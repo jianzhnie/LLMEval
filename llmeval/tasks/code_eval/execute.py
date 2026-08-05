@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import multiprocessing
 import os
 import shutil
@@ -54,6 +55,7 @@ __all__ = [
 _ORIGINAL_BUILTINS: dict[str, Any] = {}
 _ORIGINAL_OS_FUNCS: dict[str, Any] = {}
 _ORIGINAL_SHUTIL_FUNCS: dict[str, Any] = {}
+_ORIGINAL_IO_FUNCS: dict[str, Any] = {}
 _ORIGINAL_MODULES: dict[str, Any] = {}
 
 #: ``os`` functions that are disabled by ``reliability_guard``.
@@ -80,6 +82,7 @@ _FORBIDDEN_OS_FUNCTIONS: tuple[str, ...] = (
     "lchflags",
     "lchmod",
     "lchown",
+    "open",
 )
 
 #: ``shutil`` functions that are disabled by ``reliability_guard``.
@@ -102,10 +105,45 @@ _BLOCKED_MODULES: tuple[str, ...] = (
     "tkinter",
     "ctypes",
     "multiprocessing",
+    "socket",
+    "ssl",
+    "urllib",
+    "http",
+    "httpx",
+    "requests",
+    "aiohttp",
+    "ftplib",
 )
 
 #: Built-in names that are set to ``None`` inside the ``builtins`` module.
-_DISABLED_BUILTINS: tuple[str, ...] = ("exit", "quit")
+_DISABLED_BUILTINS: tuple[str, ...] = ("exit", "quit", "open", "input")
+
+
+def _apply_resource_limits(timeout: float) -> None:
+    """Apply best-effort Unix limits inside the disposable worker process."""
+    try:
+        import resource
+    except ImportError:  # pragma: no cover - unavailable on Windows
+        return
+
+    limits = (
+        (resource.RLIMIT_CPU, max(1, math.ceil(timeout) + 1)),
+        (resource.RLIMIT_FSIZE, 1 * 1024 * 1024),
+        (resource.RLIMIT_NOFILE, 64),
+        (resource.RLIMIT_CORE, 0),
+    )
+    if hasattr(resource, "RLIMIT_NPROC"):
+        limits = (*limits, (resource.RLIMIT_NPROC, 32))
+    memory_mb = int(os.environ.get("LLMEVAL_MEMORY_LIMIT_MB", "2048"))
+    if memory_mb > 0 and hasattr(resource, "RLIMIT_AS"):
+        limits = (*limits, (resource.RLIMIT_AS, memory_mb * 1024 * 1024))
+    for resource_name, soft_limit in limits:
+        try:
+            _, hard_limit = resource.getrlimit(resource_name)
+            effective = soft_limit if hard_limit < 0 else min(soft_limit, hard_limit)
+            resource.setrlimit(resource_name, (effective, effective))
+        except (OSError, ValueError):
+            continue
 
 
 # ===========================================================================
@@ -231,6 +269,9 @@ def reliability_guard() -> None:
             _ORIGINAL_SHUTIL_FUNCS.setdefault(_name, getattr(shutil, _name))
             setattr(shutil, _name, None)
 
+    _ORIGINAL_IO_FUNCS.setdefault("open", io.open)
+    io.open = None  # type: ignore[assignment]
+
     # -- dangerous modules (block re-import) ------------------------------------
     for _mod in _BLOCKED_MODULES:
         _ORIGINAL_MODULES.setdefault(_mod, sys.modules.get(_mod))
@@ -252,6 +293,8 @@ def reliability_restore() -> None:
         setattr(os, _name, _val)
     for _name, _val in _ORIGINAL_SHUTIL_FUNCS.items():
         setattr(shutil, _name, _val)
+    for _name, _val in _ORIGINAL_IO_FUNCS.items():
+        setattr(io, _name, _val)
     for _name, _val in _ORIGINAL_MODULES.items():
         if _val is None:
             sys.modules.pop(_name, None)
@@ -261,6 +304,7 @@ def reliability_restore() -> None:
     _ORIGINAL_BUILTINS.clear()
     _ORIGINAL_OS_FUNCS.clear()
     _ORIGINAL_SHUTIL_FUNCS.clear()
+    _ORIGINAL_IO_FUNCS.clear()
     _ORIGINAL_MODULES.clear()
 
 
@@ -355,6 +399,9 @@ def _worker(
 
     This function is the ``target`` of ``multiprocessing.Process``.
     """
+    _apply_resource_limits(timeout)
+    os.environ.clear()
+    os.environ["PYTHONIOENCODING"] = "utf-8"
     status, stderr = unsafe_execute(check_program, timeout)
     result: dict[str, Any] = {
         "task_id": task_id,
@@ -394,9 +441,8 @@ def check_correctness(
     but production callers should use this function with an isolated runtime.
 
     The multiprocessing start method is configurable via the environment
-    variable ``LLMEVAL_MP_METHOD`` (default ``"fork"`` — library-friendly,
-    no ``if __name__ == "__main__"`` guard required in the caller).  Set to
-    ``"spawn"`` on macOS if your calling script uses proper guards.
+    variable ``LLMEVAL_MP_METHOD`` (default ``"spawn"``). The spawn method
+    avoids forking a process that may already own worker threads.
 
     Returns
     -------
@@ -407,7 +453,7 @@ def check_correctness(
         return _fail(task_id, "unsafe execution disabled")
 
     # -- resolve multiprocessing context ----------------------------------------
-    _mp_method = os.environ.get("LLMEVAL_MP_METHOD", "fork")
+    _mp_method = os.environ.get("LLMEVAL_MP_METHOD", "spawn")
     try:
         ctx = multiprocessing.get_context(_mp_method)
     except ValueError:

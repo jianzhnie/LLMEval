@@ -171,8 +171,11 @@ class PromptArguments:
                 f"Valid options are: {list(SYSTEM_PROMPT_FACTORY.keys())}"
             )
         self.system_prompt = SYSTEM_PROMPT_FACTORY.get(self.system_prompt_type)
+        prompt_length = len(self.system_prompt or "")
         logger.info(
-            f"Using system_prompt_type: {self.system_prompt_type}, content: {self.system_prompt}"
+            "Using system_prompt_type: %s, content_length: %d",
+            self.system_prompt_type,
+            prompt_length,
         )
         logger.info(
             "If you want to customize the system prompt, please modify the "
@@ -635,7 +638,9 @@ class VerifierInferArguments(
 
         self.verifier_prompt = VERIFY_PROMPT_FACTORY.get(self.verifier_prompt_type)
         logger.info(
-            f"Using verifier_prompt_type: {self.verifier_prompt_type}, content: {self.verifier_prompt}"
+            "Using verifier_prompt_type: %s, content_length: %d",
+            self.verifier_prompt_type,
+            len(self.verifier_prompt or ""),
         )
         logger.info(
             "If you want to customize the verifier prompt, please modify the "
@@ -747,6 +752,9 @@ class MCInferConfig:
     api_key: str = field(
         default_factory=lambda: os.environ.get("OPENAI_API_KEY", "EMPTY"),
         metadata={"help": "API key (default: OPENAI_API_KEY env var)."},
+    )
+    organization: str | None = field(
+        default=None, metadata={"help": "Optional OpenAI organization ID."}
     )
     input_key: str = field(
         default="prompt",
@@ -874,6 +882,12 @@ class EvalTaskArguments:
         default="compact",
         metadata={"help": "Per-item result schema: compact or debug."},
     )
+    expected_samples: int = field(
+        default=0,
+        metadata={
+            "help": "Expected generations per problem for multi-sample metrics (0=from output)."
+        },
+    )
     mc_aggregation: str = field(
         default="first",
         metadata={
@@ -966,6 +980,10 @@ class EvalTaskArguments:
             raise ValueError(
                 "output_schema must be one of ('compact', 'debug'), "
                 f"got: {self.output_schema!r}"
+            )
+        if self.expected_samples < 0:
+            raise ValueError(
+                f"expected_samples must be non-negative, got {self.expected_samples}"
             )
         if self.bootstrap_samples < 0:
             raise ValueError(

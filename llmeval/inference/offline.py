@@ -295,8 +295,9 @@ class OfflineInferenceRunner:
                     ):
                         if model_response and model_response.strip():
                             result: dict[str, Any] = original_item.copy()
-                            gen_list: list[str] = list(
-                                result.get(self.args.response_key, [])
+                            existing = result.get(self.args.response_key)
+                            gen_list: list[str] = (
+                                list(existing) if isinstance(existing, list) else []
                             )
                             gen_list.append(model_response)
                             result[self.args.response_key] = gen_list

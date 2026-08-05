@@ -204,7 +204,7 @@ bash examples/longcat-flash/mc_score.sh
 MC_MODE=generate bash examples/longcat-flash/mc_infer.sh
 ```
 
-**Code benchmarks** — generation with sandbox execution + pass@k summary:
+**Code benchmarks** — generation with guarded subprocess execution + pass@k summary:
 
 ```bash
 # HumanEval + MBPP
@@ -243,6 +243,17 @@ python ./llmeval/evaluator.py \
     --exec_timeout 5.0 \
     --allow_unsafe_code
 ```
+
+`--allow_unsafe_code` executes model-generated Python. The built-in subprocess
+guard limits time and common resources, blocks common network modules, and
+clears environment variables, but it is not a security sandbox. Run code
+benchmarks inside a locked-down container or sandbox with no network access, a
+read-only host filesystem, a non-privileged user, and external resource limits.
+
+Multi-sample math summaries include `sample_accuracy`, `problem_pass@k`,
+`problem_majority@k`, and per-problem `correct_samples`, `observed_samples`, and
+`expected_samples`. Pass `--expected_samples 64` when scoring legacy output that
+does not carry its target sample count.
 
 ## Detailed Usage
 
@@ -283,8 +294,8 @@ Offline mode specific:
 | Math | `math_opensource/aime24` `math_opensource/aime25` `math_opensource/aime26` | math-verify |
 | Math | `math_opensource/gsm8k` `math_opensource/math500` `math_opensource/math` `math_opensource/hmmt25` | math-verify |
 | Science | `math_opensource/gpqa_diamond` `math_opensource/hle_full` | math-verify |
-| Code | `code_opensource/humaneval` `code_opensource/mbpp` | pass@k sandbox |
-| Code | `code_opensource/humaneval_plus` `code_opensource/mbpp_plus` | pass@k sandbox |
+| Code | `code_opensource/humaneval` `code_opensource/mbpp` | guarded pass@k execution |
+| Code | `code_opensource/humaneval_plus` `code_opensource/mbpp_plus` | guarded pass@k execution |
 | MC | `mc_opensource/mmlu` `mc_opensource/mmlu_pro` `mc_opensource/ceval` | answer-token loglikelihood |
 
 See [docs/benchmark.md](docs/benchmark.md) for dataset details and HuggingFace links.

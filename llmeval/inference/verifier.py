@@ -20,7 +20,7 @@ import threading
 from collections.abc import Callable, Iterable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from tqdm import tqdm
 from transformers import AutoTokenizer, HfArgumentParser
@@ -28,32 +28,17 @@ from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
 from llmeval.cache import ContentAddressedCache, build_cache, log_cache_stats
-from llmeval.inference.common import load_jsonl, sample_seed_for_item
+from llmeval.inference.common import (
+    load_jsonl,
+    missing_sample_indices,
+    sample_seed_for_item,
+)
 from llmeval.utils.config import VerifierInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.verifier_prompts import VERIFY_PROMPT_FACTORY
 
 # Initialize logger
 logger = init_logger("compass_verifier_infer", logging.INFO)
-
-
-class ChatTemplateTokenizer(Protocol):
-    """Minimal tokenizer interface required by the verifier runner.
-
-    vLLM exposes a tokenizer with ``apply_chat_template`` at runtime, while
-    the Transformers type stubs do not declare that method on every tokenizer
-    variant. Keeping the protocol local makes the runtime contract explicit
-    without weakening the entire runner to ``Any``.
-    """
-
-    def apply_chat_template(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        add_generation_prompt: bool,
-        tokenize: bool,
-    ) -> str:
-        """Render chat messages into a model input string."""
 
 
 # Precompiled extraction patterns (compiled once at import, not per call).
@@ -719,9 +704,7 @@ class VerifierOfflineInferenceRunner:
                 continue
             resume_id = self._resume_id(item)
             used_indices = completed_indices.get(resume_id, set())
-            for sample_index in range(self.args.n_samples):
-                if sample_index in used_indices:
-                    continue
+            for sample_index in missing_sample_indices(self.args.n_samples, used_indices):
                 expanded_item = copy.deepcopy(item)
                 expanded_item[_VERIFIER_RESUME_KEY] = resume_id
                 expanded_item["sample_index"] = sample_index
@@ -780,7 +763,7 @@ class VerifierOfflineInferenceRunner:
         try:
             # Convert prompts to messages format for vLLM
             batch_messages: list[str] = []
-            tokenizer = cast(ChatTemplateTokenizer, self.tokenizer)
+            tokenizer = cast(Any, self.tokenizer)
             for prompt in valid_prompts:
                 messages = [{"role": "user", "content": prompt}]
                 model_inputs = tokenizer.apply_chat_template(

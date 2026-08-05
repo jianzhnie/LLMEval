@@ -87,6 +87,10 @@ _ANSWER_MARKER_RE: re.Pattern[str] = re.compile(
 )
 _LAST_LETTER_RE: re.Pattern[str] = re.compile(r"\b([A-Ja-j])\b")
 
+# Standalone "I" (pronoun) and "a" (article) are English words, not answer
+# letters — they must never win the fallback extraction.
+_FALLBACK_STOPWORDS = frozenset({"I", "a"})
+
 
 @dataclass
 class MCScoreResult:
@@ -138,6 +142,7 @@ def score_loglikelihood_result(
     cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
+    persist_legacy: bool = True,
 ) -> ScorerResult:
     """Score loglikelihood-based MC results and return structured metrics.
 
@@ -177,7 +182,8 @@ def score_loglikelihood_result(
         timeout=timeout,
     )
     metrics = build_result(records)
-    write_cache(metrics, cache_path)
+    if persist_legacy:
+        write_cache(metrics, cache_path)
     return _to_scorer_result(metrics)
 
 
@@ -214,7 +220,9 @@ def merge_generate_records(
         item = source.copy()
         document_id = item.get("doc_id")
         prompt = item.get("prompt", item.get("query", ""))
-        if not document_id:
+        if document_id is None or (
+            isinstance(document_id, str) and not document_id.strip()
+        ):
             merged.append(item)
             samples_by_position.append(None)
             continue
@@ -246,7 +254,9 @@ def merge_generate_records(
         else:
             generations = []
 
-        raw_indices = item.get("_llmeval_sample_indices")
+        raw_indices = item.get("sample_indices")
+        if raw_indices is None:
+            raw_indices = item.get("sample_indices")
         if (
             isinstance(raw_indices, list)
             and len(raw_indices) == len(generations)
@@ -276,7 +286,11 @@ def merge_generate_records(
             continue
         ordered_indices = sorted(samples)
         item[response_key] = [samples[index] for index in ordered_indices]
-        item["_llmeval_sample_indices"] = ordered_indices
+        item.pop("sample_indices", None)
+        if len(ordered_indices) == 1:
+            item["sample_index"] = ordered_indices[0]
+        else:
+            item["sample_indices"] = ordered_indices
     return merged
 
 
@@ -288,6 +302,7 @@ def score_generate_result(
     max_workers: int = 8,
     timeout: int = 60,
     aggregation: str = "first",
+    persist_legacy: bool = True,
 ) -> ScorerResult:
     """Score generation-based MC results and return structured metrics.
 
@@ -334,7 +349,8 @@ def score_generate_result(
         aggregation=aggregation,
     )
     metrics = build_result(records)
-    write_cache(metrics, cache_path)
+    if persist_legacy:
+        write_cache(metrics, cache_path)
     return _to_scorer_result(metrics)
 
 
@@ -459,7 +475,7 @@ def _error_record(
     return {
         **{
             key: item[key]
-            for key in ("doc_id", "sample_index")
+            for key in ("doc_id", "sample_index", "sample_total")
             if key in item and item[key] is not None
         },
         "gold": gold,
@@ -469,7 +485,10 @@ def _error_record(
         "correct_bytes": False,
         "evaluation_status": status,
         "aggregation": aggregation,
-        "scoring_mode": item.get("scoring_mode", aggregation),
+        "scoring_mode": item.get(
+            "scoring_mode",
+            "unknown_legacy" if mode == "loglikelihood" else aggregation,
+        ),
     }
 
 
@@ -496,14 +515,17 @@ def process_item(
             record = score_loglikelihood_item(item)
         else:
             record = score_generate_item(item, label_key, response_key, aggregation)
-        return idx, _attach_item_metadata(record, item, aggregation)
+        return idx, _attach_item_metadata(record, item, mode, aggregation)
     except Exception:
         logger.exception("Scoring worker failed for item %d", idx)
         return idx, _error_record(item, mode, label_key, aggregation, "failed")
 
 
 def _attach_item_metadata(
-    record: dict[str, Any], item: dict[str, Any], aggregation: str
+    record: dict[str, Any],
+    item: dict[str, Any],
+    mode: Literal["loglikelihood", "generate"],
+    aggregation: str,
 ) -> dict[str, Any]:
     """Carry stable identity and scoring mode into the persisted score row."""
     metadata = {
@@ -511,7 +533,10 @@ def _attach_item_metadata(
         for key in ("doc_id", "sample_index")
         if key in item and item[key] is not None
     }
-    metadata["scoring_mode"] = item.get("scoring_mode", aggregation)
+    metadata["scoring_mode"] = item.get(
+        "scoring_mode",
+        "unknown_legacy" if mode == "loglikelihood" else aggregation,
+    )
     return {**metadata, **record}
 
 
@@ -668,15 +693,18 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         item.get("choice_tokens") or item.get("choices") or item.get("choice_texts", [])
     )
 
-    # Guard: unscorable data → forced-incorrect record.
-    if not logprobs or gold < 0 or all(lp == float("-inf") for lp in logprobs):
+    # Guard: unscorable data → forced-incorrect record.  An out-of-range gold
+    # index is a dataset problem (skipped); empty/all--inf logprobs are an
+    # inference failure (failed).
+    invalid_gold = gold < 0 or (bool(logprobs) and gold >= len(logprobs))
+    if not logprobs or invalid_gold or all(lp == float("-inf") for lp in logprobs):
         return {
             "gold": gold,
             "pred": -1,
             "correct": False,
             "correct_norm": False,
             "correct_bytes": False,
-            "evaluation_status": "skipped" if gold < 0 else "failed",
+            "evaluation_status": "skipped" if invalid_gold else "failed",
         }
 
     # acc — argmax over raw logprobs (ties broken by smallest index).
@@ -828,7 +856,9 @@ def extract_answer(text: str) -> str:
        token at the **end** of a line (``re.MULTILINE``, ``$`` anchor).
        Returns the **first** such match.
     2. **Fallback** — find the **last** standalone letter ``A``-``J``
-       (word-boundary delimited) anywhere in the text.
+       (word-boundary delimited) anywhere in the text.  The English pronoun
+       ``I`` and article ``a`` are ignored so trailing prose cannot hijack
+       the extraction.
 
     Both paths normalise to uppercase.  Returns ``""`` when no letter can
     be extracted.
@@ -838,8 +868,11 @@ def extract_answer(text: str) -> str:
     if m:
         return m.group(1).upper()
 
-    # 2. Last standalone A-J letter in the text.
-    matches = _LAST_LETTER_RE.findall(text)
+    # 2. Last standalone A-J letter in the text (excluding "I"/"a" stopwords).
+    matches = [
+        letter for letter in _LAST_LETTER_RE.findall(text)
+        if letter not in _FALLBACK_STOPWORDS
+    ]
     if matches:
         return matches[-1].upper()
 
@@ -874,7 +907,11 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
     # Aggregated metrics summary (JSON).
     summary_path = cache_path.with_suffix(".summary.json")
     question_total = len(result.per_item)
-    sample_total = sum(int(record.get("sample_total", 1)) for record in result.per_item)
+    # Match the weight() convention below: per-sample records default to 0
+    # samples, all other records count as one sample each.
+    sample_total = sum(
+        max(int(record.get("sample_total", 1)), 1) for record in result.per_item
+    )
 
     def weight(record: dict[str, Any]) -> int:
         return (

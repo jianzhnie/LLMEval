@@ -42,6 +42,21 @@ _CHAT_ROLE_LINE_RE: re.Pattern[str] = re.compile(
     r"(?m)^\s*(?:###\s*)?(?:Human|Assistant)\s*:",
 )
 
+# Unambiguous special tokens — plain substring matching is safe for these.
+_SPECIAL_TOKEN_MARKERS = (
+    "<|im_start|>",
+    "<|im_end|>",  # ChatML format
+    "<|user|>",
+    "<|assistant|>",  # Other formats
+)
+
+# Llama-style control tokens need context to avoid false positives: bare
+# <s>/</s> collide with HTML strikethrough tags and [INST] can appear glued
+# to ordinary text, so <s>/</s> must sit at the start of the string or right
+# after whitespace/a line start, and [INST] must not touch word characters.
+_S_TAG_RE: re.Pattern[str] = re.compile(r"(?m)(?:^|(?<=\s))</?s>")
+_INST_TAG_RE: re.Pattern[str] = re.compile(r"(?<!\w)\[/?INST\](?!\w)")
+
 
 def is_chat_template_applied(query: str) -> bool:
     """Check if the query has already been processed with a chat template.
@@ -55,19 +70,10 @@ def is_chat_template_applied(query: str) -> bool:
     if not query:
         return False
 
-    # Explicit tokenizer/chat-template control tokens.
-    template_markers = [
-        "<|im_start|>",
-        "<|im_end|>",  # ChatML format
-        "<s>",
-        "</s>",  # Some models use these
-        "[INST]",
-        "[/INST]",  # Llama format
-        "<|user|>",
-        "<|assistant|>",  # Other formats
-    ]
+    if any(marker in query for marker in _SPECIAL_TOKEN_MARKERS):
+        return True
 
-    if any(marker in query for marker in template_markers):
+    if _S_TAG_RE.search(query) or _INST_TAG_RE.search(query):
         return True
 
     # Human:/Assistant: is too common as normal problem text to detect via

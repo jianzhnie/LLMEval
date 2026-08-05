@@ -268,13 +268,13 @@ class TestStableResumeCounts:
                 "doc_id": "q1",
                 "prompt": "q",
                 "gen": ["a", "c"],
-                "_llmeval_sample_indices": [0, 2],
+                "sample_indices": [0, 2],
             },
             {
                 "doc_id": "q1",
                 "prompt": "q",
                 "gen": ["c"],
-                "_llmeval_sample_indices": [2],
+                "sample_indices": [2],
             },
         ]
         output.write_text("".join(json.dumps(row) + "\n" for row in rows))

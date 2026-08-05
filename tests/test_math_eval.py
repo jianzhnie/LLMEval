@@ -263,7 +263,9 @@ class TestComputeScores:
         )
         assert result.sample_count == 2
         assert result.effective_sample_count == 1
-        assert result.skipped_count == 1
+        assert result.failed_count == 1
+        assert result.skipped_count == 0
+        assert result.failure_counts["inference_failed"] == 1
         assert result.observations["accuracy"] == [1.0]
         assert result.metrics["accuracy"] == 1.0
 
@@ -277,7 +279,7 @@ class TestComputeScores:
                     ["$\\boxed{5}$", "$\\boxed{6}$", "$\\boxed{5}$"],
                 ),
                 "doc_id": "aime24:0",
-                "_llmeval_sample_indices": [0, 1, 2],
+                "sample_indices": [0, 1, 2],
             },
             {
                 **_math_item(
@@ -285,7 +287,7 @@ class TestComputeScores:
                     ["$\\boxed{8}$", "$\\boxed{7}$", "$\\boxed{8}$"],
                 ),
                 "doc_id": "aime24:1",
-                "_llmeval_sample_indices": [0, 1, 2],
+                "sample_indices": [0, 1, 2],
             },
         ]
 

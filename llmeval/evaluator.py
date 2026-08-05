@@ -90,6 +90,7 @@ def evaluate_task(
     model_revision: str | None = None,
     input_key: str = "prompt",
     output_schema: str = "compact",
+    expected_samples: int = 0,
 ) -> float | None:
     """
     Evaluate model outputs against ground truth data for a specific task.
@@ -125,29 +126,34 @@ def evaluate_task(
         ... )
         >>> print(f"Accuracy: {accuracy:.2f}")
     """
-    result = evaluate_task_result(
-        eval_dataset=eval_dataset,
-        task_name=task_name,
-        label_key=label_key,
-        response_key=response_key,
-        cache_path=cache_path,
-        max_workers=max_workers,
-        timeout=timeout,
-        exec_timeout=exec_timeout,
-        seed=seed,
-        mc_aggregation=mc_aggregation,
-        allow_unsafe_code=allow_unsafe_code,
-        bootstrap_samples=bootstrap_samples,
-        confidence_level=confidence_level,
-        content_cache_dir=content_cache_dir,
-        force_recompute=force_recompute,
-        read_only_cache=read_only_cache,
-        model_name=model_name,
-        model_revision=model_revision,
-        input_key=input_key,
-        output_schema=output_schema,
-    )
-    return result.primary_value if result is not None else None
+    try:
+        result = evaluate_task_result(
+            eval_dataset=eval_dataset,
+            task_name=task_name,
+            label_key=label_key,
+            response_key=response_key,
+            cache_path=cache_path,
+            max_workers=max_workers,
+            timeout=timeout,
+            exec_timeout=exec_timeout,
+            seed=seed,
+            mc_aggregation=mc_aggregation,
+            allow_unsafe_code=allow_unsafe_code,
+            bootstrap_samples=bootstrap_samples,
+            confidence_level=confidence_level,
+            content_cache_dir=content_cache_dir,
+            force_recompute=force_recompute,
+            read_only_cache=read_only_cache,
+            model_name=model_name,
+            model_revision=model_revision,
+            input_key=input_key,
+            output_schema=output_schema,
+            expected_samples=expected_samples,
+        )
+    except Exception as exc:
+        logger.error("Evaluation failed: %s", exc, exc_info=True)
+        return None
+    return result.primary_value
 
 
 def _default_registry() -> TaskRegistry:
@@ -196,7 +202,8 @@ def evaluate_task_result(
     model_revision: str | None = None,
     input_key: str = "prompt",
     output_schema: str = "compact",
-) -> EvaluationResult | None:
+    expected_samples: int = 0,
+) -> EvaluationResult:
     """Evaluate a task through the registry and return all declared metrics."""
     actual_seed = 0 if seed is None else seed
     resolved_cache_path = _resolve_cache_path(cache_path, task_name)
@@ -221,6 +228,7 @@ def evaluate_task_result(
         read_only_cache=read_only_cache,
         input_key=input_key,
         output_schema=output_schema,
+        expected_samples=expected_samples,
     )
     registry = _default_registry()
     try:
@@ -238,6 +246,7 @@ def evaluate_task_result(
                     )
                     for spec in task.metric_specs
                 },
+                primary_metric=task.metric_specs[0].name if task.metric_specs else None,
             )
             write_per_item_results(
                 result, context.cache_path, output_schema=context.output_schema
@@ -263,10 +272,12 @@ def evaluate_task_result(
             result.skipped_count,
             result.timeout_count,
         )
+        if result.failure_counts:
+            logger.info("Task %s failure breakdown: %s", task_name, result.failure_counts)
         return result
     except Exception as exc:
         logger.error("Evaluation failed: %s", exc, exc_info=True)
-        return None
+        raise
 
 
 def main() -> int:
@@ -347,6 +358,7 @@ def main() -> int:
             args.model_revision,
             input_key=args.input_key,
             output_schema=args.output_schema,
+            expected_samples=args.expected_samples,
         )
 
         if result is not None:

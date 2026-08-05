@@ -112,20 +112,30 @@ class InferenceClient:
         )
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
+        # Token usage counters, accumulated under _usage_lock in
+        # _request_with_retry and reported by the runner's final summary.
+        self._usage_lock: threading.Lock = threading.Lock()
+        self.usage_stats: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+
         if self.api_key == "EMPTY":
             log = logger.debug if is_local_endpoint(base_url) else logger.warning
             log("Using default 'EMPTY' API key.")
 
-        # Initialize OpenAI client with validated configuration
+        # Initialize OpenAI client with validated configuration.
+        # max_retries=0: retries are handled by call_with_retry; letting the
+        # SDK retry too would nest the two retry loops.
         self.client: openai.OpenAI = openai.OpenAI(
             api_key=self.api_key,
             base_url=base_url,
             timeout=httpx.Timeout(self.timeout),
             organization=organization,
+            max_retries=0,
         )
-        masked_key = f"{self.api_key[:4]}***" if len(self.api_key) > 4 else "***"
         logger.info(
-            f"Using API Key: {masked_key}, Timeout: {self.timeout}, Max Retries: {self.max_retries}, base_url: {self.base_url}"
+            f"Using API Key: ***, Timeout: {self.timeout}, Max Retries: {self.max_retries}, base_url: {self.base_url}"
         )
 
     def _prepare_messages(
@@ -236,7 +246,10 @@ class InferenceClient:
         # max_tokens); normalize to "" so callers can treat it uniformly
         content = completion.choices[0].message.content or ""
         if cache is not None and cache_key is not None and content.strip():
-            cache.set(cache_key, {"content": content})
+            try:
+                cache.set(cache_key, {"content": content})
+            except Exception as exc:  # best-effort: never fail a finished request
+                logger.warning("Cache write failed, continuing without cache: %s", exc)
         return content
 
     def get_contents(
@@ -310,7 +323,10 @@ class InferenceClient:
             and contents
             and all(content.strip() for content in contents)
         ):
-            cache.set(cache_key, {"contents": contents})
+            try:
+                cache.set(cache_key, {"contents": contents})
+            except Exception as exc:  # best-effort: never fail a finished request
+                logger.warning("Cache write failed, continuing without cache: %s", exc)
         return contents
 
     def _build_call_args(
@@ -413,9 +429,32 @@ class InferenceClient:
             completion = self.client.chat.completions.create(**call_args)
             # Probe the structure so malformed responses are retried too
             _ = completion.choices[0].message
+            self._record_usage(completion)
             return completion
 
         return call_with_retry(do_request, self.max_retries)
+
+    def _record_usage(self, completion: Any) -> None:
+        """Accumulate token usage from a successful chat completion.
+
+        Best-effort: missing or malformed usage fields are ignored so usage
+        accounting can never break inference.
+        """
+        usage = getattr(completion, "usage", None)
+        if usage is None:
+            return
+        try:
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        usage_lock = getattr(self, "_usage_lock", None)
+        usage_stats = getattr(self, "usage_stats", None)
+        if usage_lock is None or not isinstance(usage_stats, dict):
+            return
+        with usage_lock:
+            usage_stats["prompt_tokens"] += prompt_tokens
+            usage_stats["completion_tokens"] += completion_tokens
 
 
 class InferenceRunner:
@@ -618,12 +657,18 @@ class InferenceRunner:
             return None
 
         result = item.copy()
+        expected_samples = int(
+            item.get("_llmeval_target_samples", sample_count_for_item(item))
+        )
         result.pop("n_samples", None)
         result.pop("_llmeval_sample_start", None)
         result.pop("_llmeval_requested_sample_indices", None)
-        gen_list = list(result.get(self.args.response_key, []))
+        result.pop("_llmeval_target_samples", None)
+        existing = result.get(self.args.response_key)
+        gen_list = list(existing) if isinstance(existing, list) else []
         gen_list.append(response)
         result[self.args.response_key] = gen_list
+        result["expected_samples"] = expected_samples
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:

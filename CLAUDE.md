@@ -56,13 +56,13 @@ System prompts are stored in factory dictionaries (`SYSTEM_PROMPT_FACTORY`, `VER
 
 Four entry points, each a standalone script with its own `main()`:
 
-- **`online.py`** — `InferenceClient` wraps `openai.OpenAI` with exponential backoff retry logic. `InferenceRunner` orchestrates concurrent requests via `ThreadPoolExecutor`, with resume support (reads existing output file, counts completed samples per prompt, continues). Entry: `python llmeval/inference/online.py --input_file ... --output_file ... --base_url ...`
+- **`online.py`** — `InferenceClient` wraps `openai.OpenAI` with exponential backoff retry logic. `InferenceRunner` orchestrates concurrent requests via `ThreadPoolExecutor`, with resume support based on stable `doc_id` and explicit sample indices. Entry: `python llmeval/inference/online.py --input_file ... --output_file ... --base_url ...`
 
 - **`offline.py`** — `OfflineInferenceRunner` uses vLLM's native `LLM` class for local batched inference. Converts data to chat message format, handles resume, writes results incrementally. Entry: `python llmeval/inference/offline.py --model_name_or_path ... --input_file ...`
 
 - **`mc.py`** — Multiple-choice inference. Loglikelihood mode scores each choice via the completions API (writes `choices` / `gold` / `logprobs`); generate mode produces free-form text (writes `gen`) for letter extraction at scoring time.
 
-- **`verifier.py`** — Extends offline inference with verifier-specific logic. Uses `VERIFY_PROMPT_FACTORY` prompts to have an LLM judge whether candidate answers match ground truth. Supports prompt templates like `compassverify`, `fdd_prompt_cursor`, etc.
+- **`verifier.py`** — Extends offline inference with verifier-specific logic. Uses `VERIFY_PROMPT_FACTORY` prompts to have an LLM judge whether candidate answers match ground truth.
 
 ### Evaluation/Scoring Layer (`llmeval/evaluator.py`, `llmeval/tasks/`)
 
@@ -74,18 +74,18 @@ Four entry points, each a standalone script with its own `main()`:
 
 - **`tasks/mc_eval/mc_score.py`** — MC scoring aligned with lm-evaluation-harness: `acc` / `acc_norm` (length-normalized) / `exact_match`. Loglikelihood mode argmaxes per-choice logprobs; generate mode extracts answer letters (`Answer: X` marker or last standalone A–J).
 
-- **`tasks/code_eval/code_score.py` + `execute.py`** — Code scoring with pass@1: extracts code from generations (fenced block → code-start heuristic → raw), then executes candidate + test harness in a sandboxed subprocess (`execute.py`: signal + process-level double timeout, dangerous-function guard, IO redirection).
+- **`tasks/code_eval/code_score.py` + `execute.py`** — Code scoring with pass@1: extracts code from generations, then executes candidate + test harness in a guarded subprocess. This guard is not a security sandbox; code evaluation must run in an externally isolated container or sandbox.
 
 ### Data Flow
 
-1. Input: JSONL file with `prompt` and `answer` fields
+1. Input: prepared JSONL with a unique `doc_id`, plus `prompt` and `answer`
 2. Inference: Each prompt is sampled `n_samples` times → output JSONL with `gen` list appended (MC loglikelihood mode instead writes `choices` / `gold` / `logprobs`)
 3. Scoring: `evaluator.py` reads the output JSONL and dispatches to the task-family scorer — math items go through `math-verify` → appends `accuracy`, `extracted_answer`, `extracted_gold` fields
 4. Results: Accuracy score printed and detailed results cached (per-item JSONL + `.summary.json` for MC/code)
 
 ### Resume Mechanism
 
-Both online and offline inference support resume. The runner reads the existing output file, counts how many `gen` entries each prompt already has, and only generates the remaining samples. Just re-run the same command.
+Online, offline, MC, and verifier inference preserve explicit sample indices. Resume computes the exact missing index set for each stable document, including holes from partially failed batched requests.
 
 ### Supported Task Names
 

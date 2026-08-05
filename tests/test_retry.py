@@ -135,12 +135,14 @@ class TestShouldRetry:
         with pytest.raises(ClientError, match="Max retries exceeded"):
             should_retry(err, 1, 1)
 
-    def test_unexpected_error_retries(self) -> None:
-        assert should_retry(RuntimeError("weird"), 0, 2) is True
+    def test_unexpected_error_is_reraised_without_retry(self) -> None:
+        """Non-APIError exceptions are programming errors — surface, don't retry."""
+        with pytest.raises(RuntimeError, match="weird"):
+            should_retry(RuntimeError("weird"), 0, 2)
 
-    def test_unexpected_error_exhaustion_raises(self) -> None:
-        with pytest.raises(ClientError, match="Max retries exceeded"):
-            should_retry(RuntimeError("weird"), 2, 2)
+    def test_unexpected_error_is_reraised_even_at_first_attempt(self) -> None:
+        with pytest.raises(RuntimeError, match="weird"):
+            should_retry(RuntimeError("weird"), 0, 3)
 
 
 # ── call_with_retry attempt loop ──────────────────────────────────
@@ -185,10 +187,10 @@ class TestCallWithRetry:
             call_with_retry(fn, 2)
         assert fn.call_count == 3  # 1 initial + 2 retries
 
-    def test_zero_retries_gives_single_attempt(self) -> None:
+    def test_non_api_error_propagates_without_retry(self) -> None:
         fn = MagicMock(side_effect=RuntimeError("down"))
-        with pytest.raises(ClientError, match="Max retries exceeded"):
-            call_with_retry(fn, 0)
+        with pytest.raises(RuntimeError, match="down"):
+            call_with_retry(fn, 3)
         assert fn.call_count == 1
 
     def test_return_value_passthrough(self) -> None:

@@ -469,7 +469,7 @@ class TestProcessGenerateItem:
         )
 
         assert result["gen"] == ["a", "b", "c"]
-        assert result["_llmeval_sample_indices"] == [0, 1, 2]
+        assert result["sample_indices"] == [0, 1, 2]
 
     def test_empty_middle_sample_is_compacted_for_resume(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
@@ -488,7 +488,7 @@ class TestProcessGenerateItem:
         )
 
         assert result["gen"] == ["a", "c"]
-        assert result["_llmeval_sample_indices"] == [0, 2]
+        assert result["sample_indices"] == [0, 2]
         assert client.chat.completions.create.call_args.kwargs["n"] == 3
 
     def test_non_contiguous_requested_indices_are_preserved(self, tmp_path: Path) -> None:
@@ -510,7 +510,7 @@ class TestProcessGenerateItem:
             [],
         )
 
-        assert result["_llmeval_sample_indices"] == [1, 3]
+        assert result["sample_indices"] == [1, 3]
 
 
 class TestMCStableResume:
@@ -584,7 +584,7 @@ class TestMCStableResume:
                     "prompt": "q",
                     "answer": "A",
                     "gen": ["a", "c"],
-                    "_llmeval_sample_indices": [0, 2],
+                    "sample_indices": [0, 2],
                 }
             )
             + "\n"

@@ -43,9 +43,20 @@ def error_message(e: APIError) -> str:
     return getattr(e, "message", None) or str(e)
 
 
+# Known server phrasings for prompt-exceeds-max-context rejections.
+_CONTEXT_LENGTH_PHRASES = (
+    "maximum context length",
+    "max context length",
+    "context length exceeded",
+    "context window",
+    "context_length",
+)
+
+
 def is_context_length_error(e: APIError) -> bool:
     """Whether the error is a prompt-exceeds-max-context-length rejection."""
-    return "maximum context length" in error_message(e)
+    msg = error_message(e).lower()
+    return any(phrase in msg for phrase in _CONTEXT_LENGTH_PHRASES)
 
 
 def non_retryable_client_error(e: APIError) -> str | None:
@@ -69,7 +80,7 @@ def retry_backoff(attempt: int, max_retries: int, reason: str) -> None:
         max_retries: Configured maximum number of retries (for logging)
         reason: Short failure description included in the warning log
     """
-    sleep_time = (2 ** (attempt + 1)) + random.randint(0, 5)
+    sleep_time = min(60, 2 ** (attempt + 1)) + random.randint(0, 5)
     logger.warning(
         f"{reason} on attempt {attempt + 1}/{max_retries + 1}. "
         f"Sleeping for {sleep_time:.2f}s."
@@ -96,6 +107,10 @@ def should_retry(exc: Exception, attempt: int, max_retries: int) -> bool | None:
     ClientError
         Non-retryable 4xx (retrying cannot succeed — fail fast), or
         *max_retries* exhausted.
+    Exception
+        Any non-APIError (TypeError, KeyError, ...) is re-raised as-is:
+        these are programming errors, not transient failures, and retrying
+        them would only hide the root cause.
     """
     # Connection / rate-limit errors are APIError subclasses, so they must be
     # excluded from the fatal-4xx checks (a 429 is always worth retrying).
@@ -110,15 +125,18 @@ def should_retry(exc: Exception, attempt: int, max_retries: int) -> bool | None:
         if non_retryable:
             raise ClientError(non_retryable, exc) from exc
 
+    # Non-APIError exceptions are programming errors, not transient API
+    # failures — surface them immediately instead of retrying.
+    if not isinstance(exc, APIError):
+        raise exc
+
     if attempt >= max_retries:
         raise ClientError(f"Max retries exceeded: {exc!s}", exc) from exc
 
     if isinstance(exc, APIConnectionError | RateLimitError):
         reason = f"{type(exc).__name__}: {exc!s}"
-    elif isinstance(exc, APIError):
-        reason = f"API error: {exc!s}"
     else:
-        reason = f"Unexpected {type(exc).__name__}: {exc!s}"
+        reason = f"API error: {exc!s}"
     retry_backoff(attempt, max_retries, reason)
     return True
 
@@ -143,6 +161,9 @@ def call_with_retry(
     ------
     ClientError
         Non-retryable 4xx (fail fast), or *max_retries* exhausted.
+    Exception
+        Non-APIError exceptions from *fn* are re-raised without retrying
+        (see :func:`should_retry`).
     """
     for attempt in range(max_retries + 1):
         try:

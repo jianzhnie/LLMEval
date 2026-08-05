@@ -47,9 +47,11 @@ def init_logger(
     logger.setLevel(level)
     logger.propagate = propagate
 
-    # Remove existing handlers to avoid duplicate logs
+    # Remove existing handlers to avoid duplicate logs; close them so the
+    # underlying file descriptors/streams are released instead of leaked.
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
+        handler.close()
 
     # Set default format if not provided
     if log_format is None:

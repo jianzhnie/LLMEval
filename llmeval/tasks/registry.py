@@ -82,6 +82,7 @@ class EvaluationContext(PreparationContext):
     read_only_cache: bool = False
     input_key: str = "prompt"
     output_schema: str = "compact"
+    expected_samples: int = 0
 
 
 class EvaluationTask(Protocol):
@@ -91,7 +92,6 @@ class EvaluationTask(Protocol):
     version: str
     pipeline_version: str
     metric_specs: tuple[MetricSpec, ...]
-    required_fields: tuple[str, ...]
 
     def prepare_dataset(
         self, data: list[dict[str, Any]], context: PreparationContext
@@ -144,8 +144,10 @@ def _build_evaluation_result(
         failed_count=scored.failed_count,
         skipped_count=scored.skipped_count,
         timeout_count=scored.timeout_count,
+        failure_counts=dict(scored.failure_counts),
         per_item=[dict(item) for item in scored.per_item],
         details=dict(scored.details),
+        primary_metric=task.metric_specs[0].name if task.metric_specs else None,
     )
 
 
@@ -219,7 +221,6 @@ class MathTask:
     version: str = "math_v1"
     pipeline_version: str = "math_response_v1"
     metric_specs: tuple[MetricSpec, ...] = (MetricSpec("accuracy"),)
-    required_fields: tuple[str, ...] = ("label", "response")
 
     def prepare_dataset(
         self, data: list[dict[str, Any]], context: PreparationContext
@@ -239,6 +240,8 @@ class MathTask:
             cache_path=str(context.cache_path),
             max_workers=context.max_workers,
             timeout=context.timeout,
+            expected_samples=context.expected_samples or None,
+            persist_legacy=False,
         )
         return _build_evaluation_result(scored, context, self)
 
@@ -258,7 +261,6 @@ class MCTask:
         MetricSpec("acc_bytes"),
         MetricSpec("exact_match"),
     )
-    required_fields: tuple[str, ...] = ("response",)
 
     def prepare_dataset(
         self, data: list[dict[str, Any]], context: PreparationContext
@@ -297,6 +299,7 @@ class MCTask:
                 response_key=context.response_key,
                 aggregation=context.mc_aggregation,
             )
+        kwargs["persist_legacy"] = False
         scored = scorer(**kwargs)
         return _build_evaluation_result(scored, context, self)
 
@@ -310,7 +313,6 @@ class CodeTask:
     version: str = "code_v1"
     pipeline_version: str = "code_generation_v1"
     metric_specs: tuple[MetricSpec, ...] = (MetricSpec("pass@1"),)
-    required_fields: tuple[str, ...] = ("label", "response")
 
     def prepare_dataset(
         self, data: list[dict[str, Any]], context: PreparationContext
@@ -332,6 +334,7 @@ class CodeTask:
             timeout=context.timeout,
             exec_timeout=context.exec_timeout,
             allow_unsafe_code=context.allow_unsafe_code,
+            persist_legacy=False,
         )
         return _build_evaluation_result(scored, context, self)
 
@@ -424,6 +427,7 @@ def evaluate_registered_task(
                 "pipeline_version": task.pipeline_version,
                 "bootstrap_samples": context.bootstrap_samples,
                 "confidence_level": context.confidence_level,
+                "expected_samples": context.expected_samples,
             },
         }
         cache_key = cache.key(payload)

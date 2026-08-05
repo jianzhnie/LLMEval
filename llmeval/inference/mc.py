@@ -39,6 +39,7 @@ from llmeval.inference.common import (
     is_local_endpoint,
     load_jsonl,
     load_resume_state,
+    missing_sample_indices,
     redact_config_for_logging,
     require_document_id,
     save_failed_items,
@@ -189,6 +190,7 @@ class MCLoglikelihoodClient:
         read_only_cache: bool = False,
         model_revision: str | None = None,
         cache_rank: str | None = None,
+        organization: str | None = None,
     ) -> None:
         """Initialize the client with API configuration.
 
@@ -223,10 +225,10 @@ class MCLoglikelihoodClient:
             api_key=self.api_key,
             base_url=base_url,
             timeout=httpx.Timeout(self.timeout),
+            organization=organization,
         )
-        masked_key = f"{self.api_key[:4]}***" if len(self.api_key) > 4 else "***"
         logger.info(
-            f"Using API Key: {masked_key}, Timeout: {self.timeout}, "
+            f"Using API Key: ***, Timeout: {self.timeout}, "
             f"Max Retries: {self.max_retries}, base_url: {base_url}"
         )
 
@@ -311,7 +313,7 @@ class MCLoglikelihoodClient:
 
         try:
             choice_logprobs = call_with_retry(do_request, self.max_retries)
-        except ClientError as e:
+        except Exception as e:
             logger.warning(f"Logprob request failed: {e}")
             choice_logprobs = None
         if choice_logprobs is None:
@@ -480,10 +482,13 @@ class MCLoglikelihoodClient:
                 self.max_retries,
                 fail_fast_exceptions=(ContinuationAlignmentError,),
             )
-        except ContinuationAlignmentError as exc:
+        except (ContinuationAlignmentError, ValueError) as exc:
             logger.debug("Continuation scoring fallback: %s", exc)
             return LoglikelihoodResult.failure(request, str(exc))
         except ClientError as exc:
+            logger.warning("Continuation logprob request failed: %s", exc)
+            return LoglikelihoodResult.failure(request, str(exc))
+        except Exception as exc:
             logger.warning("Continuation logprob request failed: %s", exc)
             return LoglikelihoodResult.failure(request, str(exc))
         if result is None:
@@ -551,6 +556,7 @@ class MCRunner:
                     read_only_cache=config.read_only_cache,
                     model_revision=config.model_revision,
                     cache_rank=config.cache_rank,
+                    organization=config.organization,
                 )
             except (OSError, ValueError) as e:
                 raise RuntimeError(f"Failed to initialize MC client: {e}") from e
@@ -631,7 +637,7 @@ class MCRunner:
         )
         completed_indices = resume_state.completed_indices
         completed_ids = {document_id for document_id, _ in completed_indices}
-        completed_prompts = set(resume_state.legacy_counts)
+        legacy_counts = resume_state.legacy_counts
 
         remaining: list[dict[str, Any]] = []
         for index, raw_item in enumerate(raw_data):
@@ -644,18 +650,15 @@ class MCRunner:
             identity = (document_id, rendered_prompt)
             used_indices = completed_indices.get(identity, set())
             completed = sum(index < target_samples for index in used_indices)
-            if completed == 0 and rendered_prompt in completed_prompts:
-                # Legacy MC output did not record per-sample counts. Treat the
-                # item as complete, matching the historical resume behavior.
-                completed = target_samples
+            if completed == 0:
+                completed = min(max(legacy_counts.get(rendered_prompt, 0), 0), target_samples)
             is_completed = completed >= target_samples
             if not is_completed:
                 if self.config.mode == "generate":
-                    missing_indices = [
-                        index
-                        for index in range(target_samples)
-                        if index not in used_indices
-                    ]
+                    effective_used = used_indices or set(range(completed))
+                    missing_indices = missing_sample_indices(
+                        target_samples, effective_used
+                    )
                     item["_llmeval_remaining_samples"] = len(missing_indices)
                     item["_llmeval_requested_sample_indices"] = missing_indices
                     item["_llmeval_sample_start"] = missing_indices[0]
@@ -663,10 +666,10 @@ class MCRunner:
                     item["sample_index"] = completed
                 remaining.append(item)
 
-        if completed_ids or completed_prompts:
+        if completed_ids or legacy_counts:
             logger.info(
                 "Found %d completed items.",
-                len(completed_ids) + len(completed_prompts),
+                len(completed_ids) + len(legacy_counts),
             )
 
         total_remaining_samples = sum(
@@ -941,6 +944,7 @@ class MCRunner:
             api_key=self.config.api_key,
             base_url=self.config.base_url,
             timeout=httpx.Timeout(self.config.request_timeout),
+            organization=self.config.organization,
         )
 
         base_messages: list[dict[str, str]] = []
@@ -1098,13 +1102,18 @@ class MCRunner:
             requested_indices[position] for position in generation_positions
         ]
 
-        return {
+        result = {
             self.config.input_key: prompt,
             self.config.label_key: gold,
             self.config.response_key: generations,
             **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
-            "_llmeval_sample_indices": sample_indices,
+            "expected_samples": self.config.n_samples,
         }
+        if len(sample_indices) == 1:
+            result["sample_index"] = sample_indices[0]
+        else:
+            result["sample_indices"] = sample_indices
+        return result
 
     # ------------------------------------------------------------------
     # Stats and reporting

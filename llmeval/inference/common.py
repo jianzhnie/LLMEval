@@ -38,6 +38,7 @@ __all__ = [
     "is_local_endpoint",
     "load_jsonl",
     "load_resume_state",
+    "missing_sample_indices",
     "prepare_data_with_resume",
     "redact_config_for_logging",
     "require_document_id",
@@ -220,7 +221,9 @@ def load_resume_state(
 
                 identity = (str(document_id), str(prompt))
                 completed = state.completed_indices.setdefault(identity, set())
-                raw_indices = item.get("_llmeval_sample_indices")
+                raw_indices = item.get("sample_indices")
+                if raw_indices is None:
+                    raw_indices = item.get("sample_indices")
                 if (
                     isinstance(raw_indices, list)
                     and len(raw_indices) == count
@@ -245,6 +248,13 @@ def load_resume_state(
     return state
 
 
+def missing_sample_indices(target_samples: int, completed: set[int]) -> list[int]:
+    """Return the exact non-contiguous sample indices still required."""
+    if target_samples <= 0:
+        raise ValueError(f"target_samples must be positive, got {target_samples}")
+    return [index for index in range(target_samples) if index not in completed]
+
+
 def redact_config_for_logging(
     payload: dict[str, Any], *, replacement: str = "***"
 ) -> dict[str, Any]:
@@ -254,7 +264,17 @@ def redact_config_for_logging(
     logging. Keep the redaction recursive so nested request/config dictionaries
     cannot accidentally reintroduce credentials into run logs.
     """
-    sensitive_fragments = ("api_key", "authorization", "cookie")
+    sensitive_fragments = (
+        "api_key",
+        "api-token",
+        "api_token",
+        "authorization",
+        "cookie",
+        "password",
+        "secret",
+        "access_token",
+        "refresh_token",
+    )
 
     def redact(value: Any, key: str | None = None) -> Any:
         if key and any(fragment in key.lower() for fragment in sensitive_fragments):
@@ -319,11 +339,10 @@ def expand_data_with_resume(
             # first ``legacy_done`` contiguous indices were written.
             legacy_done = legacy_counts.get(prompt, 0)
             used = set(range(max(legacy_done, 0)))
-        for sample_index in range(n_samples):
-            if sample_index in used:
-                continue
+        for sample_index in missing_sample_indices(n_samples, used):
             expanded_item = copy.deepcopy(item)
             expanded_item["sample_index"] = sample_index
+            expanded_item["expected_samples"] = n_samples
             expanded_data.append(expanded_item)
 
     if skipped_items > 0:
@@ -369,12 +388,13 @@ def prepare_data_with_resume(
         used = set(completed_indices.get(identity, set()))
         if not used:
             used = set(range(max(legacy_counts.get(prompt, 0), 0)))
-        missing = [sample_index for sample_index in range(n_samples) if sample_index not in used]
+        missing = missing_sample_indices(n_samples, used)
         if not missing:
             continue
 
         prepared_item = copy.deepcopy(item)
         prepared_item[sample_count_key] = len(missing)
+        prepared_item["_llmeval_target_samples"] = n_samples
         prepared_item["_llmeval_requested_sample_indices"] = missing
         prepared_data.append(prepared_item)
 
@@ -444,10 +464,22 @@ def save_failed_items(
     """
     failed_file = os.path.splitext(str(output_file))[0] + "_failed.jsonl"
     try:
-        Path(failed_file).parent.mkdir(parents=True, exist_ok=True)
+        failed_path = Path(failed_file)
+        failed_path.parent.mkdir(parents=True, exist_ok=True)
+        existing: set[str] = set()
+        if failed_path.exists():
+            for line in failed_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    existing.add(json.dumps(json.loads(line), sort_keys=True))
+                except json.JSONDecodeError:
+                    continue
         with open(failed_file, "a", encoding="utf-8") as f:
             for entry in failed_items:
+                identity = json.dumps(entry, sort_keys=True)
+                if identity in existing:
+                    continue
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                existing.add(identity)
         logger.info(f"Failed items saved to: {failed_file}")
     except OSError as e:
         logger.error(f"Failed to save failed items to file: {e}")

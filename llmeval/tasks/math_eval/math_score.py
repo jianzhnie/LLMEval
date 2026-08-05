@@ -170,6 +170,8 @@ class MathAnswerResult:
     predicted: str | None
     gold: str | None
     fallback_matched: bool = False
+    failure_stage: str = "none"
+    failure_reason: str | None = None
 
     def __iter__(self) -> Iterator[int | float | str | None]:
         yield self.index
@@ -290,7 +292,7 @@ def _math_text_equiv(gold_text: Any, pred_text: Any) -> bool:
 
 def process_answers(
     args: tuple[int, dict[str, Any], str, str],
-) -> tuple[int, float, str | None, str | None] | MathAnswerResult | None:
+) -> MathAnswerResult:
     """
     Process a single model output by extracting and comparing with ground truth.
 
@@ -324,7 +326,9 @@ def process_answers(
     task_name = input_data.get("task", "")
     if not _is_math_task_name(task_name):
         logger.warning(f"⚠️ Invalid task format for job {index}")
-        return index, 0.0, None, None
+        return MathAnswerResult(
+            index, 0.0, None, None, failure_stage="input", failure_reason="invalid task"
+        )
     _, _, data_name = task_name.partition("/")
 
     # Parse the ground truth answer from the input data
@@ -334,13 +338,27 @@ def process_answers(
         _, gold_answer_text = parse_ground_truth(input_data, data_name, label_key)
     except (ValueError, NotImplementedError, KeyError) as e:
         logger.error(f"❌ [Error] Parsing gold truth for job {index} failed: {e}")
-        return index, 0.0, f"Error: {e}", None
+        return MathAnswerResult(
+            index,
+            0.0,
+            None,
+            None,
+            failure_stage="input",
+            failure_reason=str(e),
+        )
 
     # Get the generated text. Handles cases where response might be missing or empty.
     generated_text = input_data.get(response_key, [])
     if not generated_text:
         logger.warning(f"⚠️ No generated text found for job {index}")
-        return index, 0.0, None, None
+        return MathAnswerResult(
+            index,
+            0.0,
+            None,
+            None,
+            failure_stage="inference",
+            failure_reason="missing generation",
+        )
     generated_text = (
         generated_text[0] if isinstance(generated_text, list) else str(generated_text)
     )
@@ -359,7 +377,14 @@ def process_answers(
                 "No answers could be extracted for job %d; fallback did not match",
                 index,
             )
-            return index, 0.0, None, None
+            return MathAnswerResult(
+                index,
+                0.0,
+                None,
+                gold_answer_text,
+                failure_stage="extraction",
+                failure_reason="no answer extracted",
+            )
 
         # Extract answers with validation
         try:
@@ -367,20 +392,41 @@ def process_answers(
             pred_ans = extracted_answers[1] if len(extracted_answers) > 1 else None
         except IndexError:
             logger.error(f"❌ [Error] Invalid extraction format for job {index}")
-            return index, 0.0, None, None
+            return MathAnswerResult(
+                index,
+                0.0,
+                None,
+                gold_answer_text,
+                failure_stage="extraction",
+                failure_reason="invalid extraction format",
+            )
 
         # Validate grade value
         if not (isinstance(grade, int | float) and 0 <= grade <= 1):
             logger.error(f"❌ [Error] Invalid grade value {grade} for job {index}")
-            return index, 0.0, pred_ans, gold_ans
+            return MathAnswerResult(
+                index,
+                0.0,
+                pred_ans,
+                gold_ans,
+                failure_stage="verification",
+                failure_reason=f"invalid grade: {grade!r}",
+            )
 
-        return index, float(grade), pred_ans, gold_ans
+        return MathAnswerResult(index, float(grade), pred_ans, gold_ans)
 
     # Note: Pebble enforces timeouts at the pool level (terminating subprocess),
     # so TimeoutError here is a safety net for timeouts from math_verify internals.
     except TimeoutError:
         logger.warning(f"⏰ [Timeout] Job {index} timed out")
-        return index, 0.0, "Timeout", "Timeout"
+        return MathAnswerResult(
+            index,
+            0.0,
+            "Timeout",
+            "Timeout",
+            failure_stage="verification",
+            failure_reason="timeout",
+        )
     except ValueError as ve:
         if _math_text_equiv(gold_answer_text, generated_text):
             logger.debug("Fallback normalization matched job %d after: %s", index, ve)
@@ -388,7 +434,14 @@ def process_answers(
                 index, 1.0, generated_text, gold_answer_text, fallback_matched=True
             )
         logger.warning("Math verification value error for job %d: %s", index, ve)
-        return index, 0.0, f"Format Error: {ve}", None
+        return MathAnswerResult(
+            index,
+            0.0,
+            None,
+            gold_answer_text,
+            failure_stage="verification",
+            failure_reason=str(ve),
+        )
     except Exception as e:
         if _math_text_equiv(gold_answer_text, generated_text):
             logger.debug("Fallback normalization matched job %d after %s", index, e)
@@ -399,7 +452,14 @@ def process_answers(
             f"❌ [Error] An unexpected error occurred for job {index}: {e}",
             exc_info=True,
         )
-        return index, 0.0, f"Error: {e}", f"Error: {e}"
+        return MathAnswerResult(
+            index,
+            0.0,
+            None,
+            gold_answer_text,
+            failure_stage="verification",
+            failure_reason=str(e),
+        )
 
 
 def _math_record_status(
@@ -407,6 +467,7 @@ def _math_record_status(
     label_key: str,
     response_key: str,
     extracted_answer: Any,
+    failure_stage: str = "none",
 ) -> str:
     """Classify a math record for the shared denominator contract.
 
@@ -416,21 +477,20 @@ def _math_record_status(
     """
     if extracted_answer == "Timeout":
         return "timeout"
-    if isinstance(extracted_answer, str) and extracted_answer.startswith(
-        ("Error", "Format Error")
-    ):
+    if failure_stage in {"inference", "extraction", "verification"}:
         return "failed"
     response = item.get(response_key)
     label = item.get(label_key)
     task_name = item.get("task")
     if (
-        not response
-        or label is None
+        label is None
         or (isinstance(label, str) and not label.strip())
         or not isinstance(task_name, str)
         or not _is_math_task_name(task_name)
     ):
         return "skipped"
+    if not response:
+        return "failed"
     return "completed"
 
 
@@ -441,6 +501,7 @@ def compute_scores(
     cache_path: str,
     max_workers: int,
     timeout: int,
+    persist_legacy: bool = True,
 ) -> float:
     """
     Computes accuracy scores for a batch of mathematical evaluation jobs using parallel processing.
@@ -485,6 +546,7 @@ def compute_scores(
     total = len(eval_dataset)
     stats = ProcessingStats(total=total)
     processed_indices = set()
+    failure_counts: dict[str, int] = Counter()
 
     # Optimize worker count based on system resources.
     # Use min(total, max_workers, cpu_count-1) to avoid over-provisioning
@@ -525,9 +587,15 @@ def compute_scores(
             pbar.update(1)
             if result is not None:
                 fallback_matched = bool(getattr(result, "fallback_matched", False))
+                failure_stage = str(getattr(result, "failure_stage", "none"))
+                failure_reason = getattr(result, "failure_reason", None)
                 idx, is_correct, extracted_answer, extracted_gold = result
                 status = _math_record_status(
-                    eval_dataset[idx], label_key, response_key, extracted_answer
+                    eval_dataset[idx],
+                    label_key,
+                    response_key,
+                    extracted_answer,
+                    failure_stage,
                 )
 
                 # Update results atomically
@@ -537,6 +605,8 @@ def compute_scores(
                         "extracted_gold": extracted_gold,
                         "extracted_answer": extracted_answer,
                         "evaluation_status": status,
+                        "failure_stage": failure_stage,
+                        "failure_reason": failure_reason,
                         "fallback_matched": fallback_matched,
                         **_filter_artifacts(eval_dataset[idx].get(response_key)),
                     }
@@ -550,6 +620,7 @@ def compute_scores(
                     stats.timeout += 1
                 elif status == "failed":
                     stats.error += 1
+                    failure_counts[f"{failure_stage}_failed"] += 1
                 elif status == "skipped":
                     stats.skipped += 1
 
@@ -564,10 +635,13 @@ def compute_scores(
                     "extracted_gold": "Timeout",
                     "extracted_answer": "Timeout",
                     "evaluation_status": "timeout",
+                    "failure_stage": "verification",
+                    "failure_reason": "pool timeout",
                     **_filter_artifacts(eval_dataset[idx].get(response_key)),
                 }
             )
             stats.timeout += 1
+            failure_counts["verification_failed"] += 1
 
     logger.info(f"Summary: {total} eval_dataset processed.")
 
@@ -593,11 +667,13 @@ def compute_scores(
         "effective_sample_count": stats.effective,
         "workers_used": optimal_workers,
         "timeout_setting": timeout,
+        "failure_counts": dict(failure_counts),
     }
 
     logger.debug(f"Processing metadata: {metadata}")
     # Save the results to the cache file
-    save_cache(eval_dataset, cache_path)
+    if persist_legacy:
+        save_cache(eval_dataset, cache_path)
 
     # Calculate and return the average accuracy
     eligible_accuracy = [
@@ -606,11 +682,8 @@ def compute_scores(
         if data.get("evaluation_status", "completed") == "completed"
     ]
     accuracy = mean(eligible_accuracy) if eligible_accuracy else 0.0
-    save_summary(
-        accuracy=accuracy,
-        metadata=metadata,
-        cache_path=cache_path,
-    )
+    if persist_legacy:
+        save_summary(accuracy=accuracy, metadata=metadata, cache_path=cache_path)
     logger.info(f"Final Accuracy: {accuracy:.4f}")
     return accuracy
 
@@ -622,6 +695,8 @@ def compute_score_result(
     cache_path: str,
     max_workers: int,
     timeout: int,
+    expected_samples: int | None = None,
+    persist_legacy: bool = True,
 ) -> ScorerResult:
     """Return math scores through the registry's structured scorer contract.
 
@@ -641,6 +716,7 @@ def compute_score_result(
         cache_path=cache_path,
         max_workers=max_workers,
         timeout=timeout,
+        persist_legacy=persist_legacy,
     )
     observations = [
         float(item.get("accuracy", 0.0))
@@ -656,8 +732,20 @@ def compute_score_result(
     skipped_count = sum(
         item.get("evaluation_status") == "skipped" for item in scoring_dataset
     )
+    failure_counts: dict[str, int] = Counter()
+    for item in scoring_dataset:
+        stage = str(item.get("failure_stage", "none"))
+        if item.get("evaluation_status") == "failed":
+            failure_counts[f"{stage}_failed"] += 1
+        elif item.get("evaluation_status") == "timeout":
+            failure_counts["verification_failed"] += 1
+    failure_counts["wrong_answer"] = sum(
+        item.get("evaluation_status", "completed") == "completed"
+        and float(item.get("accuracy", 0.0)) != 1.0
+        for item in scoring_dataset
+    )
     details, extra_metrics, problem_observations = _build_problem_level_metrics(
-        scoring_dataset
+        scoring_dataset, expected_samples=expected_samples
     )
     metrics = {"accuracy": accuracy, "sample_accuracy": accuracy, **extra_metrics}
     return ScorerResult(
@@ -674,6 +762,7 @@ def compute_score_result(
         failed_count=failed_count,
         skipped_count=skipped_count,
         timeout_count=timeout_count,
+        failure_counts=failure_counts,
     )
 
 
@@ -682,7 +771,7 @@ def _expand_math_samples(
 ) -> list[dict[str, Any]]:
     """Expand grouped generation rows into one scoring record per sample.
 
-    ``_llmeval_sample_indices`` is an inference-only compatibility field.  It
+    ``sample_indices`` is an inference-only compatibility field.  It
     is consumed here and replaced with the public ``sample_index`` field so
     scoring output has a stable, uniform schema.
     """
@@ -691,7 +780,9 @@ def _expand_math_samples(
         responses = item.get(response_key)
         if not isinstance(responses, list):
             responses = [responses] if responses is not None else []
-        raw_indices = item.get("_llmeval_sample_indices")
+        raw_indices = item.get("sample_indices")
+        if raw_indices is None:
+            raw_indices = item.get("sample_indices")
         valid_indices = (
             isinstance(raw_indices, list)
             and len(raw_indices) == len(responses)
@@ -701,7 +792,8 @@ def _expand_math_samples(
         if not responses:
             # Preserve a missing-generation record so it is counted as skipped.
             record = dict(item)
-            record.pop("_llmeval_sample_indices", None)
+            record.pop("sample_indices", None)
+            record.pop("sample_indices", None)
             record[response_key] = []
             record["sample_index"] = 0
             record["_math_problem_index"] = row_index
@@ -709,7 +801,8 @@ def _expand_math_samples(
             continue
         for sample_index, response in zip(sample_indices, responses, strict=True):
             record = dict(item)
-            record.pop("_llmeval_sample_indices", None)
+            record.pop("sample_indices", None)
+            record.pop("sample_indices", None)
             record[response_key] = [response]
             record["sample_index"] = sample_index
             record["_math_problem_index"] = row_index
@@ -718,25 +811,69 @@ def _expand_math_samples(
 
 
 def _problem_identity(item: dict[str, Any], row_index: int) -> str:
-    """Return a stable grouping key for problem-level aggregation."""
+    """Return a stable grouping key without merging equal prompt text."""
     document_id = item.get("doc_id")
     if document_id is not None and str(document_id).strip():
-        return str(document_id)
-    prompt = item.get("prompt")
-    if prompt is not None and str(prompt).strip():
-        return str(prompt)
+        return f"doc:{document_id}"
     if isinstance(item.get("_math_problem_index"), int):
-        return f"__row_{item['_math_problem_index']}"
-    return f"__row_{row_index}"
+        return f"row:{item['_math_problem_index']}"
+    return f"row:{row_index}"
+
+
+def _majority_cluster(items: list[dict[str, Any]]) -> tuple[str | None, bool]:
+    """Vote over math-equivalent answers, preserving deterministic tie order."""
+    clusters: list[tuple[str, list[dict[str, Any]]]] = []
+    for item in items:
+        answer = item.get("extracted_answer")
+        if answer in (None, ""):
+            continue
+        answer_text = str(answer)
+        if answer_text.startswith(("Error", "Format Error", "Timeout")):
+            continue
+        for position, (representative, members) in enumerate(clusters):
+            if answer_text == representative or _math_text_equiv(representative, answer_text):
+                clusters[position] = (representative, [*members, item])
+                break
+        else:
+            clusters.append((answer_text, [item]))
+    if not clusters:
+        return None, False
+    representative, members = max(
+        enumerate(clusters), key=lambda entry: (len(entry[1][1]), -entry[0])
+    )[1]
+    return representative, any(float(item.get("accuracy", 0.0)) == 1.0 for item in members)
 
 
 def _build_problem_level_metrics(
     scored_dataset: list[dict[str, Any]],
+    expected_samples: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, float], dict[str, list[float]]]:
     """Aggregate sample outcomes into pass@k and majority-vote metrics."""
     grouped: dict[str, list[dict[str, Any]]] = {}
+    seen_samples: dict[str, dict[int, dict[str, Any]]] = {}
     for row_index, item in enumerate(scored_dataset):
-        grouped.setdefault(_problem_identity(item, row_index), []).append(item)
+        problem_id = _problem_identity(item, row_index)
+        sample_index = item.get("sample_index")
+        if isinstance(sample_index, int) and sample_index >= 0:
+            existing = seen_samples.setdefault(problem_id, {}).get(sample_index)
+            if existing is not None:
+                existing_signature = (
+                    existing.get("extracted_answer"),
+                    float(existing.get("accuracy", 0.0)),
+                    existing.get("evaluation_status"),
+                )
+                current_signature = (
+                    item.get("extracted_answer"),
+                    float(item.get("accuracy", 0.0)),
+                    item.get("evaluation_status"),
+                )
+                if existing_signature != current_signature:
+                    raise ValueError(
+                        f"Conflicting duplicate math sample {problem_id!r}/{sample_index}"
+                    )
+                continue
+            seen_samples[problem_id][sample_index] = item
+        grouped.setdefault(problem_id, []).append(item)
         item.pop("_math_problem_index", None)
 
     problems: list[dict[str, Any]] = []
@@ -749,33 +886,24 @@ def _build_problem_level_metrics(
         correct_samples = sum(
             float(item.get("accuracy", 0.0)) == 1.0 for item in completed
         )
-        predictions = [
-            str(item["extracted_answer"])
-            for item in completed
-            if item.get("extracted_answer") not in (None, "")
-            and not str(item["extracted_answer"]).startswith(
-                ("Error", "Format Error", "Timeout")
-            )
-        ]
-        majority_prediction = None
-        majority_correct = False
-        if predictions:
-            majority_prediction = Counter(predictions).most_common(1)[0][0]
-            majority_records = [
-                item
-                for item in completed
-                if str(item.get("extracted_answer")) == majority_prediction
-            ]
-            majority_correct = any(
-                float(item.get("accuracy", 0.0)) == 1.0
-                for item in majority_records
-            )
+        majority_prediction, majority_correct = _majority_cluster(completed)
         sample_count = len(items)
+        item_expected = max(
+            [int(item["expected_samples"]) for item in items
+             if isinstance(item.get("expected_samples"), int)
+             and item["expected_samples"] > 0],
+            default=0,
+        )
+        target_count = expected_samples if expected_samples and expected_samples > 0 else item_expected
+        target_count = target_count or sample_count
         problems.append(
             {
                 "doc_id": problem_id,
                 "correct_samples": correct_samples,
                 "sample_count": sample_count,
+                "observed_samples": sample_count,
+                "expected_samples": target_count,
+                "complete": sample_count >= target_count,
                 "correct_fraction": correct_samples / sample_count if sample_count else 0.0,
                 "passed": correct_samples > 0,
                 "majority_prediction": majority_prediction,
@@ -787,8 +915,8 @@ def _build_problem_level_metrics(
         return [], {}, {}
     metrics: dict[str, float] = {}
     observations: dict[str, list[float]] = {}
-    for k in sorted({problem["sample_count"] for problem in problems}):
-        cohort = [problem for problem in problems if problem["sample_count"] == k]
+    for k in sorted({problem["expected_samples"] for problem in problems}):
+        cohort = [problem for problem in problems if problem["expected_samples"] == k]
         pass_key = f"problem_pass@{k}"
         majority_key = f"problem_majority@{k}"
         pass_values = [float(problem["passed"]) for problem in cohort]

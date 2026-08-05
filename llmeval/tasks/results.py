@@ -73,15 +73,19 @@ class EvaluationResult:
     failed_count: int = 0
     skipped_count: int = 0
     timeout_count: int = 0
+    failure_counts: dict[str, int] = field(default_factory=dict)
     per_item: list[dict[str, Any]] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
     cache_key: str | None = None
+    primary_metric: str | None = None
 
     @property
     def primary_value(self) -> float:
         """Return the conventional primary metric value."""
         if not self.metrics:
             return 0.0
+        if self.primary_metric and self.primary_metric in self.metrics:
+            return self.metrics[self.primary_metric].value
         return next(iter(self.metrics.values())).value
 
     def to_dict(self, *, include_per_item: bool = False) -> dict[str, Any]:
@@ -98,8 +102,10 @@ class EvaluationResult:
             "failed_count": self.failed_count,
             "skipped_count": self.skipped_count,
             "timeout_count": self.timeout_count,
+            "failure_counts": dict(self.failure_counts),
             "details": self.details,
             "cache_key": self.cache_key,
+            "primary_metric": self.primary_metric,
         }
         if include_per_item:
             payload["per_item"] = self.per_item
@@ -127,6 +133,11 @@ class EvaluationResult:
             failed_count=int(data.get("failed_count", 0)),
             skipped_count=int(data.get("skipped_count", 0)),
             timeout_count=int(data.get("timeout_count", 0)),
+            failure_counts={
+                str(name): int(value)
+                for name, value in (data.get("failure_counts") or {}).items()
+                if isinstance(value, int | float) and int(value) >= 0
+            },
             per_item=(
                 [dict(item) for item in data["per_item"] if isinstance(item, dict)]
                 if isinstance(data.get("per_item"), list)
@@ -134,6 +145,9 @@ class EvaluationResult:
             ),
             details=(dict(data["details"]) if isinstance(data.get("details"), dict) else {}),
             cache_key=(str(data["cache_key"]) if data.get("cache_key") else None),
+            primary_metric=(
+                str(data["primary_metric"]) if data.get("primary_metric") else None
+            ),
         )
 
 
@@ -156,12 +170,18 @@ class ScorerResult:
     failed_count: int = 0
     skipped_count: int = 0
     timeout_count: int = 0
+    failure_counts: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if any(not math.isfinite(float(value)) for value in self.metrics.values()):
             raise ValueError("scorer metrics must be finite")
         if any(count < 0 for count in self._counts):
             raise ValueError("scorer result counts must be non-negative")
+        if any(
+            not isinstance(name, str) or not isinstance(value, int) or value < 0
+            for name, value in self.failure_counts.items()
+        ):
+            raise ValueError("failure counts must be non-negative integers")
         excluded_count = self.failed_count + self.skipped_count + self.timeout_count
         if excluded_count > self.sample_count:
             raise ValueError("excluded sample counts cannot exceed sample count")

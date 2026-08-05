@@ -595,6 +595,7 @@ def _score_code_task_result(
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
     k_values: tuple[int, ...] = (1, 10, 64),
     allow_unsafe_code: bool = False,
+    persist_legacy: bool = True,
 ) -> CodeScoreResult:
     """Score a code-generation dataset and return task-native details.
 
@@ -681,7 +682,8 @@ def _score_code_task_result(
         problems=problems,
         per_item=records,
     )
-    write_cache(result, cache_path)
+    if persist_legacy:
+        write_cache(result, cache_path)
 
     logger.info(
         "Pass@1: %.2f%% (%d/%d correct samples, %d problem(s))",
@@ -757,6 +759,7 @@ def score_code_result(
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
     k_values: tuple[int, ...] = (1, 10, 64),
     allow_unsafe_code: bool = False,
+    persist_legacy: bool = True,
 ) -> ScorerResult:
     """Score code and return the registry's structured scorer contract."""
     result = _score_code_task_result(
@@ -769,6 +772,7 @@ def score_code_result(
         exec_timeout=exec_timeout,
         k_values=k_values,
         allow_unsafe_code=allow_unsafe_code,
+        persist_legacy=persist_legacy,
     )
     metrics = dict(result.pass_at_k)
     metrics.setdefault("pass@1", result.pass_at_1)
