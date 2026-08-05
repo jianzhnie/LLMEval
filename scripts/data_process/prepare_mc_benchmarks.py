@@ -119,7 +119,11 @@ def _format_mc_row(
             fmt[letters[i]] = c
 
     elif name == "mmlu_pro":
-        choices = [c.strip() for c in example["options"].split(",")]
+        raw_options = example["options"]
+        if isinstance(raw_options, str):
+            choices = [c.strip() for c in raw_options.split(",")]
+        else:
+            choices = [str(c).strip() for c in raw_options]
         answer_idx = example.get("answer_index")
         if answer_idx is not None and isinstance(answer_idx, int):
             answer = letters[answer_idx]
@@ -148,7 +152,15 @@ def _format_mc_row(
     else:
         return {"prompt": str(example), "answer": "", "choices": [], "gold": -1}
 
-    prompt = template.format(**fmt)
+    if name == "mmlu_pro":
+        # MMLU-Pro records can contain fewer than ten options; build only the
+        # labels present instead of formatting the fixed A-J template.
+        option_lines = "\n".join(
+            f"{letters[i]}. {choice}" for i, choice in enumerate(choices)
+        )
+        prompt = f"{example['question']}\n{option_lines}\nAnswer:"
+    else:
+        prompt = template.format(**fmt)
     return {
         "doc_id": f"{name}:{source_id}",
         "prompt": prompt,

@@ -87,8 +87,13 @@ def prepare_mbpp(
     records: list[dict[str, Any]] = []
     for index, item in enumerate(data):
         task_id = str(item.get("task_id", index))
+        description = item.get("text", item.get("prompt"))
+        if description is None:
+            raise KeyError(
+                "MBPP record must contain either a 'text' or 'prompt' field"
+            )
         tests = "\n".join(item["test_list"])
-        prompt = PROMPT_TEMPLATE.format(text=item["text"], tests=tests)
+        prompt = PROMPT_TEMPLATE.format(text=description, tests=tests)
         records.append(
             {
                 "doc_id": f"{benchmark_name}:{task_id}",

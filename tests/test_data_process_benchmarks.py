@@ -88,6 +88,24 @@ def test_mc_formatter_persists_document_id() -> None:
     assert row["doc_id"] == "mmlu:algebra:3"
 
 
+def test_mmlu_pro_formatter_accepts_list_options() -> None:
+    module = _load_script(MC_SCRIPT)
+
+    row = module._format_mc_row(
+        "mmlu_pro",
+        {
+            "question": "1+1?",
+            "options": ["1", "2", "3", "4"],
+            "answer_index": 1,
+        },
+        source_id="algebra:3",
+    )
+
+    assert row["doc_id"] == "mmlu_pro:algebra:3"
+    assert row["choices"] == ["A", "B", "C", "D"]
+    assert row["answer"] == "B"
+
+
 def test_code_preparers_persist_document_id() -> None:
     module = _load_script(CODE_SCRIPT)
 
@@ -109,3 +127,21 @@ def test_code_preparers_persist_document_id() -> None:
 
     assert humaneval[0]["doc_id"] == "humaneval:HumanEval/0"
     assert mbpp[0]["doc_id"] == "mbpp:7"
+
+
+def test_mbpp_plus_formatter_accepts_prompt_description() -> None:
+    module = _load_script(CODE_SCRIPT)
+
+    records = module.prepare_mbpp(
+        [
+            {
+                "task_id": 2,
+                "prompt": "Write a function that returns one.",
+                "test_list": ["assert f() == 1"],
+            }
+        ],
+        "mbpp_plus",
+    )
+
+    assert records[0]["doc_id"] == "mbpp_plus:2"
+    assert "Write a function that returns one." in records[0]["prompt"]
