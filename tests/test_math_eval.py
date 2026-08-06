@@ -205,6 +205,42 @@ class TestProcessAnswers:
 
 
 class TestComputeScores:
+    def test_extraction_failure_is_separate_from_wrong_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.tasks.math_eval.math_score as math_mod
+
+        def fake_compute_scores(*, eval_dataset, **_kwargs):
+            eval_dataset[0].update(
+                accuracy=0.0,
+                evaluation_status="failed",
+                failure_stage="extraction",
+            )
+            eval_dataset[1].update(
+                accuracy=0.0,
+                evaluation_status="completed",
+                failure_stage="none",
+            )
+            return 0.0
+
+        monkeypatch.setattr(math_mod, "compute_scores", fake_compute_scores)
+        result = math_mod.score_math_result(
+            eval_dataset=[
+                _math_item("5", ["unparseable"]),
+                _math_item("5", ["$\\boxed{6}$"]),
+            ],
+            label_key="answer",
+            response_key="gen",
+            cache_path=str(tmp_path / "cache.jsonl"),
+            max_workers=1,
+            timeout=60,
+        )
+
+        assert result.failed_count == 1
+        assert result.effective_sample_count == 1
+        assert result.failure_counts["extraction_failed"] == 1
+        assert result.failure_counts["wrong_answer"] == 1
+
     def test_mixed_accuracy_and_fields(self, tmp_path: Path) -> None:
         from llmeval.tasks.math_eval.math_score import compute_scores
 

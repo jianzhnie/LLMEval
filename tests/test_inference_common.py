@@ -258,6 +258,27 @@ class TestSampleCountHelpers:
         assert expanded[0] is not items[0]
         assert [item["sample_index"] for item in expanded] == [3, 4]
 
+    def test_expand_group_preserves_target_samples_on_resume(self) -> None:
+        # A resumed batch carries _llmeval_target_samples (the full depth) and
+        # _llmeval_requested_sample_indices (the exact missing indices). The
+        # expanded copies must keep the target so online._build_result writes
+        # expected_samples == 4, and must not leak request-scoped fields.
+        items = [
+            {
+                "prompt": "q",
+                "n_samples": 2,
+                "doc_id": "doc:q",
+                "_llmeval_target_samples": 4,
+                "_llmeval_requested_sample_indices": [2, 3],
+            }
+        ]
+        expanded = expand_group_for_sampling(items)
+        assert [item["sample_index"] for item in expanded] == [2, 3]
+        for item in expanded:
+            assert item["_llmeval_target_samples"] == 4
+            assert "_llmeval_requested_sample_indices" not in item
+            assert "_llmeval_sample_start" not in item
+
 
 class TestSampleSeed:
     def test_seed_is_stable_for_same_item(self) -> None:

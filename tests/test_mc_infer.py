@@ -360,9 +360,7 @@ class TestProcessGenerateItem:
     def test_null_content_raises(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         client = MagicMock()
-        client.chat.completions.create.return_value.choices = [
-            _generation_choice(None)
-        ]
+        client.chat.completions.create.return_value.choices = [_generation_choice(None)]
 
         with pytest.raises(RuntimeError, match="no usable text"):
             runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
@@ -372,7 +370,8 @@ class TestProcessGenerateItem:
         runner.config.n_samples = 3
         client = MagicMock()
         client.chat.completions.create.return_value.choices = [
-            _generation_choice(text, index) for index, text in enumerate(("a", "b", "c"))
+            _generation_choice(text, index)
+            for index, text in enumerate(("a", "b", "c"))
         ]
 
         result = runner.process_generate_item(
