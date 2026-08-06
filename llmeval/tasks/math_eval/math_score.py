@@ -167,7 +167,12 @@ class ProcessingStats:
 
 @dataclass(frozen=True)
 class MathAnswerResult:
-    """Worker result with a non-breaking marker for successful fallback matching."""
+    """Worker result with a non-breaking marker for successful fallback matching.
+
+    ``filter_trace`` carries the full pipeline trace (including the raw input
+    under ``filter_trace["raw"]``), so ``raw_gen`` is not shipped separately
+    over the pool IPC.
+    """
 
     index: int
     grade: float
@@ -176,7 +181,6 @@ class MathAnswerResult:
     fallback_matched: bool = False
     failure_stage: str = "none"
     failure_reason: str | None = None
-    raw_gen: str = ""
     filtered_gen: str = ""
     filter_trace: dict[str, Any] = field(default_factory=dict)
 
@@ -390,7 +394,6 @@ def process_answers(
             fallback_matched=fallback_matched,
             failure_stage=failure_stage,
             failure_reason=failure_reason,
-            raw_gen=raw_generated_text,
             filtered_gen=generated_text,
             filter_trace=filter_trace,
         )
@@ -630,7 +633,7 @@ def compute_scores(
                         "failure_stage": failure_stage,
                         "failure_reason": failure_reason,
                         "fallback_matched": fallback_matched,
-                        "raw_gen": result.raw_gen,
+                        "raw_gen": result.filter_trace.get("raw", ""),
                         "filtered_gen": result.filtered_gen,
                         "filter_trace": result.filter_trace,
                     }
@@ -688,7 +691,6 @@ def compute_scores(
         "timeout_count": stats.timeout,
         "error_count": stats.error,
         "skipped_count": stats.skipped,
-        "sample_count": stats.total,
         "effective_sample_count": stats.effective,
         "workers_used": optimal_workers,
         "timeout_setting": timeout,

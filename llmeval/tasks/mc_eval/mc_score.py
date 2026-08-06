@@ -530,6 +530,18 @@ def _attach_item_metadata(
     return {**metadata, **record}
 
 
+def _sample_weight(record: dict[str, Any]) -> int:
+    """Number of scored observations a record represents.
+
+    ``per_sample`` aggregation scores every generation independently, so the
+    record counts ``sample_total`` observations; other aggregations collapse
+    to one scored observation per record.
+    """
+    if record.get("aggregation") == "per_sample":
+        return max(int(record.get("sample_total", 0)), 0)
+    return 1
+
+
 def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
     """Aggregate per-item records into :class:`MCScoreResult`.
 
@@ -539,9 +551,6 @@ def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
     per_sample = bool(records) and all(
         r.get("aggregation") == "per_sample" for r in records
     )
-
-    def record_weight(record: dict[str, Any]) -> int:
-        return max(int(record.get("sample_total", 0)), 0) if per_sample else 1
 
     eligible_records = [
         record
@@ -567,7 +576,7 @@ def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
             1 for r in eligible_records if r.get("correct_bytes", r["correct"])
         )
 
-    effective_total = sum(record_weight(record) for record in eligible_records)
+    effective_total = sum(_sample_weight(record) for record in eligible_records)
     safe_total = max(effective_total, 1)
     return MCScoreResult(
         acc=n_correct / safe_total,
@@ -588,11 +597,6 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         name: [] for name in ("acc", "acc_norm", "acc_bytes", "exact_match")
     }
 
-    def weight(record: dict[str, Any]) -> int:
-        if record.get("aggregation") == "per_sample":
-            return max(int(record.get("sample_total", 0)), 0)
-        return 1
-
     for record in result.per_item:
         if record.get("evaluation_status", "completed") != "completed":
             continue
@@ -611,19 +615,19 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         ):
             observations[name].append(float(bool(record.get(key, False))))
 
-    sample_count = sum(weight(record) for record in result.per_item)
+    sample_count = sum(_sample_weight(record) for record in result.per_item)
     failed_count = sum(
-        weight(record)
+        _sample_weight(record)
         for record in result.per_item
         if record.get("evaluation_status") == "failed"
     )
     skipped_count = sum(
-        weight(record)
+        _sample_weight(record)
         for record in result.per_item
         if record.get("evaluation_status") == "skipped"
     )
     timeout_count = sum(
-        weight(record)
+        _sample_weight(record)
         for record in result.per_item
         if record.get("evaluation_status") == "timeout"
     )
@@ -931,7 +935,6 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
             "total": result.total,
             "question_total": question_total,
             "sample_total": sample_total,
-            "sample_count": sample_total,
             "effective_sample_count": max(
                 sample_total - failed_count - skipped_count - timeout_count, 0
             ),

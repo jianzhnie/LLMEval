@@ -234,27 +234,56 @@ class CodeScoreResult:
 # ===========================================================================
 
 
-def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
-    """Build a placeholder record for items that could not be scored."""
+def _failure_record(
+    task_id: str,
+    result: str,
+    *,
+    group_id: str | None = None,
+    sample_index: int = 0,
+    evaluation_status: str = "completed",
+) -> dict[str, Any]:
+    """Return a uniform failure record for a single item.
+
+    ``evaluation_status="completed"`` means the failure was caused by the
+    generated answer (an incorrect model observation); ``"failed"`` marks
+    scorer/infrastructure failures excluded from Pass@k metrics.
+    """
     return {
-        "task_id": item.get("task_id", item.get("_llmeval_group_id", "")),
-        "group_id": item.get("_llmeval_group_id", item.get("task_id", "")),
-        "sample_index": item.get("sample_index", 0),
+        "task_id": task_id,
+        "group_id": group_id or task_id,
+        "sample_index": sample_index,
         "passed": False,
-        "result": "scoring error",
-        "evaluation_status": "failed",
+        "result": result,
+        "evaluation_status": evaluation_status,
         "stderr": "",
     }
 
 
-def _strip_think_tags(text: str) -> str:
-    """Remove reasoning-model output wrappers from *text*.
+def _failure(
+    task_id: str,
+    reason: str,
+    group_id: str | None = None,
+    sample_index: int = 0,
+) -> dict[str, Any]:
+    """Return a failure record where the generated answer caused the failure."""
+    return _failure_record(
+        task_id,
+        reason,
+        group_id=group_id,
+        sample_index=sample_index,
+        evaluation_status="completed",
+    )
 
-    1. Prefer content inside ``<answer>...</answer>``.
-    2. Fall back to text after ``</think>``.
-    3. Otherwise return *text* unchanged.
-    """
-    return strip_reasoning_wrappers(text)
+
+def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
+    """Build a placeholder record for items that could not be scored."""
+    return _failure_record(
+        item.get("task_id", item.get("_llmeval_group_id", "")),
+        "scoring error",
+        group_id=item.get("_llmeval_group_id", item.get("task_id", "")),
+        sample_index=item.get("sample_index", 0),
+        evaluation_status="failed",
+    )
 
 
 def _first_meaningful_line(text: str) -> str:
@@ -270,11 +299,6 @@ def _starts_with_top_level_code(text: str) -> bool:
     """Return whether ``text`` appears to start with standalone Python code."""
     first_line = _first_meaningful_line(text)
     return first_line.startswith(_TOP_LEVEL_PREFIXES)
-
-
-def _prompt_is_python_prefix(prompt: str) -> bool:
-    """Return whether ``prompt`` is a Python prefix such as HumanEval's stub."""
-    return _starts_with_top_level_code(prompt)
 
 
 def _build_check_programs(
@@ -297,7 +321,7 @@ def _build_check_programs(
             programs.append(("code_only", f"{code.rstrip()}\n{test_code}"))
     elif prompt_mode_norm in _MBPP_PROMPT_MODES:
         programs.append(("code_only", f"{code.rstrip()}\n{test_code}"))
-    elif _prompt_is_python_prefix(prompt):
+    elif _starts_with_top_level_code(prompt):
         programs.append(("prompt_plus_code", f"{prompt.rstrip()}\n{code}\n{test_code}"))
         if _starts_with_top_level_code(code):
             programs.append(("code_only", f"{code.rstrip()}\n{test_code}"))
@@ -429,26 +453,6 @@ def _process_code_item(
     exec_result["evaluation_status"] = _code_record_status(exec_result)
     exec_result.update(filter_artifacts)
     return idx, exec_result
-
-
-def _failure(
-    task_id: str,
-    reason: str,
-    group_id: str | None = None,
-    sample_index: int = 0,
-) -> dict[str, Any]:
-    """Return a uniform failure record for a single item."""
-    return {
-        "task_id": task_id,
-        "group_id": group_id or task_id,
-        "sample_index": sample_index,
-        "passed": False,
-        "result": reason,
-        # These failures are caused by the generated answer, not the scoring
-        # infrastructure. They remain valid incorrect observations.
-        "evaluation_status": "completed",
-        "stderr": "",
-    }
 
 
 # ===========================================================================
@@ -607,6 +611,17 @@ def _expand_code_samples(
     return expanded
 
 
+def _pass_at_k_scores(grouped: dict[str, list[dict[str, Any]]], k: int) -> list[float]:
+    """Return one unbiased pass@k estimate per eligible completed group."""
+    return [
+        estimate_pass_at_k(
+            len(records), sum(1 for record in records if record.get("passed")), k
+        )
+        for records in grouped.values()
+        if len(records) >= k
+    ]
+
+
 def _compute_pass_at_k(
     records: list[dict[str, Any]], k_values: tuple[int, ...]
 ) -> tuple[dict[str, float], int]:
@@ -615,15 +630,9 @@ def _compute_pass_at_k(
 
     metrics: dict[str, float] = {}
     for k in sorted(set(k_values)):
-        eligible_scores: list[float] = []
-        for group_records in grouped.values():
-            n = len(group_records)
-            if n < k:
-                continue
-            c = sum(1 for record in group_records if record.get("passed"))
-            eligible_scores.append(estimate_pass_at_k(n, c, k))
-        if eligible_scores:
-            metrics[f"pass@{k}"] = sum(eligible_scores) / len(eligible_scores)
+        scores = _pass_at_k_scores(grouped, k)
+        if scores:
+            metrics[f"pass@{k}"] = sum(scores) / len(scores)
 
     return metrics, len(grouped)
 
@@ -773,13 +782,7 @@ def _code_observations(result: CodeScoreResult) -> dict[str, list[float]]:
             k = int(name.removeprefix("pass@"))
         except ValueError:
             continue
-        observations[name] = [
-            estimate_pass_at_k(
-                len(records), sum(1 for record in records if record.get("passed")), k
-            )
-            for records in grouped.values()
-            if len(records) >= k
-        ]
+        observations[name] = _pass_at_k_scores(grouped, k)
     return observations
 
 
@@ -850,15 +853,15 @@ def score_code_result(
     metrics.setdefault("pass@1", result.pass_at_1)
     observations = _code_observations(result)
     observations.setdefault("pass@1", [])
-    timeout_count = sum(
-        _code_record_status(record) == "timeout" for record in result.per_item
-    )
-    failed_count = sum(
-        _code_record_status(record) == "failed" for record in result.per_item
-    )
-    skipped_count = sum(
-        _code_record_status(record) == "skipped" for record in result.per_item
-    )
+    # Every record from _score_items carries its evaluation_status (set by
+    # _process_code_item / the failure builders), so classify from the stored
+    # field rather than re-deriving it from the result text.
+    statuses = [
+        record.get("evaluation_status", "completed") for record in result.per_item
+    ]
+    timeout_count = statuses.count("timeout")
+    failed_count = statuses.count("failed")
+    skipped_count = statuses.count("skipped")
     return ScorerResult(
         metrics=metrics,
         observations=observations,

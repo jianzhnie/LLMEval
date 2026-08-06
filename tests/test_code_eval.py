@@ -36,13 +36,13 @@ from llmeval.tasks.code_eval.code_score import (
     _failure_code_record,
     _is_code_infrastructure_failure,
     _process_code_item,
-    _strip_think_tags,
     estimate_pass_at_k,
     extract_code,
     score_code,
     score_code_result,
     write_cache,
 )
+from llmeval.tasks.postprocess import strip_reasoning_wrappers
 
 
 def test_code_failure_record_contains_filter_trace() -> None:
@@ -639,20 +639,20 @@ class TestCodeScoreResult:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# _strip_think_tags
+# strip_reasoning_wrappers (code pipeline's reasoning-stripping filter)
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class TestStripThinkTags:
     def test_answer_tag_preferred(self) -> None:
         text = "<think>plan</think>junk <answer>def f():\n    return 1</answer> tail"
-        assert _strip_think_tags(text) == "def f():\n    return 1"
+        assert strip_reasoning_wrappers(text) == "def f():\n    return 1"
 
     def test_think_tag_fallback(self) -> None:
-        assert _strip_think_tags("reasoning</think>code here") == "code here"
+        assert strip_reasoning_wrappers("reasoning</think>code here") == "code here"
 
     def test_plain_text_unchanged(self) -> None:
-        assert _strip_think_tags("def f(): pass") == "def f(): pass"
+        assert strip_reasoning_wrappers("def f(): pass") == "def f(): pass"
 
 
 # ═══════════════════════════════════════════════════════════════════════

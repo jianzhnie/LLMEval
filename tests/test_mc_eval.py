@@ -755,7 +755,7 @@ class TestMCScoreEdgeCases:
         acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
         assert acc == 1.0  # invalid-gold items are skipped from the denominator
         summary = json.loads((tmp_path / "c.summary.json").read_text())
-        assert summary["sample_count"] == 2
+        assert summary["sample_total"] == 2
         assert summary["effective_sample_count"] == 1
         assert summary["skipped_count"] == 1
 

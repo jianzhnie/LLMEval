@@ -34,6 +34,7 @@ from llmeval.utils.log import init_logger
 
 __all__ = [
     "ResumeState",
+    "build_vllm_llm_kwargs",
     "expand_data_with_resume",
     "expand_group_for_sampling",
     "is_explicit_tool_choice",
@@ -434,6 +435,39 @@ def to_public_result_schema(item: dict[str, Any]) -> dict[str, Any]:
         if key.startswith("_llmeval_"):
             result.pop(key)
     return result
+
+
+def build_vllm_llm_kwargs(args: Any) -> dict[str, Any]:
+    """Assemble the vLLM ``LLM(**kwargs)`` constructor arguments.
+
+    Shared by the offline and verifier runners, whose argument classes both
+    inherit the same ``VLLMEngineArguments`` fields.  Optional fields
+    (``max_num_batched_tokens``, ``quantization``, ``revision``) are only
+    included when explicitly set.
+    """
+    llm_kwargs: dict[str, Any] = {
+        "model": args.model_name_or_path,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "pipeline_parallel_size": args.pipeline_parallel_size,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "enable_chunked_prefill": args.enable_chunked_prefill,
+        "enable_prefix_caching": args.enable_prefix_caching,
+        "enforce_eager": args.enforce_eager,
+        "max_num_seqs": args.max_num_seqs,
+        "max_model_len": args.max_model_len,
+        "seed": args.seed,
+        "trust_remote_code": args.trust_remote_code,
+        "dtype": args.dtype,
+        "device": args.device,
+    }
+    if args.max_num_batched_tokens is not None:
+        llm_kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
+    if args.quantization is not None:
+        llm_kwargs["quantization"] = args.quantization
+    model_revision = getattr(args, "model_revision", None)
+    if model_revision is not None:
+        llm_kwargs["revision"] = model_revision
+    return llm_kwargs
 
 
 def redact_config_for_logging(

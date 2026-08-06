@@ -27,6 +27,7 @@ from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
 from llmeval.inference.common import (
+    build_vllm_llm_kwargs,
     expand_data_with_resume,
     load_jsonl,
     load_resume_state,
@@ -110,29 +111,8 @@ class OfflineInferenceRunner:
 
         # Initialize vLLM engine. Let the CLI boundary render a traceback once.
         logger.info("Loading vLLM engine...")
-        llm_kwargs: dict[str, Any] = {
-            "model": self.args.model_name_or_path,
-            "tensor_parallel_size": self.args.tensor_parallel_size,
-            "pipeline_parallel_size": self.args.pipeline_parallel_size,
-            "gpu_memory_utilization": self.args.gpu_memory_utilization,
-            "enable_chunked_prefill": self.args.enable_chunked_prefill,
-            "enable_prefix_caching": self.args.enable_prefix_caching,
-            "enforce_eager": self.args.enforce_eager,
-            "max_num_seqs": self.args.max_num_seqs,
-            "max_model_len": self.args.max_model_len,
-            "hf_overrides": hf_overrides,
-            "seed": self.args.seed,
-            "trust_remote_code": self.args.trust_remote_code,
-            "dtype": self.args.dtype,
-            "device": self.args.device,
-        }
-        if self.args.max_num_batched_tokens is not None:
-            llm_kwargs["max_num_batched_tokens"] = self.args.max_num_batched_tokens
-        if self.args.quantization is not None:
-            llm_kwargs["quantization"] = self.args.quantization
-        model_revision = getattr(self.args, "model_revision", None)
-        if model_revision is not None:
-            llm_kwargs["revision"] = model_revision
+        llm_kwargs = build_vllm_llm_kwargs(self.args)
+        llm_kwargs["hf_overrides"] = hf_overrides
         llm: LLM = LLM(**llm_kwargs)
         logger.info("✅ vLLM engine loaded successfully")
 
