@@ -347,11 +347,29 @@ class TestFewShotFormatter:
         tmp = self._make_examples(3)
         try:
             fmt = FewShotFormatter(n_shot=10, few_shot_file=tmp)
-            fmt.load()
-            # Should warn and return empty
-            assert fmt.get_prefix("test") == ""
+            with pytest.raises(ValueError, match="Few-shot pool is too small"):
+                fmt.load()
         finally:
             Path(tmp).unlink(missing_ok=True)
+
+    def test_load_failure_is_fatal(self, tmp_path: Path) -> None:
+        from llmeval.inference.mc import FewShotFormatter
+
+        missing = tmp_path / "missing.jsonl"
+        fmt = FewShotFormatter(n_shot=1, few_shot_file=str(missing))
+
+        with pytest.raises(RuntimeError, match="Failed to load few-shot data"):
+            fmt.load()
+
+    def test_per_document_dedup_shortage_is_fatal(self) -> None:
+        from llmeval.inference.mc import FewShotFormatter
+
+        fmt = FewShotFormatter(n_shot=1)
+        fmt._few_shot_pool = [{"doc_id": "same", "prompt": "question"}]
+        fmt._all_formatted = ["question A"]
+
+        with pytest.raises(ValueError, match="insufficient after excluding"):
+            fmt.get_prefix("question", "same")
 
 
 class TestScoreLoglikelihoodItem:
@@ -369,6 +387,20 @@ class TestScoreLoglikelihoodItem:
 
         rec = score_loglikelihood_item({"gold": 0, "logprobs": [5.0]})
         assert rec["pred"] == 0
+        assert rec["correct"] is True
+
+    def test_choice_logprobs_are_used_without_aggregate_logprobs(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
+
+        rec = score_loglikelihood_item(
+            {
+                "gold": 1,
+                "logprobs": [],
+                "choice_logprobs": [[-3.0], [-1.0]],
+            }
+        )
+
+        assert rec["pred"] == 1
         assert rec["correct"] is True
 
     def test_argmax_over_negative_logprobs(self) -> None:
@@ -841,3 +873,133 @@ def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None
     assert summary["question_total"] == 1
     assert summary["sample_total"] == 3
     assert summary["aggregation"] == "majority_vote"
+
+
+# ===========================================================================
+# Sample-index protocol (P0-1)
+# ===========================================================================
+
+
+class TestMCSampleIndexProtocol:
+    """merge_generate_records follows the shared sample-index protocol."""
+
+    def _row(self, gens: list[str], **extra) -> dict:
+        return {
+            "doc_id": "mmlu:0",
+            "prompt": "q",
+            "answer": "B",
+            "gen": gens,
+            **extra,
+        }
+
+    def test_single_sample_rows_keep_explicit_indices(self) -> None:
+        """Rows with sample_index 0 and 2 keep the gap — index 1 stays missing."""
+        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+
+        merged = merge_generate_records(
+            [
+                self._row(["Answer: A"], sample_index=0),
+                self._row(["Answer: B"], sample_index=2),
+            ],
+            "answer",
+            "gen",
+        )
+        assert len(merged) == 1
+        assert merged[0]["sample_indices"] == [0, 2]
+        assert "sample_index" not in merged[0]  # no stale scalar survives
+        assert merged[0]["gen"] == ["Answer: A", "Answer: B"]
+
+    def test_multi_sample_row_keeps_explicit_indices(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+
+        merged = merge_generate_records(
+            [self._row(["Answer: A", "Answer: B"], sample_indices=[1, 3])],
+            "answer",
+            "gen",
+        )
+        assert merged[0]["sample_indices"] == [1, 3]
+        assert "sample_index" not in merged[0]
+
+    def test_single_sample_row_keeps_scalar_field(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+
+        merged = merge_generate_records(
+            [self._row(["Answer: B"], sample_index=2)], "answer", "gen"
+        )
+        assert merged[0]["sample_index"] == 2
+        assert "sample_indices" not in merged[0]
+
+    def test_stale_scalar_dropped_after_multi_sample_merge(self) -> None:
+        """A row carrying both fields must not leak the stale scalar form."""
+        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+
+        merged = merge_generate_records(
+            [
+                self._row(
+                    ["Answer: A", "Answer: B"],
+                    sample_index=0,
+                    sample_indices=[0, 2],
+                )
+            ],
+            "answer",
+            "gen",
+        )
+        assert merged[0]["sample_indices"] == [0, 2]
+        assert "sample_index" not in merged[0]
+
+    @pytest.mark.parametrize(
+        "bad_fields",
+        [
+            {"sample_indices": [0, -1]},  # negative index
+            {"sample_indices": [0]},  # length mismatch (2 generations)
+            {"sample_indices": ["0", "1"]},  # wrong element type
+        ],
+        ids=["negative", "length-mismatch", "wrong-type"],
+    )
+    def test_invalid_sample_indices_raise(self, bad_fields: dict) -> None:
+        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+
+        with pytest.raises(ValueError, match="sample_indices"):
+            merge_generate_records(
+                [self._row(["Answer: A", "Answer: B"], **bad_fields)],
+                "answer",
+                "gen",
+            )
+
+    def test_invalid_scalar_sample_index_raises(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+
+        with pytest.raises(ValueError, match="sample_index"):
+            merge_generate_records(
+                [self._row(["Answer: B"], sample_index=-1)], "answer", "gen"
+            )
+
+    def test_idempotent_duplicate_merges(self) -> None:
+        """Same index + same content merges without error."""
+        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+
+        merged = merge_generate_records(
+            [
+                self._row(["Answer: B"], sample_index=0),
+                self._row(["Answer: B"], sample_index=0),
+            ],
+            "answer",
+            "gen",
+        )
+        assert len(merged) == 1
+        assert merged[0]["sample_index"] == 0
+        assert merged[0]["gen"] == ["Answer: B"]
+
+    def test_conflicting_duplicate_raises(self) -> None:
+        """Same index + different content is a schema conflict."""
+        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+
+        with pytest.raises(ValueError, match="Conflicting duplicate"):
+            merge_generate_records(
+                [
+                    self._row(["Answer: A"], sample_index=0),
+                    self._row(["Answer: B"], sample_index=0),
+                ],
+                "answer",
+                "gen",
+            )

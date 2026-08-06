@@ -76,8 +76,6 @@ if [[ "${DEBUG:-0}" == "1" ]]; then
     set -x  # 打印执行的每条命令
     # 增强调试输出，显示文件名、行号和函数名
     export PS4='+(${BASH_SOURCE}:${LINENO}): ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
-    # 设置日志文件路径
-    readonly LOG_FILE="${LOG_DIR}/debug_$(date +%Y%m%d_%H%M%S).log"
 fi
 
 # =======================================================
@@ -683,7 +681,10 @@ stop_service_on_node() {
 
     # 检查进程是否已停止
     local remaining
-    remaining=$(ssh_run "$node" "pgrep -f '${search_pattern}' | wc -l" 2>/dev/null || echo "0")
+    if ! remaining=$(ssh_run "$node" "pgrep -f '${search_pattern}' | wc -l" 2>/dev/null); then
+        log_error "❌ 节点 ${node} 进程状态查询失败，停止流程"
+        return 1
+    fi
 
     if [[ "${remaining:-0}" -gt 0 ]]; then
         log_warn "⚠️ 节点 ${node} 上仍有 ${remaining} 个 vLLM 进程，尝试强制终止..."
@@ -736,7 +737,10 @@ stop_services() {
             sleep 3
             # 再次检查是否还有相关进程在运行
             local remaining_processes
-            remaining_processes=$(ssh_run "$node" "pgrep -f '${search_pattern}' | wc -l" 2>/dev/null || echo "0")
+            if ! remaining_processes=$(ssh_run "$node" "pgrep -f '${search_pattern}' | wc -l" 2>/dev/null); then
+                log_error "❌ 节点 ${node} 进程状态查询失败"
+                exit 1
+            fi
             if [[ "${remaining_processes:-0}" -gt 0 ]]; then
                 log_warn "节点 ${node} 上仍有 ${remaining_processes} 个 vLLM 进程在运行，尝试强制终止..."
                 ssh_run "$node" "pkill -9 -f '${search_pattern}' || true"

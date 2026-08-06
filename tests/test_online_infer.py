@@ -201,7 +201,24 @@ def _make_client(max_retries: int = 0):
     client.tool_choice = "none"
     client.base_url = "http://example.test/v1"
     client.client = MagicMock()
+    client._usage_lock = threading.Lock()
+    client.usage_stats = {"prompt_tokens": 0, "completion_tokens": 0}
     return client
+
+
+def test_usage_snapshot_includes_total_tokens() -> None:
+    client = _make_client()
+    completion = MagicMock()
+    completion.usage.prompt_tokens = 12
+    completion.usage.completion_tokens = 7
+
+    client._record_usage(completion)
+
+    assert client.usage_snapshot() == {
+        "prompt_tokens": 12,
+        "completion_tokens": 7,
+        "total_tokens": 19,
+    }
 
 
 def _fake_completion(contents: list[str | None]) -> MagicMock:
@@ -385,6 +402,38 @@ class TestGetContents:
         client = _make_client()
         with pytest.raises(ValueError, match="n must be"):
             client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=0)
+
+    def test_choices_are_reordered_by_explicit_index(self) -> None:
+        client = _make_client()
+        completion = _fake_completion(["c", "a", "b"])
+        for choice, index in zip(completion.choices, [2, 0, 1], strict=True):
+            choice.index = index
+        client.client.chat.completions.create.return_value = completion
+
+        result = client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=3)
+
+        assert result == ["a", "b", "c"]
+
+    def test_missing_index_preserves_empty_position(self) -> None:
+        client = _make_client()
+        completion = _fake_completion(["a", "c"])
+        for choice, index in zip(completion.choices, [0, 2], strict=True):
+            choice.index = index
+        client.client.chat.completions.create.return_value = completion
+
+        result = client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=3)
+
+        assert result == ["a", "", "c"]
+
+    def test_duplicate_choice_index_fails(self) -> None:
+        client = _make_client()
+        completion = _fake_completion(["a", "b"])
+        for choice in completion.choices:
+            choice.index = 0
+        client.client.chat.completions.create.return_value = completion
+
+        with pytest.raises(ValueError, match="Duplicate response choice index"):
+            client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=2)
 
 
 # ── InferenceRunner.load_data (n_samples scheduling metadata) ─────

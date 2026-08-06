@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
 import signal
 import sys
 import tempfile
 import types
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -60,6 +62,7 @@ def test_code_failure_record_contains_filter_trace() -> None:
     assert record["filter_trace"]["pipeline"] == "code_generation"
 
 
+from llmeval.tasks.code_eval import execute as code_execute
 from llmeval.tasks.code_eval.execute import (
     TimeoutException,
     check_correctness,
@@ -228,6 +231,79 @@ class TestCheckCorrectness:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# multiprocessing start-method resolution (P0-2: default fork)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestResolveMpMethod:
+    def test_default_is_fork_when_supported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("LLMEVAL_MP_METHOD", raising=False)
+        monkeypatch.setattr(
+            code_execute.multiprocessing,
+            "get_all_start_methods",
+            lambda: ["fork", "spawn", "forkserver"],
+        )
+        assert code_execute._resolve_mp_method() == "fork"
+
+    def test_spawn_fallback_when_fork_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Platforms without fork fall back to spawn, with a logged warning
+        and a one-shot info line naming the effective method."""
+        monkeypatch.delenv("LLMEVAL_MP_METHOD", raising=False)
+        monkeypatch.setattr(
+            code_execute.multiprocessing,
+            "get_all_start_methods",
+            lambda: ["spawn"],
+        )
+        # Fresh log-once cache so this test observes the emission itself.
+        monkeypatch.setattr(code_execute, "_LOGGED_MP_METHODS", set())
+
+        # init_logger sets propagate=False, so attach caplog's handler
+        # directly to capture this logger's records.
+        code_execute.logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.DEBUG, logger="code_execute"):
+                assert code_execute._resolve_mp_method() == "spawn"
+        finally:
+            code_execute.logger.removeHandler(caplog.handler)
+
+        assert any(
+            r.levelno == logging.WARNING and "falling back to spawn" in r.message
+            for r in caplog.records
+        )
+        assert any(
+            "code execution mp method: spawn" in r.message for r in caplog.records
+        )
+
+    def test_env_override_spawn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLMEVAL_MP_METHOD", "spawn")
+        monkeypatch.setattr(
+            code_execute.multiprocessing,
+            "get_all_start_methods",
+            lambda: ["fork", "spawn"],
+        )
+        assert code_execute._resolve_mp_method() == "spawn"
+
+    def test_env_override_spawn_end_to_end(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit ``LLMEVAL_MP_METHOD=spawn`` still drives real execution."""
+        monkeypatch.setenv("LLMEVAL_MP_METHOD", "spawn")
+        result = check_correctness(
+            _add_program(), 10.0, "t_spawn", allow_unsafe_code=True
+        )
+        assert result["passed"] is True
+
+    def test_invalid_env_override_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLMEVAL_MP_METHOD", "bogus")
+        with pytest.raises(ValueError, match="invalid LLMEVAL_MP_METHOD"):
+            code_execute._resolve_mp_method()
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # unsafe_execute (direct, no multiprocess wrapper)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -356,6 +432,39 @@ class TestScoreCode:
             cache_path.unlink(missing_ok=True)
             cache_path.with_suffix(".summary.json").unlink(missing_ok=True)
 
+    def test_parallel_samples_complete_within_timeout(self, tmp_path: Path) -> None:
+        """End-to-end timeout regression for the parallel path.
+
+        Two samples are scored by real Pebble pool workers, each forking a
+        per-sample child (the default start method since P0-2).  Both must
+        complete well within the pool-level timeout — with the old ``spawn``
+        default, per-sample interpreter restarts consumed that budget and
+        produced spurious scoring timeouts.
+        """
+        items = [
+            {
+                "prompt": "def add(a, b):\n",
+                "answer": "\nassert add(2, 3) == 5\n",
+                "gen": ["    return a + b"],
+            },
+            {
+                "prompt": "def sub(a, b):\n",
+                "answer": "\nassert sub(5, 2) == 3\n",
+                "gen": ["    return a - b"],
+            },
+        ]
+        acc = score_code(
+            items,
+            "answer",
+            "gen",
+            tmp_path / "parallel.jsonl",
+            max_workers=2,
+            timeout=120,
+            exec_timeout=5.0,
+            allow_unsafe_code=True,
+        )
+        assert acc == 1.0
+
     def test_empty_dataset(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
             cache_path = Path(tf.name)
@@ -416,9 +525,7 @@ class TestScoreCode:
         assert summary["problems"] == 1
         assert [record["sample_index"] for record in records] == [0, 1]
 
-    def test_pass_at_1_reported_when_k_values_exclude_1(
-        self, tmp_path: Path
-    ) -> None:
+    def test_pass_at_1_reported_when_k_values_exclude_1(self, tmp_path: Path) -> None:
         """pass@1 is computed even when the caller's k_values omit 1."""
         items = [
             {
@@ -453,6 +560,10 @@ class TestScoreCode:
         # The reliability guard blocks os.kill inside candidate code, so
         # simulate the kill at the execution layer and use the fork start
         # method so the patched function reaches the worker process.
+        # NOTE: forking this (multi-threaded, due to pytest internals)
+        # process may emit a DeprecationWarning on Python ≥ 3.12 — that risk
+        # is known and accepted here; production scoring workers are
+        # single-threaded at fork time (see ``check_correctness`` docstring).
         monkeypatch.setenv("LLMEVAL_MP_METHOD", "fork")
 
         def _self_killing_execute(
@@ -738,3 +849,266 @@ class TestWriteCache:
         finally:
             cache_path.unlink(missing_ok=True)
             cache_path.with_suffix(".summary.json").unlink(missing_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Sample-index protocol (P0-1)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestCodeSampleIndexProtocol:
+    """Explicit sample indices are preserved verbatim — never renumbered."""
+
+    _PROMPT = "def add(a, b):\n"
+    _TEST = "\nassert add(1, 2) == 3\n"
+    _WRONG = "    return a * b"
+    _RIGHT = "    return a + b"
+
+    def _item(self, gen: list[str], **extra) -> dict:
+        return {
+            "task_id": "task/0",
+            "prompt": self._PROMPT,
+            "answer": self._TEST,
+            "gen": gen,
+            **extra,
+        }
+
+    def _score(self, items: list[dict], tmp_path: Path):
+        cache_path = tmp_path / "code.jsonl"
+        acc = score_code(
+            items,
+            "answer",
+            "gen",
+            cache_path,
+            max_workers=0,
+            exec_timeout=3.0,
+            k_values=(1, 2),
+            allow_unsafe_code=True,
+        )
+        records = [json.loads(line) for line in cache_path.read_text().splitlines()]
+        return acc, records
+
+    def test_single_sample_rows_keep_explicit_indices(self, tmp_path: Path) -> None:
+        """Rows with sample_index 0 and 2 keep the gap — index 1 stays missing."""
+        items = [
+            self._item([self._WRONG], sample_index=0),
+            self._item([self._RIGHT], sample_index=2),
+        ]
+        acc, records = self._score(items, tmp_path)
+        assert [record["sample_index"] for record in records] == [0, 2]
+        assert acc == pytest.approx(0.5)
+
+    def test_multi_sample_row_keeps_explicit_indices(self, tmp_path: Path) -> None:
+        items = [self._item([self._WRONG, self._RIGHT], sample_indices=[1, 3])]
+        _, records = self._score(items, tmp_path)
+        assert [record["sample_index"] for record in records] == [1, 3]
+        assert all("sample_indices" not in record for record in records)
+
+    @pytest.mark.parametrize(
+        "bad_fields",
+        [
+            {"sample_indices": [0, -1]},  # negative index
+            {"sample_indices": [0]},  # length mismatch (2 generations)
+            {"sample_indices": ["0", "1"]},  # wrong element type
+        ],
+        ids=["negative", "length-mismatch", "wrong-type"],
+    )
+    def test_invalid_sample_indices_raise(
+        self, bad_fields: dict, tmp_path: Path
+    ) -> None:
+        items = [self._item([self._WRONG, self._RIGHT], **bad_fields)]
+        with pytest.raises(ValueError, match="sample_indices"):
+            self._score(items, tmp_path)
+
+    def test_invalid_scalar_sample_index_raises(self, tmp_path: Path) -> None:
+        items = [self._item([self._RIGHT], sample_index=-1)]
+        with pytest.raises(ValueError, match="sample_index"):
+            self._score(items, tmp_path)
+
+    def test_idempotent_duplicate_merges(self, tmp_path: Path) -> None:
+        """Same index + same content is scored once, without error."""
+        items = [
+            self._item([self._RIGHT], sample_index=0),
+            self._item([self._RIGHT], sample_index=0),
+        ]
+        acc, records = self._score(items, tmp_path)
+        assert acc == 1.0
+        assert len(records) == 1
+
+    def test_conflicting_duplicate_raises(self, tmp_path: Path) -> None:
+        """Same index + different content is a schema conflict."""
+        items = [
+            self._item([self._WRONG], sample_index=0),
+            self._item([self._RIGHT], sample_index=0),
+        ]
+        with pytest.raises(ValueError, match="Conflicting duplicate"):
+            self._score(items, tmp_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Fork-inherited resource usage (regression: pass@1 collapse)
+#
+# With the default ``fork`` start method the per-sample worker inherits the
+# scoring worker's whole address space and fd table.  Resource limits must
+# therefore be growth-relative to the inherited baseline; absolute budgets
+# calibrated for a fresh interpreter kill correct solutions (MemoryError /
+# EMFILE) and collapse pass@1 to 0 in production.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestForkInheritedResources:
+    def test_many_inherited_fds_do_not_break_fork_worker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fork child born with >64 open fds must still execute and report.
+
+        Before the fix, ``RLIMIT_NOFILE=64`` was already exceeded at birth in
+        this situation, so the worker died with EMFILE and the item was
+        dropped as "worker did not produce a result".
+        """
+        pytest.importorskip("resource")
+        monkeypatch.setenv("LLMEVAL_MP_METHOD", "fork")
+        # NOTE: forking this (multi-threaded, due to pytest internals)
+        # process may emit a DeprecationWarning on Python ≥ 3.12 — accepted
+        # here, as in ``test_killed_by_signal_is_completed_observation``.
+        with ExitStack() as stack:
+            for _ in range(80):
+                stack.enter_context(tempfile.TemporaryFile())
+            result = check_correctness(
+                "x = 1 + 1\nassert x == 2\n", 3.0, "t-fd", allow_unsafe_code=True
+            )
+        assert result["passed"] is True, result
+
+    def _recorded_limits(
+        self, monkeypatch: pytest.MonkeyPatch, vsz: int | None, fd_count: int | None
+    ) -> dict[int, tuple[int, int]]:
+        resource = pytest.importorskip("resource")
+        recorded: dict[int, tuple[int, int]] = {}
+        monkeypatch.setattr(code_execute, "_current_vsz_bytes", lambda: vsz)
+        monkeypatch.setattr(code_execute, "_current_fd_count", lambda: fd_count)
+        monkeypatch.setattr(
+            resource,
+            "setrlimit",
+            lambda name, limits: recorded.setdefault(name, limits),
+        )
+        code_execute._apply_resource_limits(3.0)
+        return recorded
+
+    def test_rlimit_as_is_headroom_above_inherited_vsz(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """fork children get the memory budget as growth headroom, not a cap
+        already exceeded by the inherited address space."""
+        resource = pytest.importorskip("resource")
+        monkeypatch.setenv("LLMEVAL_MEMORY_LIMIT_MB", "2048")
+        vsz = 3 * 1024**3
+        recorded = self._recorded_limits(monkeypatch, vsz=vsz, fd_count=None)
+        assert recorded[resource.RLIMIT_AS][0] == vsz + 2048 * 1024 * 1024
+
+    def test_rlimit_as_absolute_when_vsz_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a readable baseline (non-Linux), keep the absolute budget."""
+        resource = pytest.importorskip("resource")
+        monkeypatch.setenv("LLMEVAL_MEMORY_LIMIT_MB", "2048")
+        recorded = self._recorded_limits(monkeypatch, vsz=None, fd_count=None)
+        assert recorded[resource.RLIMIT_AS][0] == 2048 * 1024 * 1024
+
+    def test_rlimit_nofile_keeps_headroom_above_inherited_fds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        resource = pytest.importorskip("resource")
+        recorded = self._recorded_limits(monkeypatch, vsz=None, fd_count=100)
+        assert recorded[resource.RLIMIT_NOFILE][0] == 116
+
+    def test_rlimit_nofile_floor_without_inherited_fds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        resource = pytest.importorskip("resource")
+        recorded = self._recorded_limits(monkeypatch, vsz=None, fd_count=5)
+        assert recorded[resource.RLIMIT_NOFILE][0] == 64
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Timeout classification (candidate timeout = wrong, worker hang = excluded)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestTimeoutClassification:
+    def test_status_strings(self) -> None:
+        assert _code_record_status({"result": "timed out"}) == "completed"
+        assert _code_record_status({"result": "timed out: worker killed"}) == "timeout"
+
+    def test_candidate_infinite_loop_counts_as_wrong(self, tmp_path: Path) -> None:
+        """A candidate that dead-loops must stay in the Pass@k denominator."""
+        items = [
+            {
+                "task_id": "task/0",
+                "prompt": "def f():\n",
+                "answer": "\nf()\n",
+                "gen": ["    while True:\n        pass"],
+            }
+        ]
+        result = score_code_result(
+            items,
+            "answer",
+            "gen",
+            tmp_path / "loop.jsonl",
+            max_workers=0,
+            exec_timeout=1.0,
+            allow_unsafe_code=True,
+        )
+        record = result.per_item[0]
+        assert record["result"] == "timed out"
+        assert record["evaluation_status"] == "completed"
+        assert result.metrics["pass@1"] == 0.0
+        assert result.timeout_count == 0
+        assert result.effective_sample_count == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# End-to-end regression: default parallel path must score correct solutions
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestDefaultScoringPath:
+    def test_correct_solutions_pass_on_default_parallel_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Default path (Pebble pool + per-sample fork): correct solutions
+        must pass, wrong solutions must count as wrong — pass@1 > 0."""
+        items = [
+            {
+                "task_id": "task/0",
+                "prompt": "def add(a, b):\n",
+                "answer": "\nassert add(2, 3) == 5\n",
+                "gen": ["    return a + b"],
+            },
+            {
+                "task_id": "task/1",
+                "prompt": "def square(x):\n",
+                "answer": "\nassert square(3) == 9\nassert square(4) == 16\n",
+                "gen": ["    return x * x"],
+            },
+            {
+                "task_id": "task/2",
+                "prompt": "def sub(a, b):\n",
+                "answer": "\nassert sub(5, 2) == 3\n",
+                "gen": ["    return a + b"],  # wrong on purpose
+            },
+        ]
+        result = score_code_result(
+            items,
+            "answer",
+            "gen",
+            tmp_path / "default_path.jsonl",
+            max_workers=2,
+            timeout=60,
+            exec_timeout=5.0,
+            allow_unsafe_code=True,
+        )
+        statuses = {r["task_id"]: r["evaluation_status"] for r in result.per_item}
+        assert all(status == "completed" for status in statuses.values())
+        assert result.metrics["pass@1"] == pytest.approx(2 / 3)
+        assert result.failed_count == 0
+        assert result.timeout_count == 0

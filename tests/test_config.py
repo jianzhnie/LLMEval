@@ -30,16 +30,39 @@ class TestDataArguments:
         with pytest.raises(ValueError, match="positive integer"):
             DataArguments(input_file=str(in_file), batch_size=-1)
 
-    def test_output_dir_created(self, tmp_path: Path) -> None:
+    def test_config_construction_does_not_create_output_dir(
+        self, tmp_path: Path
+    ) -> None:
         in_file = tmp_path / "x.jsonl"
         in_file.touch()
         out = tmp_path / "sub" / "out.jsonl"
         DataArguments(input_file=str(in_file), output_file=str(out))
-        assert out.parent.exists()
+        assert not out.parent.exists()
 
     def test_missing_input_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match=r"does not exist"):
             DataArguments(input_file=str(tmp_path / "nonexistent.jsonl"))
+
+
+def test_eval_result_path_overrides_legacy_cache_path(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.jsonl"
+    input_path.touch()
+    result_path = tmp_path / "results.jsonl"
+
+    args = EvalTaskArguments(
+        input_path=str(input_path), result_path=str(result_path), code_k_values="1,5,5"
+    )
+
+    assert args.cache_path == str(result_path)
+    assert args.code_k_values_tuple == (1, 5)
+
+
+def test_eval_code_k_values_reject_invalid_values(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.jsonl"
+    input_path.touch()
+
+    with pytest.raises(ValueError, match="positive integers"):
+        EvalTaskArguments(input_path=str(input_path), code_k_values="1,0")
 
 
 class TestPromptArguments:

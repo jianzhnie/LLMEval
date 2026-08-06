@@ -59,6 +59,24 @@ class TestProcessingStats:
 
 
 class TestProcessAnswers:
+    def test_worker_timeout_is_verification_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.tasks.math_eval.math_score as math_mod
+
+        monkeypatch.setattr(
+            math_mod, "_verify_func", MagicMock(side_effect=TimeoutError())
+        )
+
+        result = math_mod.process_answers(
+            (0, _math_item("5", ["$\\boxed{5}$"]), "answer", "gen")
+        )
+
+        assert result is not None
+        assert result.failure_stage == "verification"
+        assert result.failure_reason == "timeout"
+        assert result.predicted == "Timeout"
+
     def test_value_error_fallback_is_marked_without_error_log(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -353,3 +371,254 @@ class TestSaveCache:
         save_cache([{"answer": "答案是 5"}], str(cache))
         record = json.loads(cache.read_text(encoding="utf-8").strip())
         assert record["answer"] == "答案是 5"
+
+
+# ===========================================================================
+# Sample-index protocol (P0-1)
+# ===========================================================================
+
+
+class TestSampleIndexProtocol:
+    """Explicit sample indices are preserved verbatim — never renumbered."""
+
+    def _score(self, data: list[dict], tmp_path: Path):
+        from llmeval.tasks.math_eval.math_score import compute_score_result
+
+        return compute_score_result(
+            eval_dataset=data,
+            label_key="answer",
+            response_key="gen",
+            cache_path=str(tmp_path / "cache.jsonl"),
+            max_workers=2,
+            timeout=60,
+        )
+
+    def test_single_sample_rows_keep_explicit_indices(self, tmp_path: Path) -> None:
+        """Rows with sample_index 0 and 2 keep the gap — index 1 stays missing."""
+        data = [
+            {
+                **_math_item("5", ["$\\boxed{5}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": 0,
+            },
+            {
+                **_math_item("5", ["$\\boxed{6}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": 2,
+            },
+        ]
+        result = self._score(data, tmp_path)
+        assert [item["sample_index"] for item in result.per_item] == [0, 2]
+        assert all("sample_indices" not in item for item in result.per_item)
+        problems = result.details["problem_level"]
+        assert problems[0]["sample_count"] == 2
+        assert problems[0]["correct_samples"] == 1
+
+    def test_multi_sample_row_keeps_explicit_indices(self, tmp_path: Path) -> None:
+        data = [
+            {
+                **_math_item("5", ["$\\boxed{5}$", "$\\boxed{6}$"]),
+                "doc_id": "aime24:0",
+                "sample_indices": [1, 3],
+            }
+        ]
+        result = self._score(data, tmp_path)
+        assert [item["sample_index"] for item in result.per_item] == [1, 3]
+
+    @pytest.mark.parametrize(
+        "bad_fields",
+        [
+            {"sample_indices": [0, -1]},  # negative index
+            {"sample_indices": [0]},  # length mismatch (2 generations)
+            {"sample_indices": ["0", "1"]},  # wrong element type
+        ],
+        ids=["negative", "length-mismatch", "wrong-type"],
+    )
+    def test_invalid_sample_indices_raise(
+        self, bad_fields: dict, tmp_path: Path
+    ) -> None:
+        data = [
+            {
+                **_math_item("5", ["$\\boxed{5}$", "$\\boxed{6}$"]),
+                "doc_id": "aime24:0",
+                **bad_fields,
+            }
+        ]
+        with pytest.raises(ValueError, match="sample_indices"):
+            self._score(data, tmp_path)
+
+    def test_invalid_scalar_sample_index_raises(self, tmp_path: Path) -> None:
+        data = [
+            {
+                **_math_item("5", ["$\\boxed{5}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": "0",
+            }
+        ]
+        with pytest.raises(ValueError, match="sample_index"):
+            self._score(data, tmp_path)
+
+    def test_idempotent_duplicate_merges(self, tmp_path: Path) -> None:
+        """Same index + same content merges without error."""
+        row = {
+            **_math_item("5", ["$\\boxed{5}$"]),
+            "doc_id": "aime24:0",
+            "sample_index": 0,
+        }
+        result = self._score([dict(row), dict(row)], tmp_path)
+        problems = result.details["problem_level"]
+        assert problems[0]["sample_count"] == 1
+        assert problems[0]["correct_samples"] == 1
+
+    def test_conflicting_duplicate_raises(self, tmp_path: Path) -> None:
+        """Same index + different content is a schema conflict."""
+        data = [
+            {
+                **_math_item("5", ["$\\boxed{5}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": 0,
+            },
+            {
+                **_math_item("5", ["$\\boxed{6}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": 0,
+            },
+        ]
+        with pytest.raises(ValueError, match="Conflicting duplicate"):
+            self._score(data, tmp_path)
+
+
+# ===========================================================================
+# Problem-level completeness gating (P0-4)
+# ===========================================================================
+
+
+def _scored_sample(
+    doc_id: str, index: int, *, correct: bool, expected: int = 64
+) -> dict:
+    """Fabricate one scored sample row for _build_problem_level_metrics."""
+    return {
+        "doc_id": doc_id,
+        "sample_index": index,
+        "accuracy": 1.0 if correct else 0.0,
+        "extracted_answer": "5" if correct else "6",
+        "evaluation_status": "completed",
+        "expected_samples": expected,
+    }
+
+
+class TestProblemCompleteness:
+    """@k metrics only aggregate problems whose indices fully cover 0..k-1."""
+
+    def test_partial_problem_excluded_from_pass_at_k(self) -> None:
+        """A problem observed at 10/64 samples must not enter problem_pass@64."""
+        from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
+
+        rows = [_scored_sample("p1", i, correct=i == 0) for i in range(10)]
+        problems, metrics, observations = _build_problem_level_metrics(
+            rows, expected_samples=64
+        )
+        assert problems[0]["sample_count"] == 10
+        assert problems[0]["complete"] is False
+        # Empty cohort: explicit 0.0 with no observations, no division error.
+        assert metrics["problem_pass@64"] == 0.0
+        assert metrics["problem_majority@64"] == 0.0
+        assert observations["problem_pass@64"] == []
+        assert observations["problem_majority@64"] == []
+
+    def test_full_coverage_enters_pass_at_k(self) -> None:
+        """64 distinct indices 0..63 aggregate normally."""
+        from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
+
+        rows = [_scored_sample("p1", i, correct=i < 63) for i in range(64)]
+        problems, metrics, _ = _build_problem_level_metrics(rows, expected_samples=64)
+        assert problems[0]["complete"] is True
+        assert metrics["problem_pass@64"] == pytest.approx(1.0)
+        assert metrics["problem_majority@64"] == pytest.approx(1.0)
+
+    def test_duplicate_index_marks_incomplete(self) -> None:
+        """64 records with a repeated index (idempotent retry) are incomplete."""
+        from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
+
+        rows = [
+            {**_scored_sample("p1", i, correct=False), "_math_problem_index": 0}
+            for i in range(63)
+        ]
+        rows.append(dict(rows[0]))  # identical duplicate of sample 0
+        problems, metrics, _ = _build_problem_level_metrics(rows, expected_samples=64)
+        assert problems[0]["sample_count"] == 63  # merged idempotently
+        assert problems[0]["complete"] is False
+        assert metrics["problem_pass@64"] == 0.0
+        assert all("_math_problem_index" not in item for item in rows)
+
+    def test_out_of_range_index_marks_incomplete(self) -> None:
+        """64 records covering indices 0..62 plus 64 are incomplete."""
+        from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
+
+        rows = [_scored_sample("p1", i, correct=False) for i in range(63)]
+        rows.append(_scored_sample("p1", 64, correct=False))
+        problems, metrics, _ = _build_problem_level_metrics(rows, expected_samples=64)
+        assert problems[0]["sample_count"] == 64
+        assert problems[0]["complete"] is False
+        assert metrics["problem_pass@64"] == 0.0
+
+    def test_mixed_problems_denominator_only_complete(self, tmp_path: Path) -> None:
+        """With mixed problems, pass@k/majority@k divide by complete problems."""
+        from llmeval.tasks.math_eval.math_score import compute_score_result
+
+        data = [
+            {
+                **_math_item("5", ["$\\boxed{5}$", "$\\boxed{6}$"]),
+                "doc_id": "aime24:0",
+                "sample_indices": [0, 1],
+            },
+            {
+                **_math_item("7", ["$\\boxed{7}$"]),
+                "doc_id": "aime24:1",
+                "sample_index": 0,
+            },
+        ]
+        result = compute_score_result(
+            eval_dataset=data,
+            label_key="answer",
+            response_key="gen",
+            cache_path=str(tmp_path / "cache.jsonl"),
+            max_workers=2,
+            timeout=60,
+            expected_samples=2,
+        )
+        # Only the complete problem enters the @2 cohort.
+        assert result.metrics["problem_pass@2"] == pytest.approx(1.0)
+        assert result.metrics["problem_majority@2"] == pytest.approx(1.0)
+        problems = result.details["problem_level"]
+        assert problems[0]["complete"] is True
+        assert problems[1]["complete"] is False
+        assert result.details["complete_problem_count"] == 1
+        assert result.details["incomplete_problem_count"] == 1
+        assert result.details["excluded_problem_doc_ids"] == ["doc:aime24:1"]
+
+    def test_all_incomplete_reports_zero_and_summary(self, tmp_path: Path) -> None:
+        """Zero complete problems: @k is 0.0 and the summary says so."""
+        from llmeval.tasks.math_eval.math_score import compute_score_result
+
+        data = [
+            {
+                **_math_item("7", ["$\\boxed{7}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": 0,
+            }
+        ]
+        result = compute_score_result(
+            eval_dataset=data,
+            label_key="answer",
+            response_key="gen",
+            cache_path=str(tmp_path / "cache.jsonl"),
+            max_workers=2,
+            timeout=60,
+            expected_samples=2,
+        )
+        assert result.metrics["problem_pass@2"] == 0.0
+        assert result.metrics["problem_majority@2"] == 0.0
+        assert result.details["complete_problem_count"] == 0
+        assert result.details["incomplete_problem_count"] == 1
+        assert result.details["excluded_problem_doc_ids"] == ["doc:aime24:0"]

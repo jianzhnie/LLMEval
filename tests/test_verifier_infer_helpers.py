@@ -253,7 +253,10 @@ class TestVerifierResume:
         Path(runner.args.output_file).write_text(
             json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8"
         )
-        counts = runner.count_completed_samples()
+        counts = {
+            key: len(indices)
+            for key, indices in runner.get_completed_sample_indices().items()
+        }
 
         assert counts[result["llmeval_verifier_id"]] == 1
 
@@ -280,7 +283,10 @@ class TestVerifierResume:
         result["Verifier_judgment"] = ""
         Path(runner.args.output_file).write_text(json.dumps(result) + "\n")
 
-        assert runner.count_completed_samples()[result["llmeval_verifier_id"]] == 1
+        assert (
+            len(runner.get_completed_sample_indices()[result["llmeval_verifier_id"]])
+            == 1
+        )
         assert runner.load_data() == []
 
     def test_resume_preserves_missing_sample_index(self, tmp_path: Path) -> None:
@@ -301,3 +307,34 @@ class TestVerifierResume:
 
         assert len(remaining) == 1
         assert remaining[0]["sample_index"] == 1
+
+    def test_duplicate_resume_id_fails(self, tmp_path: Path) -> None:
+        runner = self._runner(tmp_path)
+        duplicate = {"doc_id": "doc:1", "prompt": "q", "answer": "4", "gen": ["4"]}
+        Path(runner.args.input_file).write_text(
+            json.dumps(duplicate) + "\n" + json.dumps(duplicate) + "\n"
+        )
+
+        with pytest.raises(ValueError, match="Duplicate verifier resume id"):
+            runner.load_data()
+
+    def test_process_batches_can_record_and_continue(self, tmp_path: Path) -> None:
+        runner = self._runner(tmp_path)
+        runner.args.batch_size = 1
+        runner.args.fail_fast = False
+        runner.process_and_write_batch = MagicMock(
+            side_effect=[RuntimeError("bad batch"), None]
+        )
+
+        runner._process_batches(
+            [
+                {"doc_id": "d1", "sample_index": 2},
+                {"doc_id": "d2", "sample_index": 0},
+            ]
+        )
+
+        assert runner.process_and_write_batch.call_count == 2
+        failed_path = tmp_path / "verifier_failed.jsonl"
+        failure = json.loads(failed_path.read_text().strip())
+        assert failure["error_category"] == "batch_processing"
+        assert failure["items"] == [{"doc_id": "d1", "sample_index": 2}]

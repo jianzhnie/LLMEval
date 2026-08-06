@@ -84,17 +84,50 @@ class TestCountCompletedSamples:
         f.write_text(json.dumps({"prompt": "q1", "gen": "bare string"}) + "\n")
         assert load_resume_state(f, "prompt", "gen").legacy_counts == {}
 
-    def test_malformed_line_skipped(self, tmp_path: Path) -> None:
+    def test_malformed_line_fails_with_path_and_line(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
         with open(f, "w") as fh:
             fh.write("bad json\n")
             fh.write(json.dumps({"prompt": "q1", "gen": ["a"]}) + "\n")
-        assert load_resume_state(f, "prompt", "gen").legacy_counts["q1"] == 1
+        with pytest.raises(ValueError, match=r"out\.jsonl at line 1"):
+            load_resume_state(f, "prompt", "gen")
 
-    def test_non_object_line_skipped(self, tmp_path: Path) -> None:
+    def test_non_object_line_fails_with_path_and_line(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
         f.write_text("[1, 2]\n" + json.dumps({"prompt": "q1", "gen": ["a"]}) + "\n")
-        assert load_resume_state(f, "prompt", "gen").legacy_counts["q1"] == 1
+        with pytest.raises(
+            ValueError, match=r"out\.jsonl line 1 must contain an object"
+        ):
+            load_resume_state(f, "prompt", "gen")
+
+    def test_repair_ignores_only_unterminated_final_json(self, tmp_path: Path) -> None:
+        f = tmp_path / "out.jsonl"
+        f.write_text(json.dumps({"prompt": "q1", "gen": ["a"]}) + "\n{")
+
+        state = load_resume_state(
+            f,
+            "prompt",
+            "gen",
+            repair_truncated_last_line=True,
+        )
+
+        assert state.legacy_counts == {"q1": 1}
+
+    def test_repair_does_not_ignore_malformed_middle_line(self, tmp_path: Path) -> None:
+        f = tmp_path / "out.jsonl"
+        f.write_text(
+            json.dumps({"prompt": "q1", "gen": ["a"]})
+            + "\n{\n"
+            + json.dumps({"prompt": "q2", "gen": ["b"]})
+        )
+
+        with pytest.raises(ValueError, match="at line 2"):
+            load_resume_state(
+                f,
+                "prompt",
+                "gen",
+                repair_truncated_last_line=True,
+            )
 
     def test_custom_keys_with_fallback(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
@@ -282,6 +315,51 @@ class TestStableResumeCounts:
             ("q1", "q"): {0, 2}
         }
 
+    def test_scalar_sample_index_honored_for_single_generation(
+        self, tmp_path: Path
+    ) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text(
+            json.dumps({"doc_id": "q1", "prompt": "q", "gen": ["a"], "sample_index": 2})
+            + "\n"
+        )
+
+        assert load_resume_state(output, "prompt", "gen").completed_indices == {
+            ("q1", "q"): {2}
+        }
+
+    def test_scalar_sample_index_ignored_for_multiple_generations(
+        self, tmp_path: Path
+    ) -> None:
+        """A multi-generation row with only a scalar index is inconsistent.
+
+        It must fall back to free-slot allocation instead of pinning a single
+        index (which would re-generate already-completed samples on resume).
+        """
+        output = tmp_path / "output.jsonl"
+        output.write_text(
+            json.dumps(
+                {"doc_id": "q1", "prompt": "q", "gen": ["a", "b"], "sample_index": 0}
+            )
+            + "\n"
+        )
+
+        assert load_resume_state(output, "prompt", "gen").completed_indices == {
+            ("q1", "q"): {0, 1}
+        }
+
+    def test_negative_scalar_sample_index_rejected(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text(
+            json.dumps(
+                {"doc_id": "q1", "prompt": "q", "gen": ["a"], "sample_index": -1}
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="non-negative"):
+            load_resume_state(output, "prompt", "gen")
+
 
 class TestToolChoiceHelper:
     def test_none_is_not_explicit(self) -> None:
@@ -300,7 +378,10 @@ class TestSaveFailedItems:
         failed = tmp_path / "output_failed.jsonl"
         assert failed.exists()
         record = json.loads(failed.read_text().strip())
-        assert record == {"prompt": "q", "error": "boom"}
+        assert record["prompt"] == "q"
+        assert record["error"] == "boom"
+        assert record["run_id"]
+        assert record["failure_id"]
 
     def test_non_jsonl_output_name_not_clobbered(self, tmp_path: Path) -> None:
         """splitext-derived name must not collapse onto the output file."""
@@ -326,7 +407,18 @@ class TestSaveFailedItems:
 
         failed = tmp_path / "output_failed.jsonl"
         records = [json.loads(line) for line in failed.read_text().splitlines()]
-        assert records == [
-            {"sample_index": 0, "error": "first"},
-            {"sample_index": 2, "error": "second"},
+        assert [record["sample_index"] for record in records] == [0, 2]
+        assert all(record["run_id"] and record["failure_id"] for record in records)
+
+    def test_append_only_keeps_repeated_failure_audits(self, tmp_path: Path) -> None:
+        out = tmp_path / "output.jsonl"
+        entry = {"doc_id": "d1", "sample_index": 0, "error": "transient"}
+        save_failed_items(out, [entry], run_id="run-1")
+        save_failed_items(out, [entry], run_id="run-2")
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "output_failed.jsonl").read_text().splitlines()
         ]
+        assert [record["run_id"] for record in records] == ["run-1", "run-2"]
+        assert records[0]["failure_id"] == records[1]["failure_id"]

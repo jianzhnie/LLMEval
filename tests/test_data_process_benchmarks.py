@@ -6,6 +6,8 @@ import importlib.util
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 MATH_SCRIPT = ROOT / "scripts" / "data_process" / "prepare_math_benchmarks.py"
 MC_SCRIPT = ROOT / "scripts" / "data_process" / "prepare_mc_benchmarks.py"
@@ -123,6 +125,47 @@ def test_mmlu_pro_formatter_accepts_list_options() -> None:
     assert row["choices"] == ["1", "2", "3", "4"]
     assert row["choice_tokens"] == ["A", "B", "C", "D"]
     assert row["answer"] == "B"
+
+
+@pytest.mark.parametrize(
+    "example, message",
+    [
+        (
+            {"question": "q", "options": [], "answer_index": 0},
+            "between 2 and 10 choices",
+        ),
+        (
+            {
+                "question": "q",
+                "options": [str(index) for index in range(11)],
+                "answer_index": 0,
+            },
+            "between 2 and 10 choices",
+        ),
+        (
+            {"question": "q", "options": ["a", "b"], "answer_index": -1},
+            "out of range",
+        ),
+    ],
+)
+def test_mmlu_pro_formatter_rejects_invalid_schema(
+    example: dict[str, object], message: str
+) -> None:
+    module = _load_script(MC_SCRIPT)
+
+    with pytest.raises(ValueError, match=message):
+        module._format_mc_row("mmlu_pro", example, source_id="bad:0")
+
+
+def test_mmlu_formatter_rejects_empty_choices() -> None:
+    module = _load_script(MC_SCRIPT)
+
+    with pytest.raises(ValueError, match="answer index out of range"):
+        module._format_mc_row(
+            "mmlu",
+            {"question": "q", "choices": [], "answer": -1},
+            source_id="bad:0",
+        )
 
 
 def test_code_preparers_persist_document_id() -> None:

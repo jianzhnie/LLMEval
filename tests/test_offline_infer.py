@@ -158,12 +158,12 @@ class TestOfflineInferenceRunner:
         assert len(remaining) == 1
         assert remaining[0]["prompt"] == "q"
 
-    def test_write_batch_results_appends_generation(self, tmp_path: Path) -> None:
+    def test_write_response_results_appends_generation(self, tmp_path: Path) -> None:
         runner = _runner(tmp_path)
-        output = MagicMock()
-        output.outputs = [MagicMock(text="answer text")]
 
-        runner._write_batch_results([{"prompt": "q", "answer": "a"}], [output])
+        runner._write_response_results(
+            [{"prompt": "q", "answer": "a"}], ["answer text"]
+        )
 
         rows = [
             json.loads(line)
@@ -191,6 +191,36 @@ class TestOfflineInferenceRunner:
         assert llm_kwargs["device"] == "cuda"
         assert llm_kwargs["quantization"] == "awq"
         assert llm_kwargs["max_num_batched_tokens"] == 2048
+        assert "max_model_len" not in llm_kwargs["hf_overrides"]
         sampling_kwargs = fake_sampling.call_args.kwargs
         assert sampling_kwargs["max_tokens"] == 128
         assert sampling_kwargs["temperature"] == 0.2
+
+    def test_process_batches_fail_fast_by_default(self, tmp_path: Path) -> None:
+        runner = _runner(tmp_path, batch_size=1, fail_fast=True)
+        runner.process_and_write_batch = MagicMock(
+            side_effect=RuntimeError("bad batch")
+        )
+
+        with pytest.raises(RuntimeError, match="bad batch"):
+            runner._process_batches([{"doc_id": "d1", "sample_index": 0}])
+
+    def test_process_batches_can_record_and_continue(self, tmp_path: Path) -> None:
+        runner = _runner(tmp_path, batch_size=1, fail_fast=False)
+        runner.process_and_write_batch = MagicMock(
+            side_effect=[RuntimeError("bad batch"), None]
+        )
+
+        runner._process_batches(
+            [
+                {"doc_id": "d1", "sample_index": 0},
+                {"doc_id": "d2", "sample_index": 0},
+            ]
+        )
+
+        assert runner.process_and_write_batch.call_count == 2
+        failed_path = tmp_path / "output_failed.jsonl"
+        failure = json.loads(failed_path.read_text().strip())
+        assert failure["error_category"] == "batch_processing"
+        assert failure["batch_index"] == 0
+        assert failure["items"] == [{"doc_id": "d1", "sample_index": 0}]
