@@ -425,6 +425,38 @@ class TestProcessGenerateItem:
 
         assert result["sample_indices"] == [1, 3]
 
+    def test_invalid_requested_indices_are_rejected(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [
+            _generation_choice("a", 0),
+            _generation_choice("b", 1),
+        ]
+
+        with pytest.raises(RuntimeError, match="requested_sample_indices"):
+            runner.process_generate_item(
+                {
+                    "prompt": "q",
+                    "answer": "A",
+                    "_llmeval_remaining_samples": 2,
+                    "_llmeval_requested_sample_indices": [1, 1],
+                },
+                client,
+                [],
+            )
+
+    def test_duplicate_response_positions_are_rejected(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        runner.config.n_samples = 2
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [
+            _generation_choice("a", 0),
+            _generation_choice("b", 0),
+        ]
+
+        with pytest.raises(RuntimeError, match="duplicate sample position"):
+            runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
+
 
 class TestMCStableResume:
     def test_generate_resume_requests_only_missing_samples(

@@ -436,6 +436,15 @@ class TestGetContents:
         with pytest.raises(ValueError, match="Duplicate response choice index"):
             client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=2)
 
+    def test_non_integer_choice_index_fails(self) -> None:
+        client = _make_client()
+        completion = _fake_completion(["a"])
+        completion.choices[0].index = "0"
+        client.client.chat.completions.create.return_value = completion
+
+        with pytest.raises(ValueError, match="non-integer indices"):
+            client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=1)
+
 
 # ── InferenceRunner.load_data (n_samples scheduling metadata) ─────
 
