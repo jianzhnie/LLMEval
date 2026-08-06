@@ -62,7 +62,12 @@ logger = init_logger("inference_common")
 def _batch_item_identity(item: dict[str, Any]) -> dict[str, Any]:
     """Return stable, compact identity fields for a failed batch item."""
     identity: dict[str, Any] = {}
-    for key in ("doc_id", "sample_index", "_llmeval_requested_sample_indices"):
+    for key in (
+        "doc_id",
+        "llmeval_verifier_id",
+        "sample_index",
+        "_llmeval_requested_sample_indices",
+    ):
         if key in item:
             public_key = (
                 "requested_sample_indices"
@@ -279,18 +284,26 @@ def load_resume_state(
 
             identity = (str(document_id), str(prompt))
             completed = state.completed_indices.setdefault(identity, set())
-            index_field = next(
-                (
-                    key
-                    for key in (
-                        "sample_indices",
-                        "_llmeval_sample_indices",
-                        "_llmeval_requested_sample_indices",
-                    )
-                    if key in item
-                ),
-                None,
-            )
+            index_fields = [
+                key
+                for key in (
+                    "sample_indices",
+                    "_llmeval_sample_indices",
+                    "_llmeval_requested_sample_indices",
+                )
+                if key in item
+            ]
+            if len(index_fields) > 1:
+                raise ValueError(
+                    f"Resume file {output_path} line {line_num} has ambiguous "
+                    f"sample index fields: {index_fields}"
+                )
+            index_field = index_fields[0] if index_fields else None
+            if count == 1 and index_field is not None and "sample_index" in item:
+                raise ValueError(
+                    f"Resume file {output_path} line {line_num} has both "
+                    "sample_index and sample_indices; provide exactly one"
+                )
             if index_field is not None:
                 raw_indices = item[index_field]
                 valid_indices = (

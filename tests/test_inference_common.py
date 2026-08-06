@@ -392,6 +392,26 @@ class TestStableResumeCounts:
         with pytest.raises(ValueError, match="unique non-negative ints"):
             load_resume_state(output, "prompt", "gen")
 
+    def test_conflicting_single_sample_index_fields_are_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text(
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "q",
+                    "gen": ["a"],
+                    "sample_index": 0,
+                    "sample_indices": [1],
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="provide exactly one"):
+            load_resume_state(output, "prompt", "gen")
+
     def test_scalar_sample_index_ignored_for_multiple_generations(
         self, tmp_path: Path
     ) -> None:

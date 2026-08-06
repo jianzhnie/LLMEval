@@ -7,6 +7,7 @@ can be loaded without vllm/openai installed.
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import json
 import sys
@@ -23,6 +24,12 @@ _vllm_absent = importlib.util.find_spec("vllm") is None
 if _vllm_absent:
     sys.modules["vllm"] = types.ModuleType("vllm")
     sys.modules["vllm.outputs"] = types.ModuleType("vllm.outputs")
+    sys.modules["vllm"].__spec__ = importlib.machinery.ModuleSpec(
+        "vllm", loader=None
+    )
+    sys.modules["vllm.outputs"].__spec__ = importlib.machinery.ModuleSpec(
+        "vllm.outputs", loader=None
+    )
 
 # Provide stubs that the module's top-level imports need
 if _vllm_absent:
@@ -338,3 +345,22 @@ class TestVerifierResume:
         failure = json.loads(failed_path.read_text().strip())
         assert failure["error_category"] == "batch_processing"
         assert failure["items"] == [{"doc_id": "d1", "sample_index": 2}]
+
+    def test_failed_batch_preserves_legacy_verifier_identity(
+        self, tmp_path: Path
+    ) -> None:
+        runner = self._runner(tmp_path)
+        runner.args.batch_size = 1
+        runner.args.fail_fast = False
+        runner.process_and_write_batch = MagicMock(side_effect=RuntimeError("bad"))
+
+        runner._process_batches(
+            [{"llmeval_verifier_id": "legacy:abc", "sample_index": 0}]
+        )
+
+        failure = json.loads(
+            (tmp_path / "verifier_failed.jsonl").read_text().strip()
+        )
+        assert failure["items"] == [
+            {"llmeval_verifier_id": "legacy:abc", "sample_index": 0}
+        ]

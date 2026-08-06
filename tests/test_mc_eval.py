@@ -981,6 +981,20 @@ class TestMCSampleIndexProtocol:
                 [self._row(["Answer: B"], sample_index=-1)], "answer", "gen"
             )
 
+    def test_conflicting_single_sample_index_fields_raise(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+
+        with pytest.raises(ValueError, match="exactly one"):
+            merge_generate_records(
+                [
+                    self._row(
+                        ["Answer: B"], sample_index=0, sample_indices=[1]
+                    )
+                ],
+                "answer",
+                "gen",
+            )
+
     def test_idempotent_duplicate_merges(self) -> None:
         """Same index + same content merges without error."""
         from llmeval.tasks.mc_eval.mc_score import merge_generate_records

@@ -591,6 +591,22 @@ def _expand_code_samples(
             samples = [""]
 
         used = used_by_problem.setdefault(group_id, set())
+        if (
+            isinstance(gen_raw, list)
+            and not gen_raw
+            and item.get("sample_indices") == []
+            and "sample_index" not in item
+        ):
+            # Preserve an explicit zero-generation row as one unindexed
+            # failure observation. The scorer can then report the inference
+            # failure instead of aborting on a synthetic length mismatch.
+            sample_item = item.copy()
+            sample_item.pop("sample_indices", None)
+            sample_item[response_key] = []
+            sample_item["_llmeval_group_id"] = group_id
+            sample_item.pop("sample_index", None)
+            expanded.append(sample_item)
+            continue
         sample_indices = resolve_sample_indices(
             item, len(samples), problem_id=group_id, used_indices=used
         )
@@ -757,6 +773,10 @@ def _score_code_task_result(
         problems=problems,
         per_item=records,
     )
+    # ``_llmeval_group_id`` is request-scoped metadata used only while
+    # expanding and grouping samples. It must not leak into persisted results.
+    for record in result.per_item:
+        record.pop("_llmeval_group_id", None)
     if persist_legacy:
         write_cache(result, cache_path)
 

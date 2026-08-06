@@ -495,6 +495,36 @@ class TestSampleIndexProtocol:
         with pytest.raises(ValueError, match="sample_index"):
             self._score(data, tmp_path)
 
+    def test_conflicting_single_sample_index_fields_raise(self, tmp_path: Path) -> None:
+        data = [
+            {
+                **_math_item("5", ["$\\boxed{5}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": 0,
+                "sample_indices": [1],
+            }
+        ]
+        with pytest.raises(ValueError, match="exactly one"):
+            self._score(data, tmp_path)
+
+    def test_empty_generation_with_empty_indices_is_recorded(
+        self, tmp_path: Path
+    ) -> None:
+        data = [
+            {
+                **_math_item("5", []),
+                "doc_id": "aime24:0",
+                "sample_indices": [],
+            }
+        ]
+
+        result = self._score(data, tmp_path)
+
+        assert result.sample_count == 1
+        assert result.failed_count == 1
+        assert result.per_item[0]["failure_stage"] == "inference"
+        assert "sample_index" not in result.per_item[0]
+
     def test_idempotent_duplicate_merges(self, tmp_path: Path) -> None:
         """Same index + same content merges without error."""
         row = {

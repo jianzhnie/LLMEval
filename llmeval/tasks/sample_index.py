@@ -1,15 +1,20 @@
 """Shared sample-index protocol for scorer input rows.
 
-Inference output rows carry sample identity in exactly one of two fields:
+Inference output rows normally carry sample identity in one of two fields:
 
 - ``sample_index``   — non-negative int, for single-generation rows;
 - ``sample_indices`` — list of non-negative ints, one per generation.
 
 The math, code, and MC scorers all expand or merge such rows before scoring.
+For compatibility with an older batched format, a multi-generation row may
+also retain a stale scalar ``sample_index``; its explicit ``sample_indices``
+list remains authoritative. A single-generation row carrying both fields is
+always rejected because it is ambiguous.
 This module resolves the two fields into a per-row list of sample indices so
 every scorer interprets the protocol identically:
 
-1. Single-generation rows prefer a valid scalar ``sample_index``.
+1. Single-generation rows use a valid scalar ``sample_index``; carrying both
+   public index fields is rejected as ambiguous.
 2. Rows with an explicit ``sample_indices`` list must match the generation
    count exactly (length, element type, and non-negative range).
 3. Explicit-but-invalid fields raise a schema ``ValueError`` naming the
@@ -74,11 +79,19 @@ def resolve_sample_indices(
         ValueError: When an explicit ``sample_index``/``sample_indices``
             field is present but has the wrong type, length, or range.
     """
+    has_index = "sample_index" in item
+    has_indices = "sample_indices" in item
     raw_index = item.get("sample_index")
     raw_indices = item.get("sample_indices")
 
-    # Single-generation rows prefer the scalar form.
-    if sample_count == 1 and raw_index is not None:
+    if sample_count == 1 and has_index and has_indices:
+        raise ValueError(
+            f"Ambiguous sample indices for problem {problem_id!r}: "
+            "provide exactly one of sample_index or sample_indices"
+        )
+
+    # Single-generation rows use the scalar form when it is explicitly present.
+    if sample_count == 1 and has_index:
         if not is_valid_index(raw_index):
             raise ValueError(
                 f"Invalid sample_index {raw_index!r} for problem {problem_id!r}: "
@@ -87,7 +100,7 @@ def resolve_sample_indices(
         return [int(raw_index)]
 
     # The list form is authoritative whenever present.
-    if raw_indices is not None:
+    if has_indices:
         if not isinstance(raw_indices, list) or len(raw_indices) != sample_count:
             raise ValueError(
                 f"Invalid sample_indices {raw_indices!r} for problem "
@@ -106,7 +119,7 @@ def resolve_sample_indices(
             )
         return list(raw_indices)
 
-    if raw_index is not None:
+    if has_index:
         if not is_valid_index(raw_index):
             raise ValueError(
                 f"Invalid sample_index {raw_index!r} for problem {problem_id!r}: "

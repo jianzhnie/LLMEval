@@ -903,6 +903,7 @@ class TestCodeSampleIndexProtocol:
         _, records = self._score(items, tmp_path)
         assert [record["sample_index"] for record in records] == [1, 3]
         assert all("sample_indices" not in record for record in records)
+        assert all("_llmeval_group_id" not in record for record in records)
 
     @pytest.mark.parametrize(
         "bad_fields",
@@ -925,6 +926,26 @@ class TestCodeSampleIndexProtocol:
         items = [self._item([self._RIGHT], sample_index=-1)]
         with pytest.raises(ValueError, match="sample_index"):
             self._score(items, tmp_path)
+
+    def test_conflicting_single_sample_index_fields_raise(self, tmp_path: Path) -> None:
+        items = [
+            self._item(
+                [self._RIGHT], sample_index=0, sample_indices=[1]
+            )
+        ]
+        with pytest.raises(ValueError, match="exactly one"):
+            self._score(items, tmp_path)
+
+    def test_empty_generation_with_empty_indices_is_recorded(
+        self, tmp_path: Path
+    ) -> None:
+        items = [self._item([], sample_indices=[])]
+
+        acc, records = self._score(items, tmp_path)
+
+        assert acc == 0.0
+        assert len(records) == 1
+        assert records[0]["result"] == "failed: empty generation"
 
     def test_idempotent_duplicate_merges(self, tmp_path: Path) -> None:
         """Same index + same content is scored once, without error."""

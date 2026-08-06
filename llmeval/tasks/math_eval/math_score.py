@@ -827,14 +827,20 @@ def _expand_math_samples(
         used = used_by_problem.setdefault(problem_id, set())
         if not responses:
             # Preserve a missing-generation record so it is counted as skipped.
-            sample_index = resolve_sample_indices(
-                item, 1, problem_id=problem_id, used_indices=used
-            )[0]
-            used.add(sample_index)
             record = dict(item)
             record.pop("sample_indices", None)
             record[response_key] = []
-            record["sample_index"] = sample_index
+            if item.get("sample_indices") == [] and "sample_index" not in item:
+                # An explicit empty list describes zero generated samples. Keep
+                # one unindexed failure record so the missing inference remains
+                # visible in scorer counts and problem completeness checks.
+                record.pop("sample_index", None)
+            else:
+                sample_index = resolve_sample_indices(
+                    item, 1, problem_id=problem_id, used_indices=used
+                )[0]
+                used.add(sample_index)
+                record["sample_index"] = sample_index
             record["_math_problem_index"] = row_index
             expanded.append(record)
             continue
