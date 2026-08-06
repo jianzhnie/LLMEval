@@ -193,7 +193,7 @@ class TestEvaluateTask:
                 "task": "code_opensource/humaneval",
             }
         ]
-        with pytest.raises(PermissionError, match="allow_unsafe_code"):
+        with pytest.raises(RuntimeError, match="scorer exploded"):
             evaluate_task(
                 data,
                 "code_opensource/humaneval",
@@ -201,6 +201,7 @@ class TestEvaluateTask:
                 "gen",
                 tmp_path / "c.jsonl",
                 1,
+                allow_unsafe_code=True,
             )
 
     def test_math_dispatch(self, tmp_path: Path) -> None:
@@ -213,7 +214,7 @@ class TestEvaluateTask:
             return _scorer_result("accuracy", 1.0)
 
         monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(ev, "compute_score_result", _fake_compute_scores)
+        monkeypatch.setattr(ev, "score_math_result", _fake_compute_scores)
         try:
             data = [
                 {
@@ -246,7 +247,7 @@ class TestEvaluateTask:
         def _boom(**_: object) -> float:
             raise RuntimeError("scorer exploded")
 
-        monkeypatch.setattr(ev, "compute_score_result", _boom)
+        monkeypatch.setattr(ev, "score_math_result", _boom)
         data = [{"answer": "5", "gen": ["5"], "task": "math_opensource/aime24"}]
         with pytest.raises(RuntimeError, match="scorer exploded"):
             evaluate_task(

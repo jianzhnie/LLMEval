@@ -387,6 +387,17 @@ log_error() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: ❌ $*" >&2
 }
 
+wait_for_pids() {
+    local failed=0
+    local pid
+    for pid in "$@"; do
+        if ! wait "$pid"; then
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+
 # 错误处理函数，并在退出前清理资源
 # Args:
 #   $1: exit_code (int) - 退出码
@@ -420,7 +431,18 @@ acquire_lock() {
 }
 
 release_lock() {
-    rm -f "$LOCK_FILE"
+    # 仅当锁文件中的 PID 等于当前进程 PID 时才删除锁文件，
+    # 避免未持锁的进程（如发现他人正在运行而报错退出时）误删持锁进程的锁，
+    # 导致第三个进程可以并发进入
+    if [[ -f "$LOCK_FILE" ]]; then
+        local lock_pid
+        lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || true)
+        if [[ -n "$lock_pid" && "$lock_pid" == "$$" ]]; then
+            rm -f "$LOCK_FILE"
+        else
+            log_warn "锁文件不属于当前进程 (锁内 PID: '${lock_pid:-空}', 当前 PID: $$)，跳过删除"
+        fi
+    fi
 }
 
 # 权限检查函数
@@ -490,8 +512,12 @@ cleanup_and_exit() {
 
     log_info "开始清理资源..."
 
-    # 停止所有服务
-    stop_services
+    # 停止所有服务, but preserve the original failure code and always release
+    # the lock even when a remote cleanup command fails.
+    local cleanup_failed=0
+    if ! stop_services; then
+        cleanup_failed=1
+    fi
 
     # 释放文件锁
     release_lock
@@ -499,6 +525,9 @@ cleanup_and_exit() {
     # 如果是调试模式，关闭它
     [[ "${DEBUG:-0}" == "1" ]] && set +x
 
+    if [[ "$cleanup_failed" -eq 1 && "$exit_code" -eq 0 ]]; then
+        exit_code=1
+    fi
     log_info "清理完成，退出代码: $exit_code"
     exit "$exit_code"
 }
@@ -575,6 +604,41 @@ validate_config() {
 #                  核心功能函数区域
 # =======================================================
 
+# 由端口列表构建匹配本任务 vLLM 进程的 ERE 模式（供 pkill/pgrep -f 使用）
+# 带端口边界 ([[:space:]]|$)，避免 "--port 6000" 误匹配 "--port 60001" 等前缀端口
+# Args:
+#   $@: ports (int...) - 本任务使用的服务端口列表
+# Returns:
+#   打印匹配模式字符串
+build_vllm_kill_pattern() {
+    local port_regex
+    port_regex=$(IFS='|'; echo "$*")
+    echo "vllm serve.*--port (${port_regex})([[:space:]]|\$)"
+}
+
+# 获取指定节点上本任务使用的端口列表（tp8 单实例部署，PORTS 与 NODES 按下标一一对应）
+# Args:
+#   $1: node (string) - 节点地址
+# Returns:
+#   打印该节点的端口列表（空格分隔），未找到时输出为空
+get_node_ports() {
+    local node="$1"
+    local -a node_ports=()
+    if [[ ${#PORTS[@]} -gt 0 ]]; then
+        for ((i = 0; i < ${#NODES[@]}; i++)); do
+            if [[ "${NODES[i]}" == "$node" ]]; then
+                node_ports+=("${PORTS[i]}")
+                break
+            fi
+        done
+    fi
+    if [[ ${#node_ports[@]} -gt 0 ]]; then
+        echo "${node_ports[@]}"
+    else
+        echo ""
+    fi
+}
+
 # 停止指定节点上的 vLLM 服务
 # Args:
 #   $1: node (string) - 节点地址
@@ -584,14 +648,25 @@ validate_config() {
 stop_service_on_node() {
     local node="$1"
     local port="${2:-}"
-    local search_pattern="vllm serve"
 
     log_info "🛑 正在停止节点 ${node} 上的 vLLM 服务..."
 
-    # 如果指定了端口，则精确停止该端口的服务
+    # 仅匹配本任务使用的端口，避免裸 'vllm serve' 模式误杀节点上其他任务/用户的 vLLM 进程
+    local -a ports=()
     if [[ -n "$port" ]]; then
-        search_pattern="vllm serve.*--port ${port}"
+        ports=("$port")
+    else
+        # 未指定端口时，回退到该节点在全局端口列表中的端口
+        read -r -a ports <<< "$(get_node_ports "$node")" || true
     fi
+
+    if [[ ${#ports[@]} -eq 0 ]]; then
+        log_warn "⚠️ 无法确定节点 ${node} 上本任务使用的端口，跳过清理以避免误杀其他 vLLM 进程"
+        return 0
+    fi
+
+    local search_pattern
+    search_pattern=$(build_vllm_kill_pattern "${ports[@]}")
 
     # 优雅关闭：先发送 SIGTERM
     if ! ssh_run "$node" "pkill -f '${search_pattern}' || true"; then
@@ -629,12 +704,27 @@ stop_service_on_node() {
 stop_services() {
     log_info "🛑 脚本退出，正在停止所有远程模型服务..."
 
-    local search_pattern="vllm serve"
     local pids=()
 
-    # 遍历当前已知的节点列表 (可能已被 main 函数更新为 available_nodes)
-    for node in "${NODES[@]}"; do
-        log_info "正在停止节点 ${node} 上的 vLLM 进程..."
+    # 遍历当前已知的节点列表 (PORTS 与 NODES 按下标一一对应，单实例部署)
+    for ((i = 0; i < ${#NODES[@]}; i++)); do
+        local node="${NODES[i]}"
+        # 仅匹配本任务在该节点上使用的端口，避免裸 'vllm serve' 模式
+        # 误杀节点上其他任务/用户的 vLLM 进程
+        local -a node_ports=()
+        if [[ ${#PORTS[@]} -gt 0 ]]; then
+            node_ports+=("${PORTS[i]}")
+        fi
+
+        if [[ ${#node_ports[@]} -eq 0 ]]; then
+            log_warn "⚠️ 无法确定节点 ${node} 上本任务使用的端口，跳过清理以避免误杀其他 vLLM 进程"
+            continue
+        fi
+
+        local search_pattern
+        search_pattern=$(build_vllm_kill_pattern "${node_ports[@]}")
+
+        log_info "正在停止节点 ${node} 上的 vLLM 进程 (端口: ${node_ports[*]})..."
         (
             # 使用 pkill 优雅地发送 SIGTERM，并忽略错误（如果进程已停止）
             ssh_run "$node" "pkill -f '${search_pattern}' || true"
@@ -658,7 +748,10 @@ stop_services() {
     # 等待所有停止操作完成
     if [[ ${#pids[@]} -gt 0 ]]; then
         log_info "⏳ 等待所有节点服务停止..."
-        wait "${pids[@]}" || true
+        if ! wait_for_pids "${pids[@]}"; then
+            log_error "部分节点服务清理失败"
+            return 1
+        fi
     fi
     log_info "✅ 所有远程模型服务停止完成"
 }

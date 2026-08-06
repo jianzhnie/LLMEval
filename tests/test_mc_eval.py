@@ -628,7 +628,10 @@ class TestProcessGenerateItem:
     def test_success(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         client = MagicMock()
-        client.chat.completions.create.return_value.choices[0].message.content = "ans"
+        choice = MagicMock()
+        choice.index = 0
+        choice.message.content = "ans"
+        client.chat.completions.create.return_value.choices = [choice]
         result = runner.process_generate_item(
             {"prompt": "q", "answer": "A"}, client, []
         )
@@ -638,7 +641,10 @@ class TestProcessGenerateItem:
         """Null/empty generation must raise (not write an empty gen)."""
         runner = _make_mc_runner(tmp_path, mode="generate")
         client = MagicMock()
-        client.chat.completions.create.return_value.choices[0].message.content = None
+        choice = MagicMock()
+        choice.index = 0
+        choice.message.content = None
+        client.chat.completions.create.return_value.choices = [choice]
         with pytest.raises(RuntimeError, match="no usable text"):
             runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
 
@@ -953,8 +959,9 @@ class TestMCSampleIndexProtocol:
             {"sample_indices": [0, -1]},  # negative index
             {"sample_indices": [0]},  # length mismatch (2 generations)
             {"sample_indices": ["0", "1"]},  # wrong element type
+            {"sample_indices": [0, 0]},  # duplicate index
         ],
-        ids=["negative", "length-mismatch", "wrong-type"],
+        ids=["negative", "length-mismatch", "wrong-type", "duplicate"],
     )
     def test_invalid_sample_indices_raise(self, bad_fields: dict) -> None:
         from llmeval.tasks.mc_eval.mc_score import merge_generate_records

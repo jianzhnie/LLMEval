@@ -385,6 +385,17 @@ log_error() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: ❌ $*" >&2
 }
 
+wait_for_pids() {
+    local failed=0
+    local pid
+    for pid in "$@"; do
+        if ! wait "$pid"; then
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+
 # 错误处理函数，并在退出前清理资源
 # Args:
 #   $1: exit_code (int) - 退出码
@@ -499,8 +510,12 @@ cleanup_and_exit() {
 
     log_info "开始清理资源..."
 
-    # 停止所有服务
-    stop_services
+    # 停止所有服务, but preserve the original failure code and always release
+    # the lock even when a remote cleanup command fails.
+    local cleanup_failed=0
+    if ! stop_services; then
+        cleanup_failed=1
+    fi
 
     # 释放文件锁
     release_lock
@@ -508,6 +523,9 @@ cleanup_and_exit() {
     # 如果是调试模式，关闭它
     [[ "${DEBUG:-0}" == "1" ]] && set +x
 
+    if [[ "$cleanup_failed" -eq 1 && "$exit_code" -eq 0 ]]; then
+        exit_code=1
+    fi
     log_info "清理完成，退出代码: $exit_code"
     exit "$exit_code"
 }
@@ -753,7 +771,10 @@ stop_services() {
     # 等待所有停止操作完成
     if [[ ${#pids[@]} -gt 0 ]]; then
         log_info "⏳ 等待所有节点服务停止..."
-    wait "${pids[@]}" || true
+        if ! wait_for_pids "${pids[@]}"; then
+            log_error "部分节点服务清理失败"
+            return 1
+        fi
     fi
     log_info "✅ 所有远程模型服务停止完成"
 }

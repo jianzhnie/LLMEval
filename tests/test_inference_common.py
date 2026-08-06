@@ -185,6 +185,10 @@ class TestExpandDataWithResume:
         with pytest.raises(ValueError, match="missing required 'doc_id'"):
             expand_data_with_resume([{"prompt": "p"}], {}, {}, "prompt", 1)
 
+    def test_missing_prompt_is_schema_error(self) -> None:
+        with pytest.raises(ValueError, match="no non-empty prompt"):
+            expand_data_with_resume([{"doc_id": "q1"}], {}, {}, "prompt", 1)
+
 
 class TestPrepareDataWithResume:
     def test_sets_remaining_sample_count(self) -> None:
@@ -211,6 +215,10 @@ class TestPrepareDataWithResume:
         assert prepared[0]["_llmeval_requested_sample_indices"] == [1, 3]
         expanded = expand_group_for_sampling(prepared)
         assert [item["sample_index"] for item in expanded] == [1, 3]
+
+    def test_missing_prompt_is_schema_error(self) -> None:
+        with pytest.raises(ValueError, match="no non-empty prompt"):
+            prepare_data_with_resume([{"doc_id": "q1"}], {}, {}, "prompt", 1)
 
 
 class TestLoggingRedaction:
@@ -328,6 +336,41 @@ class TestStableResumeCounts:
             ("q1", "q"): {2}
         }
 
+    def test_legacy_private_sample_indices_are_honored(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text(
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "q",
+                    "gen": ["a", "b"],
+                    "_llmeval_requested_sample_indices": [1, 3],
+                }
+            )
+            + "\n"
+        )
+
+        assert load_resume_state(output, "prompt", "gen").completed_indices == {
+            ("q1", "q"): {1, 3}
+        }
+
+    def test_duplicate_explicit_indices_are_rejected(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text(
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "q",
+                    "gen": ["a", "b"],
+                    "sample_indices": [0, 0],
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="unique non-negative ints"):
+            load_resume_state(output, "prompt", "gen")
+
     def test_scalar_sample_index_ignored_for_multiple_generations(
         self, tmp_path: Path
     ) -> None:
@@ -422,3 +465,29 @@ class TestSaveFailedItems:
         ]
         assert [record["run_id"] for record in records] == ["run-1", "run-2"]
         assert records[0]["failure_id"] == records[1]["failure_id"]
+
+    def test_batch_failure_identity_includes_items(self, tmp_path: Path) -> None:
+        out = tmp_path / "output.jsonl"
+        first = {
+            "batch_index": 0,
+            "error_category": "batch_processing",
+            "items": [{"doc_id": "d1", "sample_index": 0}],
+        }
+        second = {
+            "batch_index": 0,
+            "error_category": "batch_processing",
+            "items": [{"doc_id": "d2", "sample_index": 0}],
+        }
+        save_failed_items(out, [first, second], run_id="run")
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "output_failed.jsonl").read_text().splitlines()
+        ]
+        assert records[0]["failure_id"] != records[1]["failure_id"]
+
+    def test_write_failure_propagates(self, tmp_path: Path) -> None:
+        blocker = tmp_path / "not-a-directory"
+        blocker.write_text("file")
+        with pytest.raises(OSError):
+            save_failed_items(blocker / "output.jsonl", [{"error": "boom"}])

@@ -73,6 +73,13 @@ def _fake_top_probs_resp(top_probs: dict[str, float]) -> MagicMock:
     return resp
 
 
+def _generation_choice(content: str | None, index: int = 0) -> MagicMock:
+    choice = MagicMock()
+    choice.index = index
+    choice.message.content = content
+    return choice
+
+
 def _make_mc_runner(
     tmp_path: Path, mode: str = "loglikelihood", max_retries: int = 0
 ) -> MCRunner:
@@ -328,7 +335,9 @@ class TestProcessGenerateItem:
     def test_success(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         client = MagicMock()
-        client.chat.completions.create.return_value.choices[0].message.content = "ans"
+        client.chat.completions.create.return_value.choices = [
+            _generation_choice("ans")
+        ]
 
         result = runner.process_generate_item(
             {"prompt": "q", "answer": "A"}, client, []
@@ -340,7 +349,9 @@ class TestProcessGenerateItem:
         runner = _make_mc_runner(tmp_path, mode="generate")
         runner.config.tool_choice = "auto"
         client = MagicMock()
-        client.chat.completions.create.return_value.choices[0].message.content = "ans"
+        client.chat.completions.create.return_value.choices = [
+            _generation_choice("ans")
+        ]
 
         runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
 
@@ -349,7 +360,9 @@ class TestProcessGenerateItem:
     def test_null_content_raises(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         client = MagicMock()
-        client.chat.completions.create.return_value.choices[0].message.content = None
+        client.chat.completions.create.return_value.choices = [
+            _generation_choice(None)
+        ]
 
         with pytest.raises(RuntimeError, match="no usable text"):
             runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
@@ -359,7 +372,7 @@ class TestProcessGenerateItem:
         runner.config.n_samples = 3
         client = MagicMock()
         client.chat.completions.create.return_value.choices = [
-            MagicMock(message=MagicMock(content=text)) for text in ("a", "b", "c")
+            _generation_choice(text, index) for index, text in enumerate(("a", "b", "c"))
         ]
 
         result = runner.process_generate_item(
@@ -374,9 +387,9 @@ class TestProcessGenerateItem:
         runner.config.n_samples = 3
         client = MagicMock()
         client.chat.completions.create.return_value.choices = [
-            MagicMock(message=MagicMock(content="a")),
-            MagicMock(message=MagicMock(content="")),
-            MagicMock(message=MagicMock(content="c")),
+            _generation_choice("a", 0),
+            _generation_choice("", 1),
+            _generation_choice("c", 2),
         ]
 
         result = runner.process_generate_item(
@@ -395,8 +408,8 @@ class TestProcessGenerateItem:
         runner = _make_mc_runner(tmp_path, mode="generate")
         client = MagicMock()
         client.chat.completions.create.return_value.choices = [
-            MagicMock(message=MagicMock(content="b")),
-            MagicMock(message=MagicMock(content="d")),
+            _generation_choice("b", 0),
+            _generation_choice("d", 1),
         ]
 
         result = runner.process_generate_item(

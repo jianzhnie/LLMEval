@@ -910,8 +910,9 @@ class TestCodeSampleIndexProtocol:
             {"sample_indices": [0, -1]},  # negative index
             {"sample_indices": [0]},  # length mismatch (2 generations)
             {"sample_indices": ["0", "1"]},  # wrong element type
+            {"sample_indices": [0, 0]},  # duplicate index
         ],
-        ids=["negative", "length-mismatch", "wrong-type"],
+        ids=["negative", "length-mismatch", "wrong-type", "duplicate"],
     )
     def test_invalid_sample_indices_raise(
         self, bad_fields: dict, tmp_path: Path

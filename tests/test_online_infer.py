@@ -225,8 +225,9 @@ def _fake_completion(contents: list[str | None]) -> MagicMock:
     """Completion whose choices carry the given contents."""
     completion = MagicMock()
     choices = []
-    for content in contents:
+    for index, content in enumerate(contents):
         choice = MagicMock()
+        choice.index = index
         choice.message.content = content
         choices.append(choice)
     completion.choices = choices
