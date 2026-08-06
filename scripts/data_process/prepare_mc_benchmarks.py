@@ -62,6 +62,7 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
         print(f"[REBUILD] {name}: existing file has no valid unique doc_id values")
 
     all_rows = []
+    failed_configs: list[str] = []
     if configs == "all":
         # Load all subject configs
         all_configs = get_dataset_config_names(hf_path)
@@ -78,11 +79,20 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
                     )
             except Exception as e:
                 print(f"  [WARN] {cfg}: {e}")
+                failed_configs.append(cfg)
     else:
         print(f"[LOAD] {name}: {hf_path}")
         ds = load_dataset(hf_path, split=hf_split)
         for index, ex in enumerate(ds):
             all_rows.append(_format_mc_row(name, ex, source_id=f"{hf_split}:{index}"))
+
+    if failed_configs:
+        raise RuntimeError(
+            f"Failed to load {len(failed_configs)} config(s) for {name}: "
+            + ", ".join(failed_configs)
+        )
+    if not all_rows:
+        raise RuntimeError(f"No rows loaded for {name}; refusing to write cache")
 
     with open(output_file, "w", encoding="utf-8") as f:
         for row in all_rows:
@@ -104,15 +114,32 @@ def _format_mc_row(
         gold:    integer index of correct answer (for loglikelihood mode)
     """
     template = MC_PROMPT_TEMPLATE[name]
-    letters = [chr(ord("A") + i) for i in range(10)]  # A-J
+
+    def choice_labels(count: int) -> list[str]:
+        labels: list[str] = []
+        for index in range(count):
+            value = index
+            label = ""
+            while True:
+                label = chr(ord("A") + value % 26) + label
+                value = value // 26 - 1
+                if value < 0:
+                    break
+            labels.append(label)
+        return labels
 
     if name == "mmlu":
         choices = example["choices"]
+        if not isinstance(choices, list):
+            raise TypeError("mmlu 'choices' must be a list")
         answer_idx = (
             example["answer"]
             if isinstance(example["answer"], int)
             else int(example["answer"])
         )
+        letters = choice_labels(len(choices))
+        if answer_idx < 0 or answer_idx >= len(choices):
+            raise ValueError(f"mmlu answer index out of range: {answer_idx}")
         answer = letters[answer_idx]
         fmt = {"question": example["question"]}
         for i, c in enumerate(choices):
@@ -127,23 +154,35 @@ def _format_mc_row(
             choices = [choice.strip() for choice in raw_options.split(",")]
         else:
             raise TypeError("mmlu_pro 'options' must be a list or string")
+        if not 2 <= len(choices) <= 10:
+            raise ValueError(
+                f"mmlu_pro must contain between 2 and 10 choices, got {len(choices)}"
+            )
+        letters = choice_labels(len(choices))
         answer_idx = example.get("answer_index")
         if answer_idx is not None and isinstance(answer_idx, int):
+            if answer_idx < 0 or answer_idx >= len(choices):
+                raise ValueError(f"mmlu_pro answer index out of range: {answer_idx}")
             answer = letters[answer_idx]
         else:
             raw = example.get("answer", "")
             answer = (
                 raw if raw in letters else letters[int(raw)] if raw.isdigit() else raw
             )
-            answer_idx = letters.index(answer) if answer in letters else -1
+            if answer not in letters:
+                raise ValueError(f"mmlu_pro answer label is invalid: {answer!r}")
+            answer_idx = letters.index(answer)
         fmt = {"question": example["question"]}
         for i, c in enumerate(choices):
             fmt[letters[i]] = c
 
     elif name == "ceval":
         choices = [example["A"], example["B"], example["C"], example["D"]]
+        letters = choice_labels(len(choices))
         answer = example["answer"].strip().upper()
-        answer_idx = letters.index(answer) if answer in letters else -1
+        if answer not in letters:
+            raise ValueError(f"ceval answer label is invalid: {answer!r}")
+        answer_idx = letters.index(answer)
         fmt = {
             "question": example["question"],
             "A": example["A"],
@@ -153,7 +192,14 @@ def _format_mc_row(
         }
 
     else:
-        return {"prompt": str(example), "answer": "", "choices": [], "gold": -1}
+        raise ValueError(f"Unsupported MC benchmark: {name!r}")
+
+    if not choices:
+        raise ValueError(f"{name} must contain at least one choice")
+    if not isinstance(answer_idx, int) or not 0 <= answer_idx < len(choices):
+        raise ValueError(
+            f"{name} gold index must be in [0, {len(choices)}), got {answer_idx!r}"
+        )
 
     if name == "mmlu_pro":
         # MMLU-Pro records can contain fewer than ten options; build only the

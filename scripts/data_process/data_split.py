@@ -24,6 +24,8 @@ def main():
     )
     parser.add_argument("--output_dir", required=True, help="Directory to save shards")
     args = parser.parse_args()
+    if args.num_shards < 1:
+        parser.error("--num_shards must be at least 1")
 
     input_path = Path(args.input)
     out_dir = Path(args.output_dir)
@@ -47,6 +49,10 @@ def main():
 
     n = len(dataset)
     num_shards = args.num_shards
+    if n == 0:
+        parser.error("input dataset must not be empty")
+    if num_shards > n:
+        parser.error(f"--num_shards ({num_shards}) cannot exceed dataset size ({n})")
     base_size = n // num_shards
     remainder = n % num_shards
 

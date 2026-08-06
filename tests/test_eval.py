@@ -88,12 +88,12 @@ class TestEvaluateTask:
         )
         assert (tmp_path / "empty.summary.json").exists()
 
-    def test_unsupported_task_returns_none(self, tmp_path: Path) -> None:
+    def test_unsupported_task_raises(self, tmp_path: Path) -> None:
         data = [{"prompt": "q", "answer": "a", "gen": ["r"], "task": "t"}]
-        result = evaluate_task(
-            data, "unsupported/task", "answer", "gen", str(tmp_path / "cache"), 4
-        )
-        assert result is None
+        with pytest.raises(ValueError, match="Unsupported task family"):
+            evaluate_task(
+                data, "unsupported/task", "answer", "gen", str(tmp_path / "cache"), 4
+            )
 
     def test_mc_loglikelihood_dispatch(self, tmp_path: Path) -> None:
         """Items with 'logprobs' route to score_loglikelihood."""
@@ -119,20 +119,25 @@ class TestEvaluateTask:
         )
         assert acc == 1.0
 
-    def test_mc_mixed_schema_returns_none(self, tmp_path: Path) -> None:
+    def test_mc_mixed_schema_raises(self, tmp_path: Path) -> None:
         data = [
             {"gold": 1, "logprobs": [-1.0, -0.5], "task": "mc_opensource/mmlu"},
             {"answer": "B", "gen": ["Answer: B"], "task": "mc_opensource/mmlu"},
         ]
-        acc = evaluate_task(
-            data, "mc_opensource/mmlu", "answer", "gen", tmp_path / "mc.jsonl", 1
-        )
-        assert acc is None
+        with pytest.raises(ValueError, match="Mixed MC dataset"):
+            evaluate_task(
+                data,
+                "mc_opensource/mmlu",
+                "answer",
+                "gen",
+                tmp_path / "mc.jsonl",
+                1,
+            )
 
-    def test_mc_error_returns_none(
+    def test_mc_error_propagates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A scorer exception is caught and reported as None."""
+        """A scorer exception remains available to library callers."""
         import llmeval.evaluator as ev
 
         def _boom(**_: object) -> float:
@@ -140,10 +145,15 @@ class TestEvaluateTask:
 
         monkeypatch.setattr(ev, "score_generate_result", _boom)
         data = [{"answer": "B", "gen": ["Answer: B"], "task": "mc_opensource/mmlu"}]
-        acc = evaluate_task(
-            data, "mc_opensource/mmlu", "answer", "gen", tmp_path / "mc.jsonl", 1
-        )
-        assert acc is None
+        with pytest.raises(RuntimeError, match="scorer exploded"):
+            evaluate_task(
+                data,
+                "mc_opensource/mmlu",
+                "answer",
+                "gen",
+                tmp_path / "mc.jsonl",
+                1,
+            )
 
     def test_code_dispatch(self, tmp_path: Path) -> None:
         data = [
@@ -166,7 +176,7 @@ class TestEvaluateTask:
         )
         assert acc == 1.0
 
-    def test_code_error_returns_none(
+    def test_code_error_propagates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import llmeval.evaluator as ev
@@ -183,10 +193,15 @@ class TestEvaluateTask:
                 "task": "code_opensource/humaneval",
             }
         ]
-        acc = evaluate_task(
-            data, "code_opensource/humaneval", "answer", "gen", tmp_path / "c.jsonl", 1
-        )
-        assert acc is None
+        with pytest.raises(PermissionError, match="allow_unsafe_code"):
+            evaluate_task(
+                data,
+                "code_opensource/humaneval",
+                "answer",
+                "gen",
+                tmp_path / "c.jsonl",
+                1,
+            )
 
     def test_math_dispatch(self, tmp_path: Path) -> None:
         import llmeval.evaluator as ev
@@ -223,7 +238,7 @@ class TestEvaluateTask:
         assert called["label_key"] == "answer"
         assert called["response_key"] == "gen"
 
-    def test_math_error_returns_none(
+    def test_math_error_propagates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import llmeval.evaluator as ev
@@ -233,7 +248,12 @@ class TestEvaluateTask:
 
         monkeypatch.setattr(ev, "compute_score_result", _boom)
         data = [{"answer": "5", "gen": ["5"], "task": "math_opensource/aime24"}]
-        acc = evaluate_task(
-            data, "math_opensource/aime24", "answer", "gen", tmp_path / "m.jsonl", 1
-        )
-        assert acc is None
+        with pytest.raises(RuntimeError, match="scorer exploded"):
+            evaluate_task(
+                data,
+                "math_opensource/aime24",
+                "answer",
+                "gen",
+                tmp_path / "m.jsonl",
+                1,
+            )

@@ -67,7 +67,10 @@ def should_keep_example(example: dict[str, Any], max_token_length: int) -> bool:
 def load_and_validate_args() -> argparse.Namespace:
     """Load and validate command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Filter dataset by 'gen' field token length and remove the field.",
+        description=(
+            "Filter dataset by combined prompt and generation token length, "
+            "then remove the generation field."
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -124,9 +127,11 @@ def process_dataset(
 
     filtered_count = len(dataset)
     logger.info(f"Filtered dataset size: {filtered_count}")
+    removal_rate = (
+        (initial_count - filtered_count) / initial_count * 100 if initial_count else 0.0
+    )
     logger.info(
-        f"Removed {initial_count - filtered_count} examples "
-        f"({(initial_count - filtered_count) / initial_count * 100:.1f}%)"
+        f"Removed {initial_count - filtered_count} examples ({removal_rate:.1f}%)"
     )
 
     # Remove 'gen' field if exists

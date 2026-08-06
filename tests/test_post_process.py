@@ -9,10 +9,7 @@ from types import ModuleType
 import pytest
 
 SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "scripts"
-    / "data_process"
-    / "post_process.py"
+    Path(__file__).resolve().parents[1] / "scripts" / "data_process" / "post_process.py"
 )
 
 
@@ -33,9 +30,7 @@ def _load_script() -> ModuleType:
         (False, 129, False),
     ],
 )
-def test_filter_truth_table(
-    has_boxed: bool, total_length: int, expected: bool
-) -> None:
+def test_filter_truth_table(has_boxed: bool, total_length: int, expected: bool) -> None:
     module = _load_script()
 
     assert (
