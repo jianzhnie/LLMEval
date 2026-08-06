@@ -34,6 +34,7 @@ from llmeval.inference.common import (
     redact_config_for_logging,
     sample_count_for_item,
     save_failed_items,
+    to_public_result_schema,
 )
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
@@ -276,7 +277,30 @@ class InferenceClient:
         completion = self._request_with_retry(call_args)
         if completion is None:
             return []  # context length exceeded (logged in _request_with_retry)
-        return [choice.message.content or "" for choice in completion.choices]
+        choices = completion.choices
+        choice_indices = [getattr(choice, "index", None) for choice in choices]
+        indexed = any(index is not None for index in choice_indices)
+        if indexed and any(type(index) is not int for index in choice_indices):
+            raise ValueError("Response choices contain invalid non-integer indices")
+
+        ordered = [""] * n
+        if indexed:
+            used: set[int] = set()
+            for choice, index in zip(choices, choice_indices, strict=True):
+                assert isinstance(index, int)
+                if index < 0 or index >= n:
+                    raise ValueError(f"Response choice index out of range: {index}")
+                if index in used:
+                    raise ValueError(f"Duplicate response choice index: {index}")
+                used.add(index)
+                ordered[index] = choice.message.content or ""
+            return ordered
+
+        if len(choices) > n:
+            raise ValueError(f"Response returned {len(choices)} choices for n={n}")
+        for index, choice in enumerate(choices):
+            ordered[index] = choice.message.content or ""
+        return ordered
 
     def _build_call_args(
         self,
@@ -388,6 +412,17 @@ class InferenceClient:
             usage_stats["prompt_tokens"] += prompt_tokens
             usage_stats["completion_tokens"] += completion_tokens
 
+    def usage_snapshot(self) -> dict[str, int]:
+        """Return a consistent copy of accumulated token usage."""
+        with self._usage_lock:
+            prompt_tokens = self.usage_stats["prompt_tokens"]
+            completion_tokens = self.usage_stats["completion_tokens"]
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+
 
 class InferenceRunner:
     """
@@ -495,6 +530,7 @@ class InferenceRunner:
             self.args.output_file,
             self.args.input_key,
             self.args.response_key,
+            repair_truncated_last_line=getattr(self.args, "repair_resume", False),
         )
 
         if resume_state.completed_count > 0:
@@ -528,10 +564,12 @@ class InferenceRunner:
         with self._file_lock:
             try:
                 with open(self.args.output_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    f.write(
+                        json.dumps(to_public_result_schema(result), ensure_ascii=False)
+                        + "\n"
+                    )
                     f.flush()  # Ensure data is immediately written
             except Exception as e:
-                logger.error(f"Error writing batch results: {e}")
                 raise OSError(f"Failed to write batch results: {e}") from e
 
     def _extract_query(self, item: Any) -> str | None:
@@ -696,13 +734,18 @@ class InferenceRunner:
             enable_thinking=self.args.enable_thinking,
             n=request_n_samples,
         )
-
-        # Steps 3+4: Per-copy result building and persistence
         if not responses:
-            # e.g. context length exceeded: every copy of this prompt failed
+            # Context-length rejection (or exhausted retries): every copy of
+            # this prompt failed. get_contents returns either exactly
+            # request_n_samples entries or [] — never a partial list.
             with self._stats_lock:
                 self._stats["failed"] += request_n_samples
             return
+
+        # Steps 3+4: Per-copy result building and persistence. get_contents
+        # returns either exactly request_n_samples entries or [] (never a
+        # partial list), so a missing count here only guards against mocked
+        # or subclassed clients; keep it for safety.
         for item, response in zip(sample_items, responses, strict=False):
             result = self._build_result(item, response)
             if not result:
@@ -715,7 +758,7 @@ class InferenceRunner:
                 logger.error(f"Failed to write result: {e}")
                 with self._stats_lock:
                     self._stats["failed"] += 1
-        # Fewer choices than requested: count the missing copies as failed
+        # Fewer choices than requested: count the missing copies as failed.
         missing = request_n_samples - len(responses)
         if missing > 0:
             logger.warning(
@@ -787,10 +830,7 @@ class InferenceRunner:
                     try:
                         future.result()
                     except Exception as e:
-                        logger.error(
-                            f"An unexpected error occurred in a thread: {e}",
-                            exc_info=True,
-                        )
+                        logger.warning("Inference group failed: %s", e)
                         group_samples = self._group_sample_count(group)
                         with self._stats_lock:
                             self._stats["failed"] += group_samples
@@ -802,6 +842,12 @@ class InferenceRunner:
                         )
                         failed_tasks.append(
                             {
+                                "doc_id": sample.get("doc_id")
+                                if isinstance(sample, dict)
+                                else None,
+                                "sample_index": sample.get("sample_index")
+                                if isinstance(sample, dict)
+                                else None,
                                 self.args.input_key: (
                                     str(prompt_val)[:200]
                                     if prompt_val is not None
@@ -839,51 +885,42 @@ class InferenceRunner:
         """
         start_time = time.perf_counter()
 
-        try:
-            # Validate configuration
-            if not self.args.input_file or not Path(self.args.input_file).exists():
-                raise FileNotFoundError(f"Input file not found: {self.args.input_file}")
-            if not self.args.output_file:
-                raise ValueError("Output file path is required")
+        if not self.args.input_file or not Path(self.args.input_file).exists():
+            raise FileNotFoundError(f"Input file not found: {self.args.input_file}")
+        if not self.args.output_file:
+            raise ValueError("Output file path is required")
 
-            # Initialize execution
-            logger.info("🚀 Initializing inference pipeline")
-            logger.info("Configuration: %s", _config_for_logging(self.args))
+        logger.info("🚀 Initializing inference pipeline")
+        logger.info("Configuration: %s", _config_for_logging(self.args))
 
-            # Load and prepare data
-            eval_dataset: list[dict[str, Any]] = self.load_data()
-            if not eval_dataset:
-                logger.info("✅ All samples already processed")
-                return
+        eval_dataset: list[dict[str, Any]] = self.load_data()
+        if not eval_dataset:
+            logger.info("✅ All samples already processed")
+            return
 
-            # Set up output directory
-            output_path = Path(self.args.output_file)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path = Path(self.args.output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Execute pipeline
-            total_samples = sum(sample_count_for_item(item) for item in eval_dataset)
-            logger.info(f"⏳ Processing {total_samples} samples")
-            self._process_concurrently(eval_dataset)
+        total_samples = sum(sample_count_for_item(item) for item in eval_dataset)
+        logger.info(f"⏳ Processing {total_samples} samples")
+        self._process_concurrently(eval_dataset)
 
-            # Generate final report
-            duration = time.perf_counter() - start_time
-            success_rate = (self._stats["processed"] / max(total_samples, 1)) * 100
+        duration = time.perf_counter() - start_time
+        success_rate = (self._stats["processed"] / max(total_samples, 1)) * 100
 
-            logger.info("\n=== Execution Summary ===")
-            logger.info(f"Total samples in dataset: {total_samples}")
-            logger.info(f"Successfully processed: {self._stats['processed']}")
-            logger.info(f"Failed: {self._stats['failed']}")
-            logger.info(f"Skipped: {self._stats['skipped']}")
-            logger.info(f"Success rate: {success_rate:.2f}%")
-            logger.info(f"Total duration: {duration:.2f} seconds")
-            logger.info(f"Output file: {self.args.output_file}")
-            logger.info("✅ Inference pipeline completed successfully\n")
-
-        except Exception as e:
-            logger.critical(
-                f"❌ Fatal error: {e!s}", exc_info=True, extra={"stats": self._stats}
-            )
-            raise RuntimeError(f"Pipeline execution failed: {e!s}") from e
+        logger.info("\n=== Execution Summary ===")
+        logger.info(f"Total samples in dataset: {total_samples}")
+        logger.info(f"Successfully processed: {self._stats['processed']}")
+        logger.info(f"Failed: {self._stats['failed']}")
+        logger.info(f"Skipped: {self._stats['skipped']}")
+        usage = self.client.usage_snapshot()
+        logger.info(f"Prompt tokens: {usage['prompt_tokens']}")
+        logger.info(f"Completion tokens: {usage['completion_tokens']}")
+        logger.info(f"Total tokens: {usage['total_tokens']}")
+        logger.info(f"Success rate: {success_rate:.2f}%")
+        logger.info(f"Total duration: {duration:.2f} seconds")
+        logger.info(f"Output file: {self.args.output_file}")
+        logger.info("✅ Inference pipeline completed successfully\n")
 
 
 def main() -> None:

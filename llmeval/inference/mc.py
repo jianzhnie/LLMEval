@@ -42,6 +42,7 @@ from llmeval.inference.common import (
     redact_config_for_logging,
     require_document_id,
     save_failed_items,
+    to_public_result_schema,
     validate_document_ids,
 )
 from llmeval.inference.schema import (
@@ -96,7 +97,6 @@ class FewShotFormatter:
         self.seed = seed
         self._few_shot_pool: list[dict[str, Any]] = []
         self._all_formatted: list[str] = []
-        self._warned_insufficient: set[tuple[str, str]] = set()
 
     def load(self) -> None:
         """Load all demonstrations from the configured dev file.
@@ -111,14 +111,16 @@ class FewShotFormatter:
         try:
             items = load_jsonl(self.few_shot_file)
         except Exception as exc:
-            logger.warning(
-                "Failed to load few-shot from %s: %s", self.few_shot_file, exc
-            )
-            return
+            raise RuntimeError(
+                f"Failed to load few-shot data from {self.few_shot_file!r}: {exc}"
+            ) from exc
 
         if len(items) < self.n_shot:
-            logger.warning(f"Only {len(items)} examples available, need {self.n_shot}")
-            return
+            raise ValueError(
+                "Few-shot pool is too small: "
+                f"available={len(items)}, required={self.n_shot}, "
+                f"file={self.few_shot_file!r}"
+            )
 
         self._few_shot_pool = items
         self._all_formatted = [self._format_demo(it) for it in items]
@@ -129,7 +131,6 @@ class FewShotFormatter:
         if self.n_shot <= 0:
             return ""
 
-        identity = (document_id, test_prompt)
         candidates = [
             index
             for index, item in enumerate(self._few_shot_pool)
@@ -139,16 +140,11 @@ class FewShotFormatter:
             )
         ]
         if len(candidates) < self.n_shot:
-            if identity not in self._warned_insufficient:
-                logger.warning(
-                    "Few-shot candidates are insufficient for document %r: "
-                    "available=%d, required=%d; using zero-shot prompt",
-                    document_id or "<unknown>",
-                    len(candidates),
-                    self.n_shot,
-                )
-                self._warned_insufficient.add(identity)
-            return ""
+            raise ValueError(
+                "Few-shot candidates are insufficient after excluding the test "
+                f"document: doc_id={document_id or '<unknown>'!r}, "
+                f"available={len(candidates)}, required={self.n_shot}"
+            )
         seed_text = f"{self.seed}:{document_id}:{test_prompt}"
         derived_seed = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest(), 16)
         selected = random.Random(derived_seed).sample(candidates, self.n_shot)
@@ -558,6 +554,7 @@ class MCRunner:
             self.config.output_file,
             self.config.input_key,
             self.config.response_key,
+            repair_truncated_last_line=getattr(self.config, "repair_resume", False),
         )
         completed_indices = resume_state.completed_indices
         completed_ids = {document_id for document_id, _ in completed_indices}
@@ -691,10 +688,12 @@ class MCRunner:
                 output_path = Path(self.config.output_file)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(output_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    f.write(
+                        json.dumps(to_public_result_schema(result), ensure_ascii=False)
+                        + "\n"
+                    )
                     f.flush()  # Ensure data is immediately written
             except Exception as e:
-                logger.error(f"Error writing batch results: {e}")
                 raise OSError(f"Failed to write batch results: {e}") from e
 
     # ------------------------------------------------------------------
@@ -943,15 +942,25 @@ class MCRunner:
             response_positions: list[int] = []
             used_positions: set[int] = set()
             for fallback_position, choice in enumerate(raw_choices):
-                raw_position = getattr(choice, "index", fallback_position)
-                position = (
-                    raw_position if isinstance(raw_position, int) else fallback_position
-                )
+                raw_position = getattr(choice, "index", None)
+                position = fallback_position if raw_position is None else raw_position
+                if type(position) is not int or position < 0:
+                    raise RuntimeError(
+                        f"Generate returned invalid sample position: {position!r}"
+                    )
+                if position >= request_samples:
+                    raise RuntimeError(
+                        f"Generate returned out-of-range sample position: {position}"
+                    )
+                if position in used_positions:
+                    raise RuntimeError(
+                        f"Generate returned duplicate sample position: {position}"
+                    )
+                used_positions.add(position)
                 content = getattr(getattr(choice, "message", None), "content", None)
-                if content and position not in used_positions:
+                if content:
                     response_generations.append(str(content))
                     response_positions.append(position)
-                    used_positions.add(position)
             return response_generations, response_positions
 
         generations: list[str] = []
@@ -967,16 +976,20 @@ class MCRunner:
             raise RuntimeError("Generate produced no usable text (empty response)")
 
         requested_indices = item.get("_llmeval_requested_sample_indices")
-        if not (
-            isinstance(requested_indices, list)
-            and len(requested_indices) == request_samples
-            and all(
-                isinstance(index, int) and index >= 0 for index in requested_indices
-            )
-        ):
+        if requested_indices is None:
             sample_start = int(item.get("_llmeval_sample_start", 0))
             requested_indices = list(
                 range(sample_start, sample_start + request_samples)
+            )
+        elif not (
+            isinstance(requested_indices, list)
+            and len(requested_indices) == request_samples
+            and all(type(index) is int and index >= 0 for index in requested_indices)
+            and len(set(requested_indices)) == len(requested_indices)
+        ):
+            raise RuntimeError(
+                "Invalid _llmeval_requested_sample_indices: expected "
+                f"{request_samples} unique non-negative ints"
             )
         if any(
             position < 0 or position >= len(requested_indices)
@@ -1030,73 +1043,56 @@ class MCRunner:
         """Execute the complete MC inference pipeline with monitoring.
 
         Mirrors InferenceRunner.run: configuration validation, data loading,
-        mode dispatch, and a final execution report. Any unrecoverable error
-        is wrapped in RuntimeError after logging.
+        mode dispatch, and a final execution report. Unrecoverable errors are
+        propagated to the CLI boundary, which logs them once.
 
         Raises:
             FileNotFoundError: If the input file is missing
             ValueError: If the configuration is invalid (incl. unknown mode)
-            RuntimeError: For unrecoverable execution errors
+            RuntimeError: For backend request or response failures
         """
         start_time = time.perf_counter()
 
-        try:
-            # Validate configuration
-            if not self.config.input_file or not Path(self.config.input_file).exists():
-                raise FileNotFoundError(
-                    f"Input file not found: {self.config.input_file}"
-                )
-            if not self.config.output_file:
-                raise ValueError("Output file path is required")
+        if not self.config.input_file or not Path(self.config.input_file).exists():
+            raise FileNotFoundError(f"Input file not found: {self.config.input_file}")
+        if not self.config.output_file:
+            raise ValueError("Output file path is required")
 
-            # Initialize execution
-            logger.info("🚀 Initializing MC inference pipeline")
-            logger.info(
-                "Configuration: %s",
-                redact_config_for_logging(dataclasses.asdict(self.config)),
-            )
+        logger.info("🚀 Initializing MC inference pipeline")
+        logger.info(
+            "Configuration: %s",
+            redact_config_for_logging(dataclasses.asdict(self.config)),
+        )
 
-            # Set up output directory
-            output_path = Path(self.config.output_file)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path = Path(self.config.output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Load and prepare data (resume filtering inside load_data)
-            remaining = self.load_data()
-            if not remaining:
-                logger.info("✅ All items already processed")
-                return
+        remaining = self.load_data()
+        if not remaining:
+            logger.info("✅ All items already processed")
+            return
 
-            # Execute pipeline (mode dispatch)
-            if self.config.mode == "loglikelihood":
-                self.run_loglikelihood(remaining)
-            elif self.config.mode == "generate":
-                self.run_generate(remaining)
-            else:
-                raise ValueError(f"Unknown mode: {self.config.mode}")
+        if self.config.mode == "loglikelihood":
+            self.run_loglikelihood(remaining)
+        elif self.config.mode == "generate":
+            self.run_generate(remaining)
+        else:
+            raise ValueError(f"Unknown mode: {self.config.mode}")
 
-            # Generate final report
-            duration = time.perf_counter() - start_time
-            total = (
-                self._stats["processed"]
-                + self._stats["failed"]
-                + self._stats["skipped"]
-            )
-            success_rate = (self._stats["processed"] / max(total, 1)) * 100
+        duration = time.perf_counter() - start_time
+        total = (
+            self._stats["processed"] + self._stats["failed"] + self._stats["skipped"]
+        )
+        success_rate = (self._stats["processed"] / max(total, 1)) * 100
 
-            logger.info("\n=== Execution Summary ===")
-            logger.info(f"Successfully processed: {self._stats['processed']}")
-            logger.info(f"Failed: {self._stats['failed']}")
-            logger.info(f"Skipped: {self._stats['skipped']}")
-            logger.info(f"Success rate: {success_rate:.2f}%")
-            logger.info(f"Total duration: {duration:.2f} seconds")
-            logger.info(f"Output file: {self.config.output_file}")
-            logger.info("✅ MC inference pipeline completed successfully\n")
-
-        except Exception as e:
-            logger.critical(
-                f"❌ Fatal error: {e!s}", exc_info=True, extra={"stats": self._stats}
-            )
-            raise RuntimeError(f"Pipeline execution failed: {e!s}") from e
+        logger.info("\n=== Execution Summary ===")
+        logger.info(f"Successfully processed: {self._stats['processed']}")
+        logger.info(f"Failed: {self._stats['failed']}")
+        logger.info(f"Skipped: {self._stats['skipped']}")
+        logger.info(f"Success rate: {success_rate:.2f}%")
+        logger.info(f"Total duration: {duration:.2f} seconds")
+        logger.info(f"Output file: {self.config.output_file}")
+        logger.info("✅ MC inference pipeline completed successfully\n")
 
 
 # ===========================================================================

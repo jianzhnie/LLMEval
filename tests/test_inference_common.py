@@ -424,6 +424,25 @@ class TestStableResumeCounts:
         with pytest.raises(ValueError, match="non-negative"):
             load_resume_state(output, "prompt", "gen")
 
+    def test_non_integer_scalar_sample_index_rejected(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text(
+            json.dumps(
+                {"doc_id": "q1", "prompt": "q", "gen": ["a"], "sample_index": "0"}
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="non-negative int"):
+            load_resume_state(output, "prompt", "gen")
+
+    def test_completed_record_without_prompt_is_rejected(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text(json.dumps({"doc_id": "q1", "gen": ["a"]}) + "\n")
+
+        with pytest.raises(ValueError, match="no non-empty prompt"):
+            load_resume_state(output, "prompt", "gen")
+
 
 class TestToolChoiceHelper:
     def test_none_is_not_explicit(self) -> None:

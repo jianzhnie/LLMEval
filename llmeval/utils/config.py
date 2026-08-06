@@ -76,8 +76,26 @@ class DataArguments:
     task: str = field(
         default="", metadata={"help": "Optional name of the evaluation task."}
     )
+    repair_resume: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Ignore only an unterminated invalid final line in an existing "
+                "resume JSONL file. Other malformed rows remain fatal."
+            )
+        },
+    )
     batch_size: int = field(
         default=128, metadata={"help": "Batch size for data loading."}
+    )
+    fail_fast: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Stop on the first failed inference batch. Set to false to "
+                "record the failed batch and continue."
+            )
+        },
     )
 
     def __post_init__(self) -> None:
@@ -98,14 +116,6 @@ class DataArguments:
                 f"Input file '{self.input_file}' does not exist. "
                 "Please provide a valid input file path."
             )
-
-        # Ensure cache directory exists
-        Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
-
-        # Ensure output directory exists
-        output_path = Path(self.output_file)
-        if output_path.parent:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass
@@ -755,6 +765,15 @@ class MCInferConfig:
     seed: int = field(
         default=0, metadata={"help": "Generation and few-shot sampling seed."}
     )
+    repair_resume: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Ignore only an unterminated invalid final line in an existing "
+                "resume JSONL file."
+            )
+        },
+    )
 
     def __post_init__(self) -> None:
         """
@@ -874,10 +893,21 @@ class EvalTaskArguments:
             "help": "Explicitly allow execution of generated code during evaluation."
         },
     )
+    code_k_values: str = field(
+        default="1,10,64",
+        metadata={"help": "Comma-separated pass@k values for code evaluation."},
+    )
+    code_k_values_tuple: tuple[int, ...] = field(init=False, default=(1, 10, 64))
 
     cache_path: str = field(
         default="./cache/results.jsonl",
         metadata={"help": "JSONL file path for saving detailed evaluation results."},
+    )
+    result_path: str = field(
+        default="",
+        metadata={
+            "help": "Preferred result JSONL path; overrides legacy --cache_path."
+        },
     )
     max_workers: int = field(
         default=128,
@@ -914,8 +944,27 @@ class EvalTaskArguments:
             raise ValueError("input_path is required")
         if not Path(self.input_path).exists():
             raise ValueError(f"input_path {self.input_path} does not exist")
+        if self.result_path:
+            self.cache_path = self.result_path
         if not self.cache_path:
-            raise ValueError("cache_path is required")
+            raise ValueError("result_path or cache_path is required")
+        try:
+            parsed_k = tuple(
+                dict.fromkeys(
+                    int(value.strip())
+                    for value in self.code_k_values.split(",")
+                    if value.strip()
+                )
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"code_k_values must be comma-separated integers, got {self.code_k_values!r}"
+            ) from exc
+        if not parsed_k or any(value <= 0 for value in parsed_k):
+            raise ValueError(
+                f"code_k_values must contain positive integers, got {self.code_k_values!r}"
+            )
+        self.code_k_values_tuple = parsed_k
         if self.max_workers <= 0:
             raise ValueError(f"max_workers must be positive, got {self.max_workers}")
         if self.timeout <= 0:

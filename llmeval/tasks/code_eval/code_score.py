@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -22,12 +21,14 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.code_eval.execute import check_correctness
+from llmeval.tasks.persistence import atomic_write_json, atomic_write_jsonl
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.results import ScorerResult
+from llmeval.tasks.sample_index import duplicate_sample_error, resolve_sample_indices
 from llmeval.utils.log import init_logger
 
 logger = init_logger("code_score")
@@ -511,6 +512,12 @@ def _score_items(
         for i, item in enumerate(eval_dataset)
     ]
 
+    # NOTE: each pool worker calls ``check_correctness`` once per sample, and
+    # that child process defaults to the ``fork`` start method (see
+    # ``execute._resolve_mp_method``) — ``spawn``'s interpreter restart per
+    # sample used to consume the pool-level ``timeout`` budget below and
+    # caused spurious scoring timeouts.  Set ``LLMEVAL_MP_METHOD=spawn`` to
+    # opt back in if fork-unsafe threads are ever introduced.
     with (
         tqdm(total=total, desc="Scoring code", unit="item") as pbar,
         ProcessPool(max_workers=optimal_workers) as pool,
@@ -527,8 +534,8 @@ def _score_items(
                 logger.warning("Individual scoring task timed out — marked as failed.")
                 pbar.update(1)
                 continue
-            except Exception:
-                logger.exception("Unexpected error retrieving scoring result.")
+            except Exception as exc:
+                logger.warning("Code scoring worker result failed: %s", exc)
                 pbar.update(1)
                 continue
 
@@ -558,8 +565,17 @@ def _stable_problem_id(item: dict[str, Any], index: int) -> str:
 def _expand_code_samples(
     eval_dataset: list[dict[str, Any]], response_key: str
 ) -> list[dict[str, Any]]:
-    """Expand each record into one scoring job per generated sample."""
+    """Expand each record into one scoring job per generated sample.
+
+    Explicit ``sample_index``/``sample_indices`` fields are preserved per the
+    shared protocol (invalid fields raise); only rows with no index fields at
+    all receive the next unused per-problem indices.  Duplicate
+    ``(problem, sample_index)`` pairs merge idempotently when the generation
+    content matches and raise when it conflicts.
+    """
     expanded: list[dict[str, Any]] = []
+    used_by_problem: dict[str, set[int]] = {}
+    seen_samples: dict[tuple[str, int], Any] = {}
     for item_idx, item in enumerate(eval_dataset):
         group_id = _stable_problem_id(item, item_idx)
         gen_raw = item.get(response_key)
@@ -570,11 +586,23 @@ def _expand_code_samples(
         else:
             samples = [""]
 
-        for sample_idx, sample in enumerate(samples):
+        used = used_by_problem.setdefault(group_id, set())
+        sample_indices = resolve_sample_indices(
+            item, len(samples), problem_id=group_id, used_indices=used
+        )
+        used.update(sample_indices)
+        for sample_index, sample in zip(sample_indices, samples, strict=True):
+            seen_key = (group_id, sample_index)
+            if seen_key in seen_samples:
+                if seen_samples[seen_key] != sample:
+                    raise duplicate_sample_error(group_id, sample_index)
+                continue  # idempotent duplicate — already scheduled
+            seen_samples[seen_key] = sample
             sample_item = item.copy()
+            sample_item.pop("sample_indices", None)
             sample_item[response_key] = [sample]
             sample_item["_llmeval_group_id"] = group_id
-            sample_item["sample_index"] = sample_idx
+            sample_item["sample_index"] = sample_index
             expanded.append(sample_item)
     return expanded
 
@@ -583,12 +611,7 @@ def _compute_pass_at_k(
     records: list[dict[str, Any]], k_values: tuple[int, ...]
 ) -> tuple[dict[str, float], int]:
     """Aggregate sample records into problem-level pass@k metrics."""
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for record in records:
-        if record.get("evaluation_status", "completed") != "completed":
-            continue
-        group_id = str(record.get("group_id") or record.get("task_id") or "")
-        grouped.setdefault(group_id, []).append(record)
+    grouped = _completed_code_groups(records)
 
     metrics: dict[str, float] = {}
     for k in sorted(set(k_values)):
@@ -603,6 +626,19 @@ def _compute_pass_at_k(
             metrics[f"pass@{k}"] = sum(eligible_scores) / len(eligible_scores)
 
     return metrics, len(grouped)
+
+
+def _completed_code_groups(
+    records: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Group completed code observations by their stable problem identity."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        if record.get("evaluation_status", "completed") != "completed":
+            continue
+        group_id = str(record.get("group_id") or record.get("task_id") or "")
+        grouped.setdefault(group_id, []).append(record)
+    return grouped
 
 
 # ===========================================================================
@@ -727,12 +763,7 @@ def _score_code_task_result(
 
 def _code_observations(result: CodeScoreResult) -> dict[str, list[float]]:
     """Return problem-level observations for every available pass@k metric."""
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for record in result.per_item:
-        if record.get("evaluation_status", "completed") != "completed":
-            continue
-        group_id = str(record.get("group_id") or record.get("task_id") or "")
-        grouped.setdefault(group_id, []).append(record)
+    grouped = _completed_code_groups(result.per_item)
 
     observations: dict[str, list[float]] = {}
     # pass@1 is always observable (n >= 1 for every group), even when the
@@ -769,15 +800,21 @@ def _is_code_infrastructure_failure(record: dict[str, Any]) -> bool:
 def _code_record_status(record: dict[str, Any]) -> str:
     """Classify execution outcomes for denominator accounting.
 
-    Assertion failures, syntax errors, and other candidate-code failures are
-    completed model observations. Only worker/scorer failures and timeouts are
-    excluded from Pass@k metrics.
+    Assertion failures, syntax errors, signal kills, and candidate-level
+    timeouts are completed model observations: the candidate code ran and
+    failed on its own.  Only worker/scorer failures — including a hung
+    worker that had to be killed — are excluded from Pass@k metrics.
     """
     explicit_status = record.get("evaluation_status")
     if explicit_status in {"completed", "failed", "skipped", "timeout"}:
         return str(explicit_status)
     result = str(record.get("result", "")).lower()
-    if result == "timed out":
+    # "timed out" comes from the worker's result file: the candidate code
+    # itself exceeded exec_timeout (e.g. an infinite loop) — an incorrect
+    # model observation.  "timed out: worker killed" means the worker hung
+    # past the inner timeout and had to be killed; that is an execution
+    # anomaly, not evidence about the model.
+    if result == "timed out: worker killed":
         return "timeout"
     if _is_code_infrastructure_failure(record):
         return "failed"
@@ -872,24 +909,19 @@ def write_cache(result: CodeScoreResult, cache_path: str | Path) -> None:
     Pattern matches :func:`llmeval.tasks.mc_eval.mc_score.write_cache`.
     """
     cache_path = Path(cache_path)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(cache_path, "w", encoding="utf-8") as fh:
-        for record in result.per_item:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    atomic_write_jsonl(cache_path, result.per_item)
 
     summary_path = cache_path.with_suffix(".summary.json")
-    with open(summary_path, "w", encoding="utf-8") as fh:
-        json.dump(
-            {
-                "pass_at_1": round(result.pass_at_1, 6),
-                "pass_at_k": {
-                    key: round(value, 6) for key, value in result.pass_at_k.items()
-                },
-                "total": result.total,
-                "correct": result.correct,
-                "problems": result.problems,
+    atomic_write_json(
+        summary_path,
+        {
+            "pass_at_1": round(result.pass_at_1, 6),
+            "pass_at_k": {
+                key: round(value, 6) for key, value in result.pass_at_k.items()
             },
-            fh,
-            indent=2,
-        )
+            "total": result.total,
+            "correct": result.correct,
+            "problems": result.problems,
+        },
+        indent=2,
+    )

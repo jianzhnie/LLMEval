@@ -30,7 +30,11 @@ from llmeval.inference.common import (
     expand_data_with_resume,
     load_jsonl,
     load_resume_state,
+    process_batches_with_policy,
+    redact_config_for_logging,
     sample_seed_for_item,
+    save_failed_items,
+    to_public_result_schema,
 )
 from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.log import init_logger
@@ -104,39 +108,33 @@ class OfflineInferenceRunner:
         # Prepare HuggingFace overrides
         hf_overrides: dict[str, Any] = self._prepare_hf_overrides()
 
-        try:
-            # Initialize vLLM engine
-            logger.info("Loading vLLM engine...")
-            llm_kwargs: dict[str, Any] = {
-                "model": self.args.model_name_or_path,
-                "tensor_parallel_size": self.args.tensor_parallel_size,
-                "pipeline_parallel_size": self.args.pipeline_parallel_size,
-                "gpu_memory_utilization": self.args.gpu_memory_utilization,
-                "enable_chunked_prefill": self.args.enable_chunked_prefill,
-                "enable_prefix_caching": self.args.enable_prefix_caching,
-                "enforce_eager": self.args.enforce_eager,
-                "max_num_seqs": self.args.max_num_seqs,
-                "max_model_len": self.args.max_model_len,
-                "hf_overrides": hf_overrides,
-                "seed": self.args.seed,
-                "trust_remote_code": self.args.trust_remote_code,
-                "dtype": self.args.dtype,
-                "device": self.args.device,
-            }
-            if self.args.max_num_batched_tokens is not None:
-                llm_kwargs["max_num_batched_tokens"] = self.args.max_num_batched_tokens
-            if self.args.quantization is not None:
-                llm_kwargs["quantization"] = self.args.quantization
-            model_revision = getattr(self.args, "model_revision", None)
-            if model_revision is not None:
-                llm_kwargs["revision"] = model_revision
-            llm: LLM = LLM(**llm_kwargs)
-            logger.info("✅ vLLM engine loaded successfully")
-
-        except Exception as e:
-            # Include traceback for easier debugging
-            logger.exception(f"❌ Failed to initialize vLLM engine: {e}")
-            raise RuntimeError(f"Engine initialization failed: {e}") from e
+        # Initialize vLLM engine. Let the CLI boundary render a traceback once.
+        logger.info("Loading vLLM engine...")
+        llm_kwargs: dict[str, Any] = {
+            "model": self.args.model_name_or_path,
+            "tensor_parallel_size": self.args.tensor_parallel_size,
+            "pipeline_parallel_size": self.args.pipeline_parallel_size,
+            "gpu_memory_utilization": self.args.gpu_memory_utilization,
+            "enable_chunked_prefill": self.args.enable_chunked_prefill,
+            "enable_prefix_caching": self.args.enable_prefix_caching,
+            "enforce_eager": self.args.enforce_eager,
+            "max_num_seqs": self.args.max_num_seqs,
+            "max_model_len": self.args.max_model_len,
+            "hf_overrides": hf_overrides,
+            "seed": self.args.seed,
+            "trust_remote_code": self.args.trust_remote_code,
+            "dtype": self.args.dtype,
+            "device": self.args.device,
+        }
+        if self.args.max_num_batched_tokens is not None:
+            llm_kwargs["max_num_batched_tokens"] = self.args.max_num_batched_tokens
+        if self.args.quantization is not None:
+            llm_kwargs["quantization"] = self.args.quantization
+        model_revision = getattr(self.args, "model_revision", None)
+        if model_revision is not None:
+            llm_kwargs["revision"] = model_revision
+        llm: LLM = LLM(**llm_kwargs)
+        logger.info("✅ vLLM engine loaded successfully")
 
         # Configure sampling parameters
         sampling_params = self._build_sampling_params(self.args.seed)
@@ -182,9 +180,6 @@ class OfflineInferenceRunner:
         # Use the parsed rope_scaling_dict instead of the raw string
         if hasattr(self.args, "rope_scaling_dict") and self.args.rope_scaling_dict:
             hf_overrides["rope_scaling"] = self.args.rope_scaling_dict
-
-        if self.args.max_model_len:
-            hf_overrides["max_model_len"] = self.args.max_model_len
 
         return hf_overrides
 
@@ -250,29 +245,6 @@ class OfflineInferenceRunner:
         logger.debug(f"Converted to messages format: {len(messages)} messages")
         return messages
 
-    def _write_batch_results(
-        self, original_items: Sequence[dict[str, Any]], outputs: Sequence[RequestOutput]
-    ) -> None:
-        """Write batch results to file in unified schema with a 'gen' field.
-
-        This method handles the writing of batch results to the output file with:
-        - Thread-safe file operations using locks
-        - Unified schema with 'gen' field for generated responses
-        - Incremental writing for robustness
-        - Comprehensive error handling
-
-        The output schema appends a generated string into `gen` list for each item.
-
-        Args:
-            original_items: Original input items that were processed.
-            outputs: vLLM output objects containing generated text.
-
-        Raises:
-            IOError: If file writing fails.
-        """
-        responses = [self._extract_model_response(output) for output in outputs]
-        self._write_response_results(original_items, responses)
-
     def _write_response_results(
         self, original_items: Sequence[dict[str, Any]], responses: Sequence[str]
     ) -> None:
@@ -286,7 +258,7 @@ class OfflineInferenceRunner:
                         zip(original_items, responses, strict=True)
                     ):
                         if model_response and model_response.strip():
-                            result: dict[str, Any] = original_item.copy()
+                            result = to_public_result_schema(original_item)
                             existing = result.get(self.args.response_key)
                             gen_list: list[str] = (
                                 list(existing) if isinstance(existing, list) else []
@@ -300,7 +272,6 @@ class OfflineInferenceRunner:
                                 "Empty response for item %d, skipping write", idx
                             )
             except Exception as e:
-                logger.error(f"Error writing batch results: {e}")
                 raise OSError(f"Failed to write batch results: {e}") from e
 
     def _extract_model_response(self, output: RequestOutput) -> str:
@@ -359,6 +330,7 @@ class OfflineInferenceRunner:
             self.args.output_file,
             self.args.input_key,
             self.args.response_key,
+            repair_truncated_last_line=getattr(self.args, "repair_resume", False),
         )
 
         if resume_state.completed_count > 0:
@@ -416,20 +388,16 @@ class OfflineInferenceRunner:
             )
             return
 
-        try:
-            outputs: list[RequestOutput] = self.llm.chat(
-                valid_messages,
-                self._sampling_params_for_items(valid_items),
-                use_tqdm=False,
-                chat_template_kwargs={
-                    "enable_thinking": getattr(self.args, "enable_thinking", False)
-                },
-            )
-            responses = [self._extract_model_response(output) for output in outputs]
-            self._write_response_results(valid_items, responses)
-        except Exception as e:
-            logger.error(f"❌ Error during vLLM processing for this batch: {e}")
-            raise RuntimeError(f"Batch processing failed: {e}") from e
+        outputs: list[RequestOutput] = self.llm.chat(
+            valid_messages,
+            self._sampling_params_for_items(valid_items),
+            use_tqdm=False,
+            chat_template_kwargs={
+                "enable_thinking": getattr(self.args, "enable_thinking", False)
+            },
+        )
+        responses = [self._extract_model_response(output) for output in outputs]
+        self._write_response_results(valid_items, responses)
 
     def _filter_valid_items(
         self, batch_data: Sequence[dict[str, Any]]
@@ -485,34 +453,27 @@ class OfflineInferenceRunner:
         if not self.args.output_file:
             raise ValueError("Output file path is required")
 
-        try:
-            # Load data (including resume functionality)
-            eval_dataset: list[dict[str, Any]] = self.load_data()
-            if not eval_dataset:
-                logger.info(
-                    "All samples have already been processed, skipping inference"
-                )
-                return
+        # Load data (including resume functionality)
+        eval_dataset: list[dict[str, Any]] = self.load_data()
+        if not eval_dataset:
+            logger.info("All samples have already been processed, skipping inference")
+            return
 
-            # Create output directory if it doesn't exist
-            output_path: Path = Path(self.args.output_file)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Create output directory if it doesn't exist
+        output_path: Path = Path(self.args.output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            logger.info(f"⏳ Starting to process {len(eval_dataset)} entries")
+        logger.info(f"⏳ Starting to process {len(eval_dataset)} entries")
 
-            # Initialize vLLM engine
-            self.llm, self.sampling_params = self.setup_vllm_engine()
+        # Initialize vLLM engine
+        self.llm, self.sampling_params = self.setup_vllm_engine()
 
-            # Process data in batches
-            self._process_batches(eval_dataset)
+        # Process data in batches
+        self._process_batches(eval_dataset)
 
-            logger.info(
-                f"✨ Final data processing completed. Results saved to {self.args.output_file}"
-            )
-
-        except Exception as e:
-            logger.critical(f"❌ Fatal error during inference: {e}")
-            raise
+        logger.info(
+            f"✨ Final data processing completed. Results saved to {self.args.output_file}"
+        )
 
     def _process_batches(self, eval_dataset: list[dict[str, Any]]) -> None:
         """Process the evaluation dataset in batches.
@@ -531,10 +492,19 @@ class OfflineInferenceRunner:
         )
 
         with tqdm(total=total_batches, desc="Processing batches", unit="batch") as pbar:
-            for i in range(0, len(eval_dataset), self.args.batch_size):
-                batch: list[dict[str, Any]] = eval_dataset[i : i + self.args.batch_size]
-                self.process_and_write_batch(batch)
-                pbar.update(1)
+            failures = process_batches_with_policy(
+                eval_dataset,
+                self.args.batch_size,
+                self.process_and_write_batch,
+                fail_fast=getattr(self.args, "fail_fast", True),
+                on_batch_complete=lambda: pbar.update(1),
+            )
+        if failures:
+            save_failed_items(self.args.output_file, failures)
+            logger.warning(
+                "Continued after %d failed batch(es); details saved next to output",
+                len(failures),
+            )
 
 
 def main(args: OfflineInferArguments) -> None:
@@ -546,15 +516,10 @@ def main(args: OfflineInferArguments) -> None:
     Args:
         args: Configuration arguments for the inference process
 
-    Raises:
-        RuntimeError: If inference process fails
+    Backend, schema, and persistence errors propagate to the CLI boundary.
     """
-    try:
-        runner = OfflineInferenceRunner(args)
-        runner.run()
-    except Exception as e:
-        logger.critical(f"❌ Inference process failed: {e}")
-        raise RuntimeError(f"Inference failed: {e}") from e
+    runner = OfflineInferenceRunner(args)
+    runner.run()
 
 
 if __name__ == "__main__":
@@ -569,7 +534,11 @@ if __name__ == "__main__":
             "Initializing OfflineInferArguments with parsed command line arguments..."
         )
         logger.info("\n--- Parsed Arguments ---")
-        logger.info(json.dumps(asdict(eval_args), indent=2, default=str))
+        logger.info(
+            json.dumps(
+                redact_config_for_logging(asdict(eval_args)), indent=2, default=str
+            )
+        )
 
         # Run main inference process
         main(eval_args)

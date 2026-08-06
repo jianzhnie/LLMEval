@@ -9,13 +9,12 @@ mathematical evaluation tasks while providing detailed logging and progress trac
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from collections import Counter
 from collections.abc import Iterator
 from concurrent.futures import TimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -24,11 +23,16 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
+from llmeval.tasks.persistence import atomic_write_json, atomic_write_jsonl
 from llmeval.tasks.postprocess import (
     DEFAULT_FILTER_REGISTRY,
     TextFilterPipeline,
 )
 from llmeval.tasks.results import ScorerResult
+from llmeval.tasks.sample_index import (
+    duplicate_sample_error,
+    resolve_sample_indices,
+)
 from llmeval.utils.log import init_logger
 
 # Configure a dedicated logger for the math scoring module
@@ -172,6 +176,9 @@ class MathAnswerResult:
     fallback_matched: bool = False
     failure_stage: str = "none"
     failure_reason: str | None = None
+    raw_gen: str = ""
+    filtered_gen: str = ""
+    filter_trace: dict[str, Any] = field(default_factory=dict)
 
     def __iter__(self) -> Iterator[int | float | str | None]:
         yield self.index
@@ -359,10 +366,34 @@ def process_answers(
             failure_stage="inference",
             failure_reason="missing generation",
         )
-    generated_text = (
+    raw_generated_text = (
         generated_text[0] if isinstance(generated_text, list) else str(generated_text)
     )
-    generated_text = MATH_RESPONSE_PIPELINE.apply(generated_text)
+    generated_text, filter_trace = MATH_RESPONSE_PIPELINE.apply_with_trace(
+        raw_generated_text
+    )
+
+    def result(
+        grade: float,
+        predicted: str | None,
+        gold: str | None,
+        *,
+        fallback_matched: bool = False,
+        failure_stage: str = "none",
+        failure_reason: str | None = None,
+    ) -> MathAnswerResult:
+        return MathAnswerResult(
+            index,
+            grade,
+            predicted,
+            gold,
+            fallback_matched=fallback_matched,
+            failure_stage=failure_stage,
+            failure_reason=failure_reason,
+            raw_gen=raw_generated_text,
+            filtered_gen=generated_text,
+            filter_trace=filter_trace,
+        )
 
     try:
         grade, extracted_answers = _verify_func([gold_answer_text], [generated_text])
@@ -370,15 +401,14 @@ def process_answers(
         if not extracted_answers:
             if _math_text_equiv(gold_answer_text, generated_text):
                 logger.debug("Fallback normalization matched job %d", index)
-                return MathAnswerResult(
-                    index, 1.0, generated_text, gold_answer_text, fallback_matched=True
+                return result(
+                    1.0, generated_text, gold_answer_text, fallback_matched=True
                 )
             logger.warning(
                 "No answers could be extracted for job %d; fallback did not match",
                 index,
             )
-            return MathAnswerResult(
-                index,
+            return result(
                 0.0,
                 None,
                 gold_answer_text,
@@ -392,8 +422,7 @@ def process_answers(
             pred_ans = extracted_answers[1] if len(extracted_answers) > 1 else None
         except IndexError:
             logger.error(f"❌ [Error] Invalid extraction format for job {index}")
-            return MathAnswerResult(
-                index,
+            return result(
                 0.0,
                 None,
                 gold_answer_text,
@@ -404,8 +433,7 @@ def process_answers(
         # Validate grade value
         if not (isinstance(grade, int | float) and 0 <= grade <= 1):
             logger.error(f"❌ [Error] Invalid grade value {grade} for job {index}")
-            return MathAnswerResult(
-                index,
+            return result(
                 0.0,
                 pred_ans,
                 gold_ans,
@@ -413,14 +441,13 @@ def process_answers(
                 failure_reason=f"invalid grade: {grade!r}",
             )
 
-        return MathAnswerResult(index, float(grade), pred_ans, gold_ans)
+        return result(float(grade), pred_ans, gold_ans)
 
     # Note: Pebble enforces timeouts at the pool level (terminating subprocess),
     # so TimeoutError here is a safety net for timeouts from math_verify internals.
     except TimeoutError:
         logger.warning(f"⏰ [Timeout] Job {index} timed out")
-        return MathAnswerResult(
-            index,
+        return result(
             0.0,
             "Timeout",
             "Timeout",
@@ -430,12 +457,9 @@ def process_answers(
     except ValueError as ve:
         if _math_text_equiv(gold_answer_text, generated_text):
             logger.debug("Fallback normalization matched job %d after: %s", index, ve)
-            return MathAnswerResult(
-                index, 1.0, generated_text, gold_answer_text, fallback_matched=True
-            )
+            return result(1.0, generated_text, gold_answer_text, fallback_matched=True)
         logger.warning("Math verification value error for job %d: %s", index, ve)
-        return MathAnswerResult(
-            index,
+        return result(
             0.0,
             None,
             gold_answer_text,
@@ -445,15 +469,9 @@ def process_answers(
     except Exception as e:
         if _math_text_equiv(gold_answer_text, generated_text):
             logger.debug("Fallback normalization matched job %d after %s", index, e)
-            return MathAnswerResult(
-                index, 1.0, generated_text, gold_answer_text, fallback_matched=True
-            )
-        logger.error(
-            f"❌ [Error] An unexpected error occurred for job {index}: {e}",
-            exc_info=True,
-        )
-        return MathAnswerResult(
-            index,
+            return result(1.0, generated_text, gold_answer_text, fallback_matched=True)
+        logger.warning("Math verification failed for job %d: %s", index, e)
+        return result(
             0.0,
             None,
             gold_answer_text,
@@ -471,20 +489,17 @@ def _math_record_status(
 ) -> str:
     """Classify a math record for the shared denominator contract.
 
-    An unparseable model answer is a completed incorrect observation. Missing
-    or unparseable input fields are skipped (a dataset problem, not a model
-    failure), while verifier/worker errors and timeouts are excluded from the
-    metric denominator.
+    Missing or unparseable input fields are skipped (a dataset problem, not a
+    model failure). Answer extraction, verification, worker errors, and
+    timeouts are classified separately and excluded from the model-accuracy
+    denominator; only successfully scored grade-0 answers count as wrong.
     """
     if extracted_answer == "Timeout":
         return "timeout"
     if failure_stage == "input":
         # Gold-truth parsing failed: the dataset row itself is unusable.
         return "skipped"
-    # Extraction failures are NOT excluded: the model produced a response but
-    # no parseable answer, which counts as a completed incorrect observation
-    # (grade is already 0.0). They fall through to the checks below.
-    if failure_stage in {"inference", "verification"}:
+    if failure_stage in {"inference", "extraction", "verification"}:
         return "failed"
     response = item.get(response_key)
     label = item.get(label_key)
@@ -615,7 +630,9 @@ def compute_scores(
                         "failure_stage": failure_stage,
                         "failure_reason": failure_reason,
                         "fallback_matched": fallback_matched,
-                        **_filter_artifacts(eval_dataset[idx].get(response_key)),
+                        "raw_gen": result.raw_gen,
+                        "filtered_gen": result.filtered_gen,
+                        "filter_trace": result.filter_trace,
                     }
                 )
                 processed_indices.add(idx)
@@ -625,6 +642,7 @@ def compute_scores(
                     stats.correct += 1
                 if status == "timeout":
                     stats.timeout += 1
+                    failure_counts["verification_failed"] += 1
                 elif status == "failed":
                     stats.error += 1
                     failure_counts[f"{failure_stage}_failed"] += 1
@@ -695,7 +713,7 @@ def compute_scores(
     return accuracy
 
 
-def compute_score_result(
+def score_math_result(
     eval_dataset: list[dict[str, Any]],
     label_key: str,
     response_key: str,
@@ -754,6 +772,7 @@ def compute_score_result(
     details, extra_metrics, problem_observations = _build_problem_level_metrics(
         scoring_dataset, expected_samples=expected_samples
     )
+    complete_problem_count = sum(1 for problem in details if problem["complete"])
     metrics = {"accuracy": accuracy, "sample_accuracy": accuracy, **extra_metrics}
     return ScorerResult(
         metrics=metrics,
@@ -763,7 +782,14 @@ def compute_score_result(
             **problem_observations,
         },
         per_item=[dict(item) for item in scoring_dataset],
-        details={"problem_level": details},
+        details={
+            "problem_level": details,
+            "complete_problem_count": complete_problem_count,
+            "incomplete_problem_count": len(details) - complete_problem_count,
+            "excluded_problem_doc_ids": [
+                problem["doc_id"] for problem in details if not problem["complete"]
+            ],
+        },
         sample_count=len(scoring_dataset),
         effective_sample_count=len(observations),
         failed_count=failed_count,
@@ -773,6 +799,11 @@ def compute_score_result(
     )
 
 
+# Compatibility alias for library callers that used the pre-registry name.
+# Keep this as a direct alias rather than a pass-through wrapper.
+compute_score_result = score_math_result
+
+
 def _expand_math_samples(
     eval_dataset: list[dict[str, Any]], response_key: str
 ) -> list[dict[str, Any]]:
@@ -780,29 +811,35 @@ def _expand_math_samples(
 
     ``sample_indices`` is an inference-only compatibility field.  It
     is consumed here and replaced with the public ``sample_index`` field so
-    scoring output has a stable, uniform schema.
+    scoring output has a stable, uniform schema.  Explicit index fields are
+    validated by the shared protocol (invalid fields raise); only rows with
+    no index fields at all receive the next unused per-problem indices.
     """
     expanded: list[dict[str, Any]] = []
+    used_by_problem: dict[str, set[int]] = {}
     for row_index, item in enumerate(eval_dataset):
         responses = item.get(response_key)
         if not isinstance(responses, list):
             responses = [responses] if responses is not None else []
-        raw_indices = item.get("sample_indices")
-        valid_indices = (
-            isinstance(raw_indices, list)
-            and len(raw_indices) == len(responses)
-            and all(isinstance(index, int) and index >= 0 for index in raw_indices)
-        )
-        sample_indices = raw_indices if valid_indices else list(range(len(responses)))
+        problem_id = _problem_identity(item, row_index)
+        used = used_by_problem.setdefault(problem_id, set())
         if not responses:
             # Preserve a missing-generation record so it is counted as skipped.
+            sample_index = resolve_sample_indices(
+                item, 1, problem_id=problem_id, used_indices=used
+            )[0]
+            used.add(sample_index)
             record = dict(item)
             record.pop("sample_indices", None)
             record[response_key] = []
-            record["sample_index"] = 0
+            record["sample_index"] = sample_index
             record["_math_problem_index"] = row_index
             expanded.append(record)
             continue
+        sample_indices = resolve_sample_indices(
+            item, len(responses), problem_id=problem_id, used_indices=used
+        )
+        used.update(sample_indices)
         for sample_index, response in zip(sample_indices, responses, strict=True):
             record = dict(item)
             record.pop("sample_indices", None)
@@ -855,11 +892,21 @@ def _build_problem_level_metrics(
     scored_dataset: list[dict[str, Any]],
     expected_samples: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, float], dict[str, list[float]]]:
-    """Aggregate sample outcomes into pass@k and majority-vote metrics."""
+    """Aggregate sample outcomes into pass@k and majority-vote metrics.
+
+    A problem is ``complete`` only when its sample indices exactly cover
+    ``0..k-1`` (each index exactly once, ``k`` being its target sample
+    count).  ``problem_pass@k``/``problem_majority@k`` aggregate complete
+    problems only, so the ``@k`` suffix always matches the actual sampling
+    depth; duplicate, negative, out-of-range, or missing indices all make a
+    problem incomplete.  When no problem of a cohort is complete, the metric
+    is reported as 0.0 with empty observations.
+    """
     grouped: dict[str, list[dict[str, Any]]] = {}
     seen_samples: dict[str, dict[int, dict[str, Any]]] = {}
     for row_index, item in enumerate(scored_dataset):
         problem_id = _problem_identity(item, row_index)
+        item.pop("_math_problem_index", None)
         sample_index = item.get("sample_index")
         if isinstance(sample_index, int) and sample_index >= 0:
             existing = seen_samples.setdefault(problem_id, {}).get(sample_index)
@@ -875,13 +922,10 @@ def _build_problem_level_metrics(
                     item.get("evaluation_status"),
                 )
                 if existing_signature != current_signature:
-                    raise ValueError(
-                        f"Conflicting duplicate math sample {problem_id!r}/{sample_index}"
-                    )
+                    raise duplicate_sample_error(problem_id, sample_index)
                 continue
             seen_samples[problem_id][sample_index] = item
         grouped.setdefault(problem_id, []).append(item)
-        item.pop("_math_problem_index", None)
 
     problems: list[dict[str, Any]] = []
     for problem_id, items in grouped.items():
@@ -910,6 +954,8 @@ def _build_problem_level_metrics(
             else item_expected
         )
         target_count = target_count or sample_count
+        index_set = set(seen_samples.get(problem_id, ()))
+        complete = len(items) == target_count and index_set == set(range(target_count))
         problems.append(
             {
                 "doc_id": problem_id,
@@ -917,7 +963,7 @@ def _build_problem_level_metrics(
                 "sample_count": sample_count,
                 "observed_samples": sample_count,
                 "expected_samples": target_count,
-                "complete": sample_count >= target_count,
+                "complete": complete,
                 "correct_fraction": correct_samples / sample_count
                 if sample_count
                 else 0.0,
@@ -932,13 +978,17 @@ def _build_problem_level_metrics(
     metrics: dict[str, float] = {}
     observations: dict[str, list[float]] = {}
     for k in sorted({problem["expected_samples"] for problem in problems}):
-        cohort = [problem for problem in problems if problem["expected_samples"] == k]
+        cohort = [
+            problem
+            for problem in problems
+            if problem["expected_samples"] == k and problem["complete"]
+        ]
         pass_key = f"problem_pass@{k}"
         majority_key = f"problem_majority@{k}"
         pass_values = [float(problem["passed"]) for problem in cohort]
         majority_values = [float(problem["majority_correct"]) for problem in cohort]
-        metrics[pass_key] = sum(pass_values) / len(cohort)
-        metrics[majority_key] = sum(majority_values) / len(cohort)
+        metrics[pass_key] = sum(pass_values) / len(cohort) if cohort else 0.0
+        metrics[majority_key] = sum(majority_values) / len(cohort) if cohort else 0.0
         observations[pass_key] = pass_values
         observations[majority_key] = majority_values
     return problems, metrics, observations
@@ -967,12 +1017,7 @@ def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:
         IOError: If the result file cannot be written
     """
     try:
-        cache_dir = os.path.dirname(cache_path)
-        if cache_dir:
-            os.makedirs(cache_dir, exist_ok=True)
-        with open(cache_path, "w", encoding="utf-8") as f:
-            for dataset in eval_dataset:
-                f.write(json.dumps(dataset, ensure_ascii=False) + "\n")
+        atomic_write_jsonl(cache_path, eval_dataset)
         logger.info(f"✅ Results saved to {cache_path}")
     except OSError as e:
         logger.error(f"❌ Failed to save results: {e}")
@@ -986,14 +1031,8 @@ def save_summary(
 ) -> None:
     """Save aggregated math metrics next to the JSONL result file."""
     summary_path = Path(cache_path).with_suffix(".summary.json")
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "accuracy": round(accuracy, 6),
-                **metadata,
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+    atomic_write_json(
+        summary_path,
+        {"accuracy": round(accuracy, 6), **metadata},
+        indent=2,
+    )

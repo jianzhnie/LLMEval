@@ -23,6 +23,8 @@ import copy
 import hashlib
 import json
 import os
+import uuid
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,19 +38,79 @@ __all__ = [
     "expand_group_for_sampling",
     "is_explicit_tool_choice",
     "is_local_endpoint",
+    "iter_resume_records",
     "load_jsonl",
     "load_resume_state",
+    "missing_indices_for_item",
     "missing_sample_indices",
     "prepare_data_with_resume",
+    "process_batches_with_policy",
     "redact_config_for_logging",
     "require_document_id",
+    "resolve_resume_identity",
     "sample_count_for_item",
     "sample_seed_for_item",
     "save_failed_items",
+    "to_public_result_schema",
     "validate_document_ids",
 ]
 
 logger = init_logger("inference_common")
+
+
+def _batch_item_identity(item: dict[str, Any]) -> dict[str, Any]:
+    """Return stable, compact identity fields for a failed batch item."""
+    identity: dict[str, Any] = {}
+    for key in ("doc_id", "sample_index", "_llmeval_requested_sample_indices"):
+        if key in item:
+            public_key = (
+                "requested_sample_indices"
+                if key == "_llmeval_requested_sample_indices"
+                else key
+            )
+            identity[public_key] = item[key]
+    return identity
+
+
+def process_batches_with_policy(
+    items: Sequence[dict[str, Any]],
+    batch_size: int,
+    process_batch: Callable[[Sequence[dict[str, Any]]], None],
+    *,
+    fail_fast: bool = True,
+    on_batch_complete: Callable[[], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Process batches with an explicit strict or fault-isolating policy.
+
+    In strict mode the original exception is propagated immediately. In
+    tolerant mode failed batches are skipped and returned as compact audit
+    records so callers can persist and summarize them.
+    """
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+    failures: list[dict[str, Any]] = []
+    for batch_index, start in enumerate(range(0, len(items), batch_size)):
+        batch = items[start : start + batch_size]
+        try:
+            process_batch(batch)
+        except Exception as exc:
+            if fail_fast:
+                raise
+            failures.append(
+                {
+                    "error_category": "batch_processing",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "batch_index": batch_index,
+                    "batch_size": len(batch),
+                    "items": [_batch_item_identity(item) for item in batch],
+                }
+            )
+        finally:
+            if on_batch_complete is not None:
+                on_batch_complete()
+    return failures
 
 
 @dataclass
@@ -95,6 +157,11 @@ def validate_document_ids(items: list[dict[str, Any]]) -> None:
     """Validate that every prepared input record has a unique ``doc_id``."""
     first_indices: dict[str, int] = {}
     for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"Input record at index {index} must be an object, "
+                f"got {type(item).__name__}"
+            )
         document_id = require_document_id(item, index)
         previous = first_indices.setdefault(document_id, index)
         if previous != index:
@@ -154,11 +221,9 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
                         f"got {type(record).__name__}"
                     )
                 records.append(record)
-    except FileNotFoundError as e:
-        logger.critical(f"Input file not found: {path}, {e}")
-        raise
-    except json.JSONDecodeError as e:
-        logger.critical(f"Invalid JSON in input file: {e}")
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Add context at the CLI boundary; library callers receive the native
+        # exception and can classify it without duplicate log records.
         raise
     return records
 
@@ -167,6 +232,8 @@ def load_resume_state(
     output_file: str | Path,
     input_key: str,
     response_key: str,
+    *,
+    repair_truncated_last_line: bool = False,
 ) -> ResumeState:
     """Load stable and legacy resume data in one pass over an output JSONL file."""
     state = ResumeState()
@@ -175,74 +242,85 @@ def load_resume_state(
         return state
 
     try:
-        with output_path.open(encoding="utf-8") as handle:
-            for line_num, line in enumerate(handle, 1):
-                if not line.strip():
-                    continue
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    logger.warning("Invalid JSON on output line %d: %s", line_num, exc)
-                    continue
-                if not isinstance(item, dict):
-                    logger.warning(
-                        "Skipping non-object JSON on output line %d: %s",
-                        line_num,
-                        type(item).__name__,
+        for line_num, item in iter_resume_records(
+            output_path,
+            repair_truncated_last_line=repair_truncated_last_line,
+        ):
+            prompt = item.get(input_key) or item.get("prompt")
+            response = item.get(response_key)
+            if response is None:
+                response = item.get("gen")
+            if isinstance(response, list):
+                count = len(response)
+            elif (
+                item.get("logprobs") is not None
+                or item.get("Verifier_response")
+                or item.get("Verifier_judgment")
+            ):
+                count = 1
+            else:
+                count = 0
+            if count <= 0:
+                continue
+            if prompt is None or not str(prompt).strip():
+                raise ValueError(
+                    f"Resume file {output_path} line {line_num} has a completed "
+                    "response but no non-empty prompt"
+                )
+
+            document_id = item.get("doc_id")
+            if not document_id:
+                prompt_key = str(prompt)
+                state.legacy_counts[prompt_key] = (
+                    state.legacy_counts.get(prompt_key, 0) + count
+                )
+                continue
+
+            identity = (str(document_id), str(prompt))
+            completed = state.completed_indices.setdefault(identity, set())
+            index_field = next(
+                (
+                    key
+                    for key in (
+                        "sample_indices",
+                        "_llmeval_sample_indices",
+                        "_llmeval_requested_sample_indices",
                     )
-                    continue
-
-                prompt = item.get(input_key) or item.get("prompt")
-                if prompt is None:
-                    continue
-                response = item.get(response_key)
-                if response is None:
-                    response = item.get("gen")
-                if isinstance(response, list):
-                    count = len(response)
-                elif (
-                    item.get("logprobs") is not None
-                    or item.get("Verifier_response")
-                    or item.get("Verifier_judgment")
-                ):
-                    count = 1
-                else:
-                    count = 0
-                if count <= 0:
-                    continue
-
-                document_id = item.get("doc_id")
-                if not document_id:
-                    prompt_key = str(prompt)
-                    state.legacy_counts[prompt_key] = (
-                        state.legacy_counts.get(prompt_key, 0) + count
-                    )
-                    continue
-
-                identity = (str(document_id), str(prompt))
-                completed = state.completed_indices.setdefault(identity, set())
-                raw_indices = item.get("sample_indices")
-                if raw_indices is None:
-                    raw_indices = item.get("sample_indices")
-                if (
+                    if key in item
+                ),
+                None,
+            )
+            if index_field is not None:
+                raw_indices = item[index_field]
+                valid_indices = (
                     isinstance(raw_indices, list)
                     and len(raw_indices) == count
-                    and all(
-                        isinstance(index, int) and index >= 0 for index in raw_indices
+                    and all(type(index) is int and index >= 0 for index in raw_indices)
+                    and len(set(raw_indices)) == len(raw_indices)
+                )
+                if not valid_indices:
+                    raise ValueError(
+                        f"Resume file {output_path} line {line_num} has invalid "
+                        f"{index_field}: expected {count} unique non-negative ints"
                     )
-                ):
-                    indices = raw_indices
-                elif isinstance(item.get("sample_index"), int):
-                    indices = [int(item["sample_index"])]
-                else:
-                    indices = []
-                    next_index = 0
-                    for _ in range(count):
-                        while next_index in completed:
-                            next_index += 1
-                        indices.append(next_index)
+                indices = raw_indices
+            elif count == 1 and "sample_index" in item:
+                raw_sample_index = item["sample_index"]
+                if type(raw_sample_index) is not int or raw_sample_index < 0:
+                    raise ValueError(
+                        f"Resume file {output_path} line {line_num} sample_index "
+                        f"must be a non-negative int, got {raw_sample_index!r}"
+                    )
+                indices = [raw_sample_index]
+            else:
+                indices = []
+                next_index = 0
+                for _ in range(count):
+                    while next_index in completed:
                         next_index += 1
-                completed.update(indices)
+                    indices.append(next_index)
+                    next_index += 1
+            completed.update(indices)
     except OSError as exc:
         # Continuing with a partially-read state would re-generate completed
         # samples and append duplicate rows — fail loudly instead.
@@ -250,11 +328,112 @@ def load_resume_state(
     return state
 
 
+def iter_resume_records(
+    path: str | Path,
+    *,
+    repair_truncated_last_line: bool = False,
+) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Yield validated resume records with their source line numbers.
+
+    Repair mode only ignores an invalid final non-empty line when the file ends
+    without a newline, which is the shape produced by an interrupted append.
+    """
+    resume_path = Path(path)
+    pending: tuple[int, str] | None = None
+    with resume_path.open(encoding="utf-8") as handle:
+        for line_num, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            if pending is not None:
+                yield _parse_resume_record(resume_path, *pending)
+            pending = (line_num, line)
+
+    if pending is None:
+        return
+
+    line_num, line = pending
+    try:
+        yield _parse_resume_record(resume_path, line_num, line)
+    except ValueError as exc:
+        is_unterminated = not line.endswith(("\n", "\r"))
+        if (
+            not repair_truncated_last_line
+            or not is_unterminated
+            or not isinstance(exc.__cause__, json.JSONDecodeError)
+        ):
+            raise
+        logger.warning(
+            "Ignoring truncated final resume line in %s at line %d",
+            resume_path,
+            line_num,
+        )
+
+
+def _parse_resume_record(
+    path: Path, line_num: int, line: str
+) -> tuple[int, dict[str, Any]]:
+    try:
+        item = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid JSON in resume file {path} at line {line_num}: {exc.msg}"
+        ) from exc
+    if not isinstance(item, dict):
+        raise ValueError(
+            f"Resume file {path} line {line_num} must contain an object, "
+            f"got {type(item).__name__}"
+        )
+    return line_num, item
+
+
 def missing_sample_indices(target_samples: int, completed: set[int]) -> list[int]:
     """Return the exact non-contiguous sample indices still required."""
     if target_samples <= 0:
         raise ValueError(f"target_samples must be positive, got {target_samples}")
     return [index for index in range(target_samples) if index not in completed]
+
+
+def resolve_resume_identity(
+    item: dict[str, Any], input_key: str, index: int | None = None
+) -> tuple[str, str]:
+    """Return the validated stable ``(doc_id, prompt)`` resume identity."""
+    if not input_key:
+        raise ValueError("input_key must be non-empty")
+    prompt_value = item.get(input_key) or item.get("prompt")
+    prompt = str(prompt_value) if prompt_value is not None else ""
+    if not prompt.strip():
+        location = f" at index {index}" if index is not None else ""
+        raise ValueError(
+            f"Input record{location} has no non-empty prompt under "
+            f"{input_key!r} or 'prompt'"
+        )
+    return require_document_id(item, index), prompt
+
+
+def missing_indices_for_item(
+    item: dict[str, Any],
+    *,
+    input_key: str,
+    target_samples: int,
+    completed_indices: dict[tuple[str, str], set[int]],
+    legacy_counts: dict[str, int],
+    index: int | None = None,
+) -> tuple[tuple[str, str], list[int]]:
+    """Resolve one item's stable identity and exact missing sample indices."""
+    identity = resolve_resume_identity(item, input_key, index)
+    completed = set(completed_indices.get(identity, set()))
+    if not completed:
+        completed.update(range(max(legacy_counts.get(identity[1], 0), 0)))
+    return identity, missing_sample_indices(target_samples, completed)
+
+
+def to_public_result_schema(item: dict[str, Any]) -> dict[str, Any]:
+    """Copy a result and remove inference-only request metadata."""
+    result = dict(item)
+    for key in tuple(result):
+        if key.startswith("_llmeval_"):
+            result.pop(key)
+    return result
 
 
 def redact_config_for_logging(
@@ -318,37 +497,20 @@ def expand_data_with_resume(
     validate_document_ids(raw_data)
 
     expanded_data: list[dict[str, Any]] = []
-    skipped_items = 0
     for index, item in enumerate(raw_data):
-        if not isinstance(item, dict):
-            logger.warning("Skipping non-dict input item: %s", type(item).__name__)
-            skipped_items += 1
-            continue
-        prompt_val: Any = item.get(input_key) or item.get("prompt")
-        prompt = str(prompt_val) if prompt_val is not None else ""
-        if not prompt.strip():
-            logger.warning(
-                f"No valid prompt found under keys [{input_key!r}, 'prompt'] "
-                f"for item with keys: {list(item.keys())}"
-            )
-            skipped_items += 1
-            continue
-
-        document_id = require_document_id(item, index)
-        used = set(completed_indices.get((document_id, prompt), set()))
-        if not used:
-            # Legacy prompt-keyed counts carry no per-index metadata; assume the
-            # first ``legacy_done`` contiguous indices were written.
-            legacy_done = legacy_counts.get(prompt, 0)
-            used = set(range(max(legacy_done, 0)))
-        for sample_index in missing_sample_indices(n_samples, used):
+        _, missing = missing_indices_for_item(
+            item,
+            input_key=input_key,
+            target_samples=n_samples,
+            completed_indices=completed_indices,
+            legacy_counts=legacy_counts,
+            index=index,
+        )
+        for sample_index in missing:
             expanded_item = copy.deepcopy(item)
             expanded_item["sample_index"] = sample_index
             expanded_item["expected_samples"] = n_samples
             expanded_data.append(expanded_item)
-
-    if skipped_items > 0:
-        logger.warning(f"Skipped {skipped_items} items due to missing or empty prompt")
     return expanded_data
 
 
@@ -374,23 +536,15 @@ def prepare_data_with_resume(
 
     validate_document_ids(raw_data)
     prepared_data: list[dict[str, Any]] = []
-    skipped_items = 0
     for index, item in enumerate(raw_data):
-        if not isinstance(item, dict):
-            skipped_items += 1
-            continue
-        prompt_val: Any = item.get(input_key) or item.get("prompt")
-        prompt = str(prompt_val) if prompt_val is not None else ""
-        if not prompt.strip():
-            skipped_items += 1
-            continue
-
-        document_id = require_document_id(item, index)
-        identity = (document_id, prompt)
-        used = set(completed_indices.get(identity, set()))
-        if not used:
-            used = set(range(max(legacy_counts.get(prompt, 0), 0)))
-        missing = missing_sample_indices(n_samples, used)
+        _, missing = missing_indices_for_item(
+            item,
+            input_key=input_key,
+            target_samples=n_samples,
+            completed_indices=completed_indices,
+            legacy_counts=legacy_counts,
+            index=index,
+        )
         if not missing:
             continue
 
@@ -400,8 +554,6 @@ def prepare_data_with_resume(
         prepared_item["_llmeval_requested_sample_indices"] = missing
         prepared_data.append(prepared_item)
 
-    if skipped_items:
-        logger.warning("Skipped %d items due to missing or empty prompt", skipped_items)
     return prepared_data
 
 
@@ -426,19 +578,29 @@ def expand_group_for_sampling(
     for item in items:
         sample_count = sample_count_for_item(item, sample_count_key)
         requested_indices = item.get("_llmeval_requested_sample_indices")
-        if not (
-            isinstance(requested_indices, list)
-            and len(requested_indices) == sample_count
-            and all(
-                isinstance(index, int) and index >= 0 for index in requested_indices
-            )
-        ):
+        if requested_indices is None:
             sample_start = int(item.get("_llmeval_sample_start", 0))
             requested_indices = list(range(sample_start, sample_start + sample_count))
+        elif not (
+            isinstance(requested_indices, list)
+            and len(requested_indices) == sample_count
+            and all(type(index) is int and index >= 0 for index in requested_indices)
+            and len(set(requested_indices)) == len(requested_indices)
+        ):
+            raise ValueError(
+                "_llmeval_requested_sample_indices must contain exactly "
+                f"{sample_count} unique non-negative ints"
+            )
         for sample_index in requested_indices:
-            sample_item = item.copy()
+            sample_item = to_public_result_schema(item)
             if "doc_id" in item:
                 sample_item["sample_index"] = sample_index
+            # The target sample count is used by the caller's result builder
+            # for ``expected_samples``; strip the request-scoped indices but
+            # keep the target so resumed rows report the full depth.
+            sample_item["_llmeval_target_samples"] = int(
+                item.get("_llmeval_target_samples", sample_count)
+            )
             sample_items.append(sample_item)
     return sample_items
 
@@ -454,36 +616,53 @@ def is_explicit_tool_choice(tool_choice: str | None) -> bool:
 
 
 def save_failed_items(
-    output_file: str | Path, failed_items: list[dict[str, Any]]
+    output_file: str | Path,
+    failed_items: list[dict[str, Any]],
+    *,
+    run_id: str | None = None,
 ) -> None:
-    """Persist failed-item records next to the output file.
+    """Append failed-item audit records next to the output file.
 
-    Appends to ``<output_stem>_failed.jsonl`` so failures from earlier resume
-    attempts remain available. ``splitext`` also ensures a non-JSONL output
-    name cannot collapse onto the primary output file.
+    Each invocation gets a run ID. A stable failure ID is derived from sample
+    identity and error category, while variable text remains in the audit
+    payload. Records are intentionally not deduplicated: repeated failures
+    across resume runs are meaningful history and appending stays O(new rows).
 
     Args:
         output_file: The run's output file (derives the failed-file path).
         failed_items: Records describing each failure (item + error).
     """
+    if not failed_items:
+        return
     failed_file = os.path.splitext(str(output_file))[0] + "_failed.jsonl"
-    try:
-        failed_path = Path(failed_file)
-        failed_path.parent.mkdir(parents=True, exist_ok=True)
-        existing: set[str] = set()
-        if failed_path.exists():
-            for line in failed_path.read_text(encoding="utf-8").splitlines():
-                try:
-                    existing.add(json.dumps(json.loads(line), sort_keys=True))
-                except json.JSONDecodeError:
-                    continue
-        with open(failed_file, "a", encoding="utf-8") as f:
-            for entry in failed_items:
-                identity = json.dumps(entry, sort_keys=True)
-                if identity in existing:
-                    continue
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                existing.add(identity)
-        logger.info(f"Failed items saved to: {failed_file}")
-    except OSError as e:
-        logger.error(f"Failed to save failed items to file: {e}")
+    current_run_id = run_id or uuid.uuid4().hex
+    failed_path = Path(failed_file)
+    failed_path.parent.mkdir(parents=True, exist_ok=True)
+    with failed_path.open("a", encoding="utf-8") as handle:
+        for entry in failed_items:
+            record = dict(entry)
+            record.setdefault("run_id", current_run_id)
+            record.setdefault("failure_id", _failure_id(entry))
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    logger.info("Failed items saved to: %s", failed_file)
+
+
+def _failure_id(entry: dict[str, Any]) -> str:
+    """Build a stable failure identity without volatile exception text."""
+    source = entry.get("item") if isinstance(entry.get("item"), dict) else entry
+    identity = {
+        "doc_id": source.get("doc_id"),
+        "sample_index": source.get("sample_index"),
+        "sample_indices": source.get("sample_indices")
+        or source.get("requested_sample_indices")
+        or source.get("_llmeval_requested_sample_indices"),
+        "error_category": entry.get("error_category")
+        or entry.get("error_type")
+        or "unknown",
+        "batch_index": entry.get("batch_index"),
+        "items": entry.get("items"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return digest[:24]

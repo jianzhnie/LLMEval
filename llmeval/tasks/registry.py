@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from llmeval.tasks.persistence import atomic_write_json, atomic_write_jsonl
 from llmeval.tasks.results import (
     EvaluationResult,
     MetricValue,
@@ -55,6 +55,7 @@ class EvaluationContext(PreparationContext):
     input_key: str = "prompt"
     output_schema: str = "compact"
     expected_samples: int = 0
+    code_k_values: tuple[int, ...] = (1, 10, 64)
 
 
 class EvaluationTask(Protocol):
@@ -126,16 +127,13 @@ def _build_evaluation_result(
 def write_structured_summary(result: EvaluationResult, cache_path: Path) -> None:
     """Write the registry result in one schema shared by all task families."""
     summary_path = cache_path.with_suffix(".summary.json")
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
     payload = result.to_dict(include_per_item=True)
     payload["summary_version"] = 1
     metric_values = {name: metric.value for name, metric in result.metrics.items()}
     payload["metric_values"] = metric_values
     for name, value in metric_values.items():
         payload.setdefault(name, value)
-    summary_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    atomic_write_json(summary_path, payload, indent=2)
 
 
 def _compact_per_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -175,11 +173,11 @@ def write_per_item_results(
     """Persist per-item records using the requested compact/debug schema."""
     if output_schema not in {"compact", "debug"}:
         raise ValueError("output_schema must be 'compact' or 'debug'")
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with cache_path.open("w", encoding="utf-8") as handle:
-        for item in result.per_item:
-            record = item if output_schema == "debug" else _compact_per_item(item)
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    records = (
+        item if output_schema == "debug" else _compact_per_item(item)
+        for item in result.per_item
+    )
+    atomic_write_jsonl(cache_path, records)
 
 
 @dataclass
@@ -303,6 +301,7 @@ class CodeTask:
             max_workers=context.max_workers,
             timeout=context.timeout,
             exec_timeout=context.exec_timeout,
+            k_values=context.code_k_values,
             allow_unsafe_code=context.allow_unsafe_code,
             persist_legacy=False,
         )

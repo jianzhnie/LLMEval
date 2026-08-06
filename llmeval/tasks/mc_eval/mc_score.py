@@ -36,7 +36,6 @@ Generate:       {"gold": str, "pred": str, "correct": bool}
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from collections import Counter
@@ -48,12 +47,14 @@ from typing import Any, Literal
 from pebble import ProcessPool
 from tqdm import tqdm
 
+from llmeval.tasks.persistence import atomic_write_json, atomic_write_jsonl
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.results import ScorerResult
+from llmeval.tasks.sample_index import duplicate_sample_error, resolve_sample_indices
 from llmeval.utils.log import init_logger
 
 __all__ = [
@@ -254,29 +255,17 @@ def merge_generate_records(
         else:
             generations = []
 
-        raw_indices = item.get("sample_indices")
-        if (
-            isinstance(raw_indices, list)
-            and len(raw_indices) == len(generations)
-            and all(isinstance(value, int) and value >= 0 for value in raw_indices)
-        ):
-            sample_indices = raw_indices
-        else:
-            sample_indices = []
-            next_index = 0
-            for _ in generations:
-                while next_index in target_samples:
-                    next_index += 1
-                sample_indices.append(next_index)
-                next_index += 1
+        sample_indices = resolve_sample_indices(
+            item,
+            len(generations),
+            problem_id=str(document_id),
+            used_indices=target_samples,
+        )
 
         for sample_index, generation in zip(sample_indices, generations, strict=True):
             existing = target_samples.get(sample_index)
             if existing is not None and existing != generation:
-                raise ValueError(
-                    "Conflicting generation for resumed MC document "
-                    f"{document_id!r}, sample {sample_index}"
-                )
+                raise duplicate_sample_error(str(document_id), sample_index)
             target_samples[sample_index] = generation
 
     for item, samples in zip(merged, samples_by_position, strict=True):
@@ -284,6 +273,9 @@ def merge_generate_records(
             continue
         ordered_indices = sorted(samples)
         item[response_key] = [samples[index] for index in ordered_indices]
+        # Keep exactly the field matching the output shape — a stale scalar
+        # ``sample_index`` must not survive a multi-sample merge.
+        item.pop("sample_index", None)
         item.pop("sample_indices", None)
         if len(ordered_indices) == 1:
             item["sample_index"] = ordered_indices[0]
@@ -432,8 +424,8 @@ def score_items(
                 logger.warning("Individual scoring task timed out — marked as timeout.")
                 pbar.update(1)
                 continue
-            except Exception:
-                logger.exception("Unexpected error retrieving scoring result.")
+            except Exception as exc:
+                logger.warning("MC scoring worker result failed: %s", exc)
                 pbar.update(1)
                 continue
 
@@ -514,8 +506,8 @@ def process_item(
         else:
             record = score_generate_item(item, label_key, response_key, aggregation)
         return idx, _attach_item_metadata(record, item, mode, aggregation)
-    except Exception:
-        logger.exception("Scoring worker failed for item %d", idx)
+    except Exception as exc:
+        logger.warning("MC scoring worker failed for item %d: %s", idx, exc)
         return idx, _error_record(item, mode, label_key, aggregation, "failed")
 
 
@@ -674,8 +666,16 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         )
         gold = -1
     logprobs: list[float] = item.get("logprobs", [])
+    choices = (
+        item.get("choice_tokens") or item.get("choices") or item.get("choice_texts", [])
+    )
     choice_logprobs = item.get("choice_logprobs")
-    if isinstance(choice_logprobs, list) and len(choice_logprobs) == len(logprobs):
+    expected_choices = len(choices) if isinstance(choices, list) and choices else None
+    if (
+        isinstance(choice_logprobs, list)
+        and choice_logprobs
+        and (expected_choices is None or len(choice_logprobs) == expected_choices)
+    ):
         # Complete continuation scores are preferred when inference recorded
         # them. Empty per-choice lists remain -inf and cannot become a false
         # positive through argmax.
@@ -687,10 +687,6 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             logger.warning("Invalid choice_logprobs; using aggregate logprobs")
             choice_logprobs = None
-    choices = (
-        item.get("choice_tokens") or item.get("choices") or item.get("choice_texts", [])
-    )
-
     # Guard: unscorable data → forced-incorrect record.  An out-of-range gold
     # index is a dataset problem (skipped); empty/all--inf logprobs are an
     # inference failure (failed).
@@ -895,16 +891,13 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
     The summary is written next to the JSONL result file.
     """
     cache_path = Path(cache_path)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-
     # Per-item records (JSONL).
-    with open(cache_path, "w", encoding="utf-8") as fh:
-        for record in result.per_item:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    atomic_write_jsonl(cache_path, result.per_item)
 
     # Aggregated metrics summary (JSON).
     summary_path = cache_path.with_suffix(".summary.json")
     question_total = len(result.per_item)
+
     def sample_count(record: dict[str, Any]) -> int:
         """Count generations when available, otherwise one scored observation."""
         if "sample_total" in record:
@@ -928,27 +921,26 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
         for record in result.per_item
         if record.get("evaluation_status") == "timeout"
     )
-    with open(summary_path, "w", encoding="utf-8") as fh:
-        json.dump(
-            {
-                "acc": round(result.acc, 4),
-                "acc_norm": round(result.acc_norm, 4),
-                "acc_bytes": round(result.acc_bytes, 4),
-                "exact_match": round(result.exact_match, 4),
-                "total": result.total,
-                "question_total": question_total,
-                "sample_total": sample_total,
-                "sample_count": sample_total,
-                "effective_sample_count": max(
-                    sample_total - failed_count - skipped_count - timeout_count, 0
-                ),
-                "failed_count": failed_count,
-                "skipped_count": skipped_count,
-                "timeout_count": timeout_count,
-                "aggregation": (
-                    result.per_item[0].get("aggregation") if result.per_item else None
-                ),
-            },
-            fh,
-            indent=2,
-        )
+    atomic_write_json(
+        summary_path,
+        {
+            "acc": round(result.acc, 4),
+            "acc_norm": round(result.acc_norm, 4),
+            "acc_bytes": round(result.acc_bytes, 4),
+            "exact_match": round(result.exact_match, 4),
+            "total": result.total,
+            "question_total": question_total,
+            "sample_total": sample_total,
+            "sample_count": sample_total,
+            "effective_sample_count": max(
+                sample_total - failed_count - skipped_count - timeout_count, 0
+            ),
+            "failed_count": failed_count,
+            "skipped_count": skipped_count,
+            "timeout_count": timeout_count,
+            "aggregation": (
+                result.per_item[0].get("aggregation") if result.per_item else None
+            ),
+        },
+        indent=2,
+    )

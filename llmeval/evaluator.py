@@ -34,9 +34,9 @@ from typing import Any
 
 from transformers import HfArgumentParser
 
-from llmeval.inference.common import load_jsonl
+from llmeval.inference.common import load_jsonl, redact_config_for_logging
 from llmeval.tasks.code_eval.code_score import score_code_result
-from llmeval.tasks.math_eval.math_score import compute_score_result
+from llmeval.tasks.math_eval.math_score import score_math_result
 from llmeval.tasks.mc_eval.mc_score import (
     score_generate_result,
     score_loglikelihood_result,
@@ -86,7 +86,8 @@ def evaluate_task(
     input_key: str = "prompt",
     output_schema: str = "compact",
     expected_samples: int = 0,
-) -> float | None:
+    code_k_values: tuple[int, ...] = (1, 10, 64),
+) -> float:
     """
     Evaluate model outputs against ground truth data for a specific task.
 
@@ -111,7 +112,10 @@ def evaluate_task(
         allow_unsafe_code: Explicit opt-in required for code execution.
 
     Returns:
-        Optional[float]: Evaluation accuracy score if successful, None if evaluation fails
+        The task's primary metric value.
+
+    Raises:
+        Exception: Propagates task resolution, scoring, and persistence failures.
 
     Example:
         >>> data = [{"input": "2+2", "answer": "4", "gen": "4"}]
@@ -121,35 +125,32 @@ def evaluate_task(
         ... )
         >>> print(f"Accuracy: {accuracy:.2f}")
     """
-    try:
-        result = evaluate_task_result(
-            eval_dataset=eval_dataset,
-            task_name=task_name,
-            label_key=label_key,
-            response_key=response_key,
-            cache_path=cache_path,
-            max_workers=max_workers,
-            timeout=timeout,
-            exec_timeout=exec_timeout,
-            seed=seed,
-            mc_aggregation=mc_aggregation,
-            allow_unsafe_code=allow_unsafe_code,
-            bootstrap_samples=bootstrap_samples,
-            confidence_level=confidence_level,
-            input_key=input_key,
-            output_schema=output_schema,
-            expected_samples=expected_samples,
-        )
-    except Exception as exc:
-        logger.error("Evaluation failed: %s", exc, exc_info=True)
-        return None
+    result = evaluate_task_result(
+        eval_dataset=eval_dataset,
+        task_name=task_name,
+        label_key=label_key,
+        response_key=response_key,
+        cache_path=cache_path,
+        max_workers=max_workers,
+        timeout=timeout,
+        exec_timeout=exec_timeout,
+        seed=seed,
+        mc_aggregation=mc_aggregation,
+        allow_unsafe_code=allow_unsafe_code,
+        bootstrap_samples=bootstrap_samples,
+        confidence_level=confidence_level,
+        input_key=input_key,
+        output_schema=output_schema,
+        expected_samples=expected_samples,
+        code_k_values=code_k_values,
+    )
     return result.primary_value
 
 
 def _default_registry() -> TaskRegistry:
     """Build a registry from module symbols so scorer tests remain injectable."""
     return build_default_registry(
-        compute_score_result,
+        score_math_result,
         score_generate_result,
         score_loglikelihood_result,
         score_code_result,
@@ -188,6 +189,7 @@ def evaluate_task_result(
     input_key: str = "prompt",
     output_schema: str = "compact",
     expected_samples: int = 0,
+    code_k_values: tuple[int, ...] = (1, 10, 64),
 ) -> EvaluationResult:
     """Evaluate a task through the registry and return all declared metrics."""
     actual_seed = 0 if seed is None else seed
@@ -209,57 +211,52 @@ def evaluate_task_result(
         input_key=input_key,
         output_schema=output_schema,
         expected_samples=expected_samples,
+        code_k_values=code_k_values,
     )
     registry = _default_registry()
-    try:
-        task = registry.resolve(task_name)
-        if not eval_dataset:
-            logger.warning("Empty dataset provided for evaluation")
-            result = EvaluationResult(
-                task_name=task_name,
-                task_version=task.version,
-                metrics={
-                    spec.name: MetricValue(
-                        value=0.0,
-                        count=0,
-                        higher_is_better=spec.higher_is_better,
-                    )
-                    for spec in task.metric_specs
-                },
-                primary_metric=task.metric_specs[0].name if task.metric_specs else None,
-            )
-            write_per_item_results(
-                result, context.cache_path, output_schema=context.output_schema
-            )
-            write_structured_summary(result, context.cache_path)
-        else:
-            result = evaluate_registered_task(context, registry)
-        for name, metric in result.metrics.items():
-            logger.info(
-                "Task %s metric %s=%.4f (n=%d, stderr=%s)",
-                task_name,
-                name,
-                metric.value,
-                metric.count,
-                f"{metric.stderr:.6f}" if metric.stderr is not None else "N/A",
-            )
-        logger.info(
-            "Task %s counts: samples=%d effective=%d failed=%d skipped=%d timeout=%d",
-            task_name,
-            result.sample_count,
-            result.effective_sample_count,
-            result.failed_count,
-            result.skipped_count,
-            result.timeout_count,
+    task = registry.resolve(task_name)
+    if not eval_dataset:
+        logger.warning("Empty dataset provided for evaluation")
+        result = EvaluationResult(
+            task_name=task_name,
+            task_version=task.version,
+            metrics={
+                spec.name: MetricValue(
+                    value=0.0,
+                    count=0,
+                    higher_is_better=spec.higher_is_better,
+                )
+                for spec in task.metric_specs
+            },
+            primary_metric=task.metric_specs[0].name if task.metric_specs else None,
         )
-        if result.failure_counts:
-            logger.info(
-                "Task %s failure breakdown: %s", task_name, result.failure_counts
-            )
-        return result
-    except Exception as exc:
-        logger.error("Evaluation failed: %s", exc, exc_info=True)
-        raise
+        write_per_item_results(
+            result, context.cache_path, output_schema=context.output_schema
+        )
+        write_structured_summary(result, context.cache_path)
+    else:
+        result = evaluate_registered_task(context, registry)
+    for name, metric in result.metrics.items():
+        logger.info(
+            "Task %s metric %s=%.4f (n=%d, stderr=%s)",
+            task_name,
+            name,
+            metric.value,
+            metric.count,
+            f"{metric.stderr:.6f}" if metric.stderr is not None else "N/A",
+        )
+    logger.info(
+        "Task %s counts: samples=%d effective=%d failed=%d skipped=%d timeout=%d",
+        task_name,
+        result.sample_count,
+        result.effective_sample_count,
+        result.failed_count,
+        result.skipped_count,
+        result.timeout_count,
+    )
+    if result.failure_counts:
+        logger.info("Task %s failure breakdown: %s", task_name, result.failure_counts)
+    return result
 
 
 def main() -> int:
@@ -285,7 +282,13 @@ def main() -> int:
         # Log initialization with formatted argument display
         logger.info("Initializing evaluation with the following configuration:")
         logger.info("\n--- Parsed Arguments ---")
-        logger.info(json.dumps(dataclasses.asdict(args), indent=2))
+        logger.info(
+            json.dumps(
+                redact_config_for_logging(dataclasses.asdict(args)),
+                indent=2,
+                default=str,
+            )
+        )
 
         # Ensure the result output directory exists.
         output_dir = Path(args.cache_path).parent
@@ -319,7 +322,7 @@ def main() -> int:
             return 1
 
         # Run evaluation and retain the complete metric result.
-        result = evaluate_task_result(
+        evaluate_task_result(
             processed_data,
             args.task_name,
             args.label_key,
@@ -336,14 +339,11 @@ def main() -> int:
             input_key=args.input_key,
             output_schema=args.output_schema,
             expected_samples=args.expected_samples,
+            code_k_values=args.code_k_values_tuple,
         )
 
-        if result is not None:
-            logger.info("🎉 Evaluation completed successfully!")
-            return 0
-        else:
-            logger.error("❌ Evaluation failed to produce results")
-            return 1
+        logger.info("🎉 Evaluation completed successfully!")
+        return 0
 
     except Exception as e:
         logger.error(f"❌ Unexpected error: {e!s}", exc_info=True)

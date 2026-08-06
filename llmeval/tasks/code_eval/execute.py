@@ -35,6 +35,10 @@ from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from typing import Any
 
+from llmeval.utils.log import init_logger
+
+logger = init_logger("code_execute")
+
 __all__ = [
     "TimeoutException",
     "check_correctness",
@@ -119,24 +123,72 @@ _BLOCKED_MODULES: tuple[str, ...] = (
 _DISABLED_BUILTINS: tuple[str, ...] = ("exit", "quit", "open", "input")
 
 
+def _current_vsz_bytes() -> int | None:
+    """Best-effort current virtual memory size in bytes (Linux ``/proc``).
+
+    Returns ``None`` when the value cannot be determined (non-Linux
+    platforms, restricted ``/proc``).
+    """
+    try:
+        with open("/proc/self/stat", encoding="ascii") as f:
+            # Field 23 (vsize); everything after the closing paren of ``comm``
+            # starts at field 3, so vsize sits at index 20 of the remainder.
+            return int(f.read().rsplit(")", 1)[1].split()[20])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _current_fd_count() -> int | None:
+    """Best-effort count of currently open file descriptors.
+
+    Returns ``None`` when neither ``/proc/self/fd`` nor ``/dev/fd`` is
+    readable.
+    """
+    for fd_dir in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return len(os.listdir(fd_dir))
+        except OSError:
+            continue
+    return None
+
+
 def _apply_resource_limits(timeout: float) -> None:
-    """Apply best-effort Unix limits inside the disposable worker process."""
+    """Apply best-effort Unix limits inside the disposable worker process.
+
+    ``RLIMIT_AS`` and ``RLIMIT_NOFILE`` are *growth-relative*: with the
+    default ``fork`` start method the worker inherits the parent's whole
+    address space and fd table (heavy in production, where scoring workers
+    are forked from a process that has the inference stack loaded), so an
+    absolute budget calibrated for a fresh interpreter is already exceeded
+    at birth — every normal solution then dies with ``MemoryError`` /
+    ``EMFILE`` and pass@1 collapses to 0.  The configured budget is therefore
+    applied as headroom on top of the inherited baseline.  Under ``spawn``
+    the baseline is a fresh interpreter (~tens of MB / a handful of fds), so
+    behavior there is effectively unchanged.
+    """
     try:
         import resource
     except ImportError:  # pragma: no cover - unavailable on Windows
         return
 
+    fd_count = _current_fd_count()
+    nofile_limit = 64 if fd_count is None else max(64, fd_count + 16)
     limits = (
         (resource.RLIMIT_CPU, max(1, math.ceil(timeout) + 1)),
         (resource.RLIMIT_FSIZE, 1 * 1024 * 1024),
-        (resource.RLIMIT_NOFILE, 64),
+        (resource.RLIMIT_NOFILE, nofile_limit),
         (resource.RLIMIT_CORE, 0),
     )
     if hasattr(resource, "RLIMIT_NPROC"):
         limits = (*limits, (resource.RLIMIT_NPROC, 32))
     memory_mb = int(os.environ.get("LLMEVAL_MEMORY_LIMIT_MB", "2048"))
     if memory_mb > 0 and hasattr(resource, "RLIMIT_AS"):
-        limits = (*limits, (resource.RLIMIT_AS, memory_mb * 1024 * 1024))
+        headroom = memory_mb * 1024 * 1024
+        vsz = _current_vsz_bytes()
+        limits = (
+            *limits,
+            (resource.RLIMIT_AS, headroom if vsz is None else vsz + headroom),
+        )
     for resource_name, soft_limit in limits:
         try:
             _, hard_limit = resource.getrlimit(resource_name)
@@ -419,6 +471,49 @@ def _cleanup_tmp(path: str) -> None:
         os.unlink(path)
 
 
+#: Methods whose resolution has already been logged in this process.  The
+#: "effective mp method" line is emitted once per method per process so that
+#: per-sample ``check_correctness`` calls do not flood the log.
+_LOGGED_MP_METHODS: set[str] = set()
+
+
+def _resolve_mp_method() -> str:
+    """Resolve the multiprocessing start method for worker processes.
+
+    The default is ``"fork"`` whenever the platform supports it (see
+    :func:`check_correctness` for the rationale); platforms without ``fork``
+    fall back to ``"spawn"`` with a warning.  The environment variable
+    ``LLMEVAL_MP_METHOD`` explicitly overrides the default; a value not in
+    :func:`multiprocessing.get_all_start_methods` raises ``ValueError``
+    instead of silently falling back.
+    """
+    available = multiprocessing.get_all_start_methods()
+
+    override = os.environ.get("LLMEVAL_MP_METHOD")
+    if override:
+        if override not in available:
+            raise ValueError(
+                f"invalid LLMEVAL_MP_METHOD={override!r}; "
+                f"supported start methods on this platform: {available}"
+            )
+        method = override
+    elif "fork" in available:
+        method = "fork"
+    else:
+        method = "spawn"
+        logger.warning(
+            "fork start method not supported on this platform (%s); "
+            "falling back to spawn — per-sample interpreter startup will "
+            "consume part of the execution timeout budget",
+            available,
+        )
+
+    if method not in _LOGGED_MP_METHODS:
+        _LOGGED_MP_METHODS.add(method)
+        logger.info("code execution mp method: %s (supported: %s)", method, available)
+    return method
+
+
 def check_correctness(
     check_program: str,
     timeout: float,
@@ -442,9 +537,23 @@ def check_correctness(
     :func:`unsafe_execute` helper remains available for trusted internal tests,
     but production callers should use this function with an isolated runtime.
 
-    The multiprocessing start method is configurable via the environment
-    variable ``LLMEVAL_MP_METHOD`` (default ``"spawn"``). The spawn method
-    avoids forking a process that may already own worker threads.
+    The multiprocessing start method defaults to ``"fork"`` (when supported
+    by the platform, otherwise ``"spawn"``).  ``fork`` is the default because
+    scoring already runs inside Pebble ``ProcessPool`` workers and
+    ``check_correctness`` spawns one child **per sample** — with ``spawn``
+    each child re-bootstraps the interpreter and re-imports the module tree,
+    and that startup cost is charged against the outer pool-level timeout
+    budget, which caused scoring timeouts in practice.
+
+    .. warning::
+        Forking a multi-threaded process can deadlock if the child inherits
+        a lock held by another thread.  Scoring workers must therefore avoid
+        holding locks across ``check_correctness`` calls (the Pebble worker
+        and the child itself are single-threaded at fork time).  If a caller
+        ever runs this from a process with lock-holding threads, set
+        ``LLMEVAL_MP_METHOD=spawn`` to opt back into the safer (but slower)
+        start method.  An invalid ``LLMEVAL_MP_METHOD`` value raises
+        ``ValueError`` rather than silently falling back.
 
     Returns
     -------
@@ -455,11 +564,7 @@ def check_correctness(
         return _fail(task_id, "unsafe execution disabled")
 
     # -- resolve multiprocessing context ----------------------------------------
-    _mp_method = os.environ.get("LLMEVAL_MP_METHOD", "spawn")
-    try:
-        ctx = multiprocessing.get_context(_mp_method)
-    except ValueError:
-        ctx = multiprocessing.get_context()
+    ctx = multiprocessing.get_context(_resolve_mp_method())
 
     # -- create temporary result file -------------------------------------------
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="code_eval_")
@@ -480,11 +585,16 @@ def check_correctness(
     p.join(timeout + 5)
 
     # -- timeout -----------------------------------------------------------------
+    # The worker did not finish even after the inner signal-based timeout
+    # plus the startup margin — it is hung (deadlock, uninterruptible
+    # syscall), not merely running slow candidate code.  Keep this distinct
+    # from a candidate-level "timed out" (reported via the result file):
+    # only the latter counts as an incorrect model observation.
     if p.is_alive():
         p.kill()
         p.join(5)
         _cleanup_tmp(tmp_path)
-        return _fail(task_id, "timed out")
+        return _fail(task_id, "timed out: worker killed")
 
     # -- segmentation fault -----------------------------------------------------
     if p.exitcode == -signal.SIGSEGV:
