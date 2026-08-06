@@ -12,7 +12,7 @@ specified task type. Supported task families:
 Features:
     - JSONL input file processing
     - Flexible task-specific evaluation
-    - Caching support for efficiency
+    - Structured JSONL and summary output
     - Parallel processing capabilities
     - Robust error handling
 
@@ -83,11 +83,6 @@ def evaluate_task(
     allow_unsafe_code: bool = False,
     bootstrap_samples: int = 1000,
     confidence_level: float = 0.95,
-    content_cache_dir: str | Path | None = None,
-    force_recompute: bool = False,
-    read_only_cache: bool = False,
-    model_name: str | None = None,
-    model_revision: str | None = None,
     input_key: str = "prompt",
     output_schema: str = "compact",
     expected_samples: int = 0,
@@ -107,7 +102,7 @@ def evaluate_task(
         task_name: Identifier for the evaluation task (format: 'source/specific_task')
         label_key: Dictionary key for accessing ground truth answers
         response_key: Dictionary key for accessing model responses
-        cache_path: Path where evaluation results will be cached
+        cache_path: Legacy name for the evaluation result JSONL output path
         max_workers: Maximum number of parallel workers for processing
         timeout: Maximum time in seconds to wait for each evaluation (default: 20)
         exec_timeout: Per-item code execution timeout in seconds (code tasks only)
@@ -141,11 +136,6 @@ def evaluate_task(
             allow_unsafe_code=allow_unsafe_code,
             bootstrap_samples=bootstrap_samples,
             confidence_level=confidence_level,
-            content_cache_dir=content_cache_dir,
-            force_recompute=force_recompute,
-            read_only_cache=read_only_cache,
-            model_name=model_name,
-            model_revision=model_revision,
             input_key=input_key,
             output_schema=output_schema,
             expected_samples=expected_samples,
@@ -195,11 +185,6 @@ def evaluate_task_result(
     allow_unsafe_code: bool = False,
     bootstrap_samples: int = 1000,
     confidence_level: float = 0.95,
-    content_cache_dir: str | Path | None = None,
-    force_recompute: bool = False,
-    read_only_cache: bool = False,
-    model_name: str | None = None,
-    model_revision: str | None = None,
     input_key: str = "prompt",
     output_schema: str = "compact",
     expected_samples: int = 0,
@@ -221,11 +206,6 @@ def evaluate_task_result(
         allow_unsafe_code=allow_unsafe_code,
         bootstrap_samples=bootstrap_samples,
         confidence_level=confidence_level,
-        model_name=model_name,
-        model_revision=model_revision,
-        content_cache_dir=Path(content_cache_dir) if content_cache_dir else None,
-        force_recompute=force_recompute,
-        read_only_cache=read_only_cache,
         input_key=input_key,
         output_schema=output_schema,
         expected_samples=expected_samples,
@@ -273,7 +253,9 @@ def evaluate_task_result(
             result.timeout_count,
         )
         if result.failure_counts:
-            logger.info("Task %s failure breakdown: %s", task_name, result.failure_counts)
+            logger.info(
+                "Task %s failure breakdown: %s", task_name, result.failure_counts
+            )
         return result
     except Exception as exc:
         logger.error("Evaluation failed: %s", exc, exc_info=True)
@@ -286,7 +268,7 @@ def main() -> int:
 
     This function orchestrates the entire evaluation process:
     1. Parses command line arguments
-    2. Sets up logging and cache directory
+    2. Sets up logging and the result output directory
     3. Loads and validates input data
     4. Processes the data
     5. Runs the evaluation
@@ -305,9 +287,9 @@ def main() -> int:
         logger.info("\n--- Parsed Arguments ---")
         logger.info(json.dumps(dataclasses.asdict(args), indent=2))
 
-        # Ensure cache directory exists
-        cache_dir = Path(args.cache_path).parent
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure the result output directory exists.
+        output_dir = Path(args.cache_path).parent
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         # Load and validate input data
         try:
@@ -351,11 +333,6 @@ def main() -> int:
             args.allow_unsafe_code,
             args.bootstrap_samples,
             args.confidence_level,
-            args.content_cache_dir,
-            args.force_recompute,
-            args.read_only_cache,
-            args.model_name,
-            args.model_revision,
             input_key=args.input_key,
             output_schema=args.output_schema,
             expected_samples=args.expected_samples,

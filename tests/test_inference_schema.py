@@ -7,7 +7,6 @@ import pytest
 from llmeval.inference.schema import (
     ChoiceLoglikelihood,
     LoglikelihoodRequest,
-    LoglikelihoodResult,
 )
 
 
@@ -50,31 +49,3 @@ def test_choice_counts_original_text_and_validates_token_alignment() -> None:
                 token_logprobs=(invalid_logprob,),
                 token_texts=("A",),
             )
-
-
-def test_loglikelihood_cache_round_trip_is_strictly_aligned() -> None:
-    request = LoglikelihoodRequest("Q:", ("A", "答案"))
-    result = LoglikelihoodResult(
-        request=request,
-        choices=(
-            ChoiceLoglikelihood("A", "A", (-0.1,), ("A",), (1,)),
-            ChoiceLoglikelihood("答案", "答案", (-0.2,), ("答案",), None),
-        ),
-        exact=True,
-    )
-
-    restored = LoglikelihoodResult.from_cache_value(request, result.to_cache_value())
-
-    assert restored == result
-    with pytest.raises(ValueError, match="cannot be cached"):
-        LoglikelihoodResult.failure(request, "backend_error").to_cache_value()
-
-    invalid_cache_value = result.to_cache_value()
-    invalid_cache_value["exact"] = "true"
-    with pytest.raises(ValueError, match="must be exact"):
-        LoglikelihoodResult.from_cache_value(request, invalid_cache_value)
-
-    invalid_cache_value = result.to_cache_value()
-    invalid_cache_value["choices"][0]["token_logprobs"] = ["-0.1"]
-    with pytest.raises(ValueError, match="must be numeric"):
-        LoglikelihoodResult.from_cache_value(request, invalid_cache_value)

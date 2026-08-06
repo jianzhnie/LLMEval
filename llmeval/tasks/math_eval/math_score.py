@@ -472,11 +472,15 @@ def _math_record_status(
     """Classify a math record for the shared denominator contract.
 
     An unparseable model answer is a completed incorrect observation. Missing
-    input fields are skipped, while verifier/worker errors and timeouts are
-    excluded from the metric denominator.
+    or unparseable input fields are skipped (a dataset problem, not a model
+    failure), while verifier/worker errors and timeouts are excluded from the
+    metric denominator.
     """
     if extracted_answer == "Timeout":
         return "timeout"
+    if failure_stage == "input":
+        # Gold-truth parsing failed: the dataset row itself is unusable.
+        return "skipped"
     if failure_stage in {"inference", "extraction", "verification"}:
         return "failed"
     response = item.get(response_key)
@@ -511,7 +515,7 @@ def compute_scores(
     2. Optimizes worker count based on system resources and workload
     3. Processes jobs in parallel with timeout protection
     4. Tracks statistics (correct answers, timeouts, errors)
-    5. Saves detailed results to cache
+    5. Saves detailed results to JSONL
     6. Provides comprehensive logging and progress tracking
 
     Args:
@@ -530,11 +534,11 @@ def compute_scores(
 
     Raises:
         ValueError: On empty dataset or missing required data fields
-        IOError: When cache file cannot be written
+        IOError: When the result file cannot be written
         RuntimeError: On critical parallel processing failures
 
     Note:
-        Results are cached in JSONL format with additional metadata including:
+        Results are saved in JSONL format with additional metadata including:
         - Performance statistics (correct/timeout/error counts)
         - Processing parameters (workers, timeout)
         - Individual job results and extracted answers
@@ -671,7 +675,7 @@ def compute_scores(
     }
 
     logger.debug(f"Processing metadata: {metadata}")
-    # Save the results to the cache file
+    # Save the detailed result records.
     if persist_legacy:
         save_cache(eval_dataset, cache_path)
 
@@ -781,8 +785,6 @@ def _expand_math_samples(
         if not isinstance(responses, list):
             responses = [responses] if responses is not None else []
         raw_indices = item.get("sample_indices")
-        if raw_indices is None:
-            raw_indices = item.get("sample_indices")
         valid_indices = (
             isinstance(raw_indices, list)
             and len(raw_indices) == len(responses)
@@ -793,7 +795,6 @@ def _expand_math_samples(
             # Preserve a missing-generation record so it is counted as skipped.
             record = dict(item)
             record.pop("sample_indices", None)
-            record.pop("sample_indices", None)
             record[response_key] = []
             record["sample_index"] = 0
             record["_math_problem_index"] = row_index
@@ -801,7 +802,6 @@ def _expand_math_samples(
             continue
         for sample_index, response in zip(sample_indices, responses, strict=True):
             record = dict(item)
-            record.pop("sample_indices", None)
             record.pop("sample_indices", None)
             record[response_key] = [response]
             record["sample_index"] = sample_index
@@ -831,7 +831,9 @@ def _majority_cluster(items: list[dict[str, Any]]) -> tuple[str | None, bool]:
         if answer_text.startswith(("Error", "Format Error", "Timeout")):
             continue
         for position, (representative, members) in enumerate(clusters):
-            if answer_text == representative or _math_text_equiv(representative, answer_text):
+            if answer_text == representative or _math_text_equiv(
+                representative, answer_text
+            ):
                 clusters[position] = (representative, [*members, item])
                 break
         else:
@@ -841,7 +843,9 @@ def _majority_cluster(items: list[dict[str, Any]]) -> tuple[str | None, bool]:
     representative, members = max(
         enumerate(clusters), key=lambda entry: (len(entry[1][1]), -entry[0])
     )[1]
-    return representative, any(float(item.get("accuracy", 0.0)) == 1.0 for item in members)
+    return representative, any(
+        float(item.get("accuracy", 0.0)) == 1.0 for item in members
+    )
 
 
 def _build_problem_level_metrics(
@@ -889,12 +893,19 @@ def _build_problem_level_metrics(
         majority_prediction, majority_correct = _majority_cluster(completed)
         sample_count = len(items)
         item_expected = max(
-            [int(item["expected_samples"]) for item in items
-             if isinstance(item.get("expected_samples"), int)
-             and item["expected_samples"] > 0],
+            [
+                int(item["expected_samples"])
+                for item in items
+                if isinstance(item.get("expected_samples"), int)
+                and item["expected_samples"] > 0
+            ],
             default=0,
         )
-        target_count = expected_samples if expected_samples and expected_samples > 0 else item_expected
+        target_count = (
+            expected_samples
+            if expected_samples and expected_samples > 0
+            else item_expected
+        )
         target_count = target_count or sample_count
         problems.append(
             {
@@ -904,7 +915,9 @@ def _build_problem_level_metrics(
                 "observed_samples": sample_count,
                 "expected_samples": target_count,
                 "complete": sample_count >= target_count,
-                "correct_fraction": correct_samples / sample_count if sample_count else 0.0,
+                "correct_fraction": correct_samples / sample_count
+                if sample_count
+                else 0.0,
                 "passed": correct_samples > 0,
                 "majority_prediction": majority_prediction,
                 "majority_correct": majority_correct,
@@ -948,7 +961,7 @@ def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:
         cache_path: Output file path for JSONL data
 
     Raises:
-        IOError: If the cache file cannot be written
+        IOError: If the result file cannot be written
     """
     try:
         cache_dir = os.path.dirname(cache_path)
@@ -959,7 +972,7 @@ def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:
                 f.write(json.dumps(dataset, ensure_ascii=False) + "\n")
         logger.info(f"✅ Results saved to {cache_path}")
     except OSError as e:
-        logger.error(f"❌ Failed to save cache: {e}")
+        logger.error(f"❌ Failed to save results: {e}")
         raise
 
 
@@ -968,7 +981,7 @@ def save_summary(
     metadata: dict[str, Any],
     cache_path: str,
 ) -> None:
-    """Save aggregated math metrics next to the JSONL cache."""
+    """Save aggregated math metrics next to the JSONL result file."""
     summary_path = Path(cache_path).with_suffix(".summary.json")
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     with open(summary_path, "w", encoding="utf-8") as f:

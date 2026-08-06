@@ -429,9 +429,11 @@ def check_correctness(
 
     The **inner** guard is :func:`unsafe_execute` (signal-based timeout +
     reliability guard).  The **outer** guard is a process-level
-    ``join(timeout+1)`` followed by ``kill()`` — this catches cases where
+    ``join(timeout+5)`` followed by ``kill()`` — this catches cases where
     the signal-based timeout is blocked (e.g. inside an uninterruptible
-    syscall).
+    syscall).  The 5s margin (not 1s) leaves room for interpreter startup,
+    tempdir setup and result-file writes on loaded machines, so a worker
+    that already finished is not misreported as "timed out".
 
     IPC uses a temporary JSON file so no complex object pickling (queues,
     pipes, managers) is needed across the process boundary.
@@ -475,7 +477,7 @@ def check_correctness(
         _cleanup_tmp(tmp_path)
         return _fail(task_id, "failed: could not start worker process")
 
-    p.join(timeout + 1)
+    p.join(timeout + 5)
 
     # -- timeout -----------------------------------------------------------------
     if p.is_alive():

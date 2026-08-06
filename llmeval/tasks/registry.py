@@ -8,40 +8,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from llmeval.cache import ContentAddressedCache
 from llmeval.tasks.results import (
     EvaluationResult,
     MetricValue,
     ScorerResult,
     metric_from_samples,
 )
+from llmeval.utils.log import init_logger
+
+logger = init_logger("task_registry")
 
 StructuredScorer = Callable[..., ScorerResult]
-
-_EVALUATION_RUNTIME_FIELDS = {
-    "accuracy",
-    "evaluation_status",
-    "extracted_answer",
-    "extracted_gold",
-    "fallback_matched",
-    "filter_trace",
-    "filtered_gen",
-    "raw_gen",
-}
-
-
-def _evaluation_cache_inputs(
-    dataset: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Copy stable evaluator inputs without fields added by scoring."""
-    return [
-        {
-            key: value
-            for key, value in item.items()
-            if key not in _EVALUATION_RUNTIME_FIELDS
-        }
-        for item in dataset
-    ]
 
 
 @dataclass(frozen=True)
@@ -75,11 +52,6 @@ class EvaluationContext(PreparationContext):
     allow_unsafe_code: bool = False
     bootstrap_samples: int = 1000
     confidence_level: float = 0.95
-    model_name: str | None = None
-    model_revision: str | None = None
-    content_cache_dir: Path | None = None
-    force_recompute: bool = False
-    read_only_cache: bool = False
     input_key: str = "prompt"
     output_schema: str = "compact"
     expected_samples: int = 0
@@ -157,9 +129,7 @@ def write_structured_summary(result: EvaluationResult, cache_path: Path) -> None
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     payload = result.to_dict(include_per_item=True)
     payload["summary_version"] = 1
-    metric_values = {
-        name: metric.value for name, metric in result.metrics.items()
-    }
+    metric_values = {name: metric.value for name, metric in result.metrics.items()}
     payload["metric_values"] = metric_values
     for name, value in metric_values.items():
         payload.setdefault(name, value)
@@ -359,6 +329,14 @@ class TaskRegistry:
         self._tasks = dict(tasks or {})
 
     def register(self, task: EvaluationTask) -> None:
+        existing = self._tasks.get(task.family)
+        if existing is not None and existing is not task:
+            logger.warning(
+                "Task family %r re-registered: replacing %r with %r",
+                task.family,
+                type(existing).__name__,
+                type(task).__name__,
+            )
         self._tasks[task.family] = task
 
     def resolve(self, task_name: str) -> EvaluationTask:
@@ -395,62 +373,11 @@ def build_default_registry(
 def evaluate_registered_task(
     context: EvaluationContext, registry: TaskRegistry
 ) -> EvaluationResult:
-    """Evaluate through a registry and optionally use a content-addressed cache."""
+    """Evaluate through a registry and persist structured result files."""
     task = registry.resolve(context.task_name)
-    cache: ContentAddressedCache | None = None
-    cache_key: str | None = None
-    if context.content_cache_dir is not None:
-        cache = ContentAddressedCache(
-            context.content_cache_dir,
-            "evaluation",
-            read_only=context.read_only_cache,
-            force_recompute=context.force_recompute,
-        )
-        payload = {
-            "model_name": context.model_name,
-            "model_revision": context.model_revision,
-            "task_name": context.task_name,
-            "task_version": task.version,
-            "eval_dataset": _evaluation_cache_inputs(context.eval_dataset),
-            "postprocess_version": task.pipeline_version,
-            "generation_params": {
-                "label_key": context.label_key,
-                "response_key": context.response_key,
-                "mc_aggregation": context.mc_aggregation,
-                "seed": context.seed,
-            },
-            "evaluation": {
-                "max_workers": context.max_workers,
-                "timeout": context.timeout,
-                "exec_timeout": context.exec_timeout,
-                "allow_unsafe_code": context.allow_unsafe_code,
-                "pipeline_version": task.pipeline_version,
-                "bootstrap_samples": context.bootstrap_samples,
-                "confidence_level": context.confidence_level,
-                "expected_samples": context.expected_samples,
-            },
-        }
-        cache_key = cache.key(payload)
-        cached = cache.get(cache_key)
-        if cached is not None:
-            result = EvaluationResult.from_dict(cached)
-            if (
-                result.task_name == context.task_name
-                and result.task_version == task.version
-                and (result.per_item or result.sample_count == 0)
-            ):
-                write_per_item_results(
-                    result, context.cache_path, output_schema=context.output_schema
-                )
-                write_structured_summary(result, context.cache_path)
-                return result
-
     result = task.score(context)
-    result.cache_key = cache_key
     write_per_item_results(
         result, context.cache_path, output_schema=context.output_schema
     )
     write_structured_summary(result, context.cache_path)
-    if cache is not None and cache_key is not None:
-        cache.set(cache_key, result.to_dict(include_per_item=True))
     return result

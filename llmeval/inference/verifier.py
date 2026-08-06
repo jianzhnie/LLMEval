@@ -27,7 +27,6 @@ from transformers import AutoTokenizer, HfArgumentParser
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
-from llmeval.cache import ContentAddressedCache, build_cache, log_cache_stats
 from llmeval.inference.common import (
     load_jsonl,
     missing_sample_indices,
@@ -220,13 +219,6 @@ class VerifierOfflineInferenceRunner:
         self.llm: LLM | None = None
         self.tokenizer: AutoTokenizer | None = None
         self.sampling_params: SamplingParams | None = None
-        self.cache: ContentAddressedCache | None = build_cache(
-            getattr(args, "content_cache_dir", ""),
-            "inference",
-            force_recompute=getattr(args, "force_recompute", False),
-            read_only=getattr(args, "read_only_cache", False),
-            rank=getattr(args, "cache_rank", None),
-        )
         self.verifier_prompt: str | None = VERIFY_PROMPT_FACTORY.get(
             args.verifier_prompt_type
         )
@@ -424,8 +416,17 @@ class VerifierOfflineInferenceRunner:
         if llm_response is None:
             return None
 
-        # Validate required fields
-        if not prompt or not ground_truth or not llm_response:
+        # Validate required fields. Explicit None/empty-string checks (rather
+        # than truthiness) so a legitimate gold answer of 0/0.0/False or a
+        # numeric prompt is not silently dropped.
+        def _field_empty(value: Any) -> bool:
+            return value is None or (isinstance(value, str) and not value.strip())
+
+        if (
+            _field_empty(prompt)
+            or _field_empty(ground_truth)
+            or _field_empty(llm_response)
+        ):
             logger.warning(
                 f"Empty required field in item - question: {bool(prompt)}, "
                 f"ground_truth: {bool(ground_truth)}, llm_response: {bool(llm_response)}"
@@ -461,7 +462,11 @@ class VerifierOfflineInferenceRunner:
             Extracted response string or None if extraction fails.
         """
         if isinstance(llm_response_raw, list) and llm_response_raw:
-            return llm_response_raw[0]
+            first = llm_response_raw[0]
+            if isinstance(first, str):
+                return first
+            logger.warning(f"Invalid response element type: {type(first)}")
+            return None
         elif isinstance(llm_response_raw, str):
             return llm_response_raw
         elif llm_response_raw is None:
@@ -494,7 +499,7 @@ class VerifierOfflineInferenceRunner:
     def _write_response_results(
         self, original_items: list[dict[str, Any]], responses: list[str]
     ) -> None:
-        """Write generated or cached responses after current judgment extraction."""
+        """Write generated responses after current judgment extraction."""
         if len(original_items) != len(responses):
             raise ValueError("original_items and responses must have equal length")
         with self._file_lock:
@@ -516,32 +521,6 @@ class VerifierOfflineInferenceRunner:
             except Exception as e:
                 logger.error(f"Error writing batch results: {e}")
                 raise OSError(f"Failed to write batch results: {e}") from e
-
-    def _cache_key(self, item: dict[str, Any], rendered_prompt: str) -> str | None:
-        """Build a stable cache key for one final verifier model input."""
-        cache = getattr(self, "cache", None)
-        if cache is None:
-            return None
-        payload = {
-            "backend": "verifier_generate",
-            "model_name": self.args.model_name_or_path,
-            "model_revision": getattr(self.args, "model_revision", None),
-            "rendered_prompt": rendered_prompt,
-            "generation_params": {
-                "max_tokens": self.args.max_tokens,
-                "temperature": self.args.temperature,
-                "top_p": self.args.top_p,
-                "top_k": self.args.top_k,
-                "repetition_penalty": self.args.repetition_penalty,
-                "do_sample": getattr(self.args, "do_sample", True),
-                "skip_special_tokens": getattr(self.args, "skip_special_tokens", True),
-            },
-            "sampling_seed": sample_seed_for_item(self.args.seed, item),
-            "postprocess_version": f"verifier:{self.args.verifier_prompt_type}:v1",
-            "doc_id": item.get("doc_id"),
-            "sample_index": item.get("sample_index"),
-        }
-        return cache.key(payload)
 
     def _extract_model_response(self, output: RequestOutput) -> str:
         """Extract text response from vLLM output object.
@@ -655,7 +634,11 @@ class VerifierOfflineInferenceRunner:
                         logger.warning(f"Invalid JSON on line {line_num}: {e}")
                         continue
         except Exception as e:
-            logger.error(f"Error reading output file for resume check: {e}")
+            # A partially-read resume state would re-generate completed samples
+            # and append duplicate rows, so fail loudly instead of continuing.
+            raise OSError(
+                f"Failed to read resume state from {self.args.output_file}: {e}"
+            ) from e
 
         return completed_indices
 
@@ -698,13 +681,27 @@ class VerifierOfflineInferenceRunner:
 
         expanded_data: list[dict[str, Any]] = []
         skipped_items = 0
+        seen_resume_ids: set[str] = set()
         for item in raw_data:
             if not isinstance(item, dict):
                 skipped_items += 1
                 continue
             resume_id = self._resume_id(item)
+            if resume_id not in seen_resume_ids:
+                seen_resume_ids.add(resume_id)
+            else:
+                # Two distinct input rows share one resume identity (possible
+                # for legacy inputs without doc_id): completed samples of one
+                # row would mask the other, so surface it loudly.
+                logger.warning(
+                    "Duplicate resume id %r: rows sharing a resume identity may "
+                    "be skipped once either row completes",
+                    resume_id,
+                )
             used_indices = completed_indices.get(resume_id, set())
-            for sample_index in missing_sample_indices(self.args.n_samples, used_indices):
+            for sample_index in missing_sample_indices(
+                self.args.n_samples, used_indices
+            ):
                 expanded_item = copy.deepcopy(item)
                 expanded_item[_VERIFIER_RESUME_KEY] = resume_id
                 expanded_item["sample_index"] = sample_index
@@ -771,44 +768,12 @@ class VerifierOfflineInferenceRunner:
                 )
                 batch_messages.append(model_inputs)
 
-            cache = getattr(self, "cache", None)
-            responses: list[str] = [""] * len(valid_original_items)
-            missing_indices: list[int] = []
-            missing_messages: list[str] = []
-            cache_keys: dict[int, str] = {}
-            for index, (item, rendered_prompt) in enumerate(
-                zip(valid_original_items, batch_messages, strict=True)
-            ):
-                key = self._cache_key(item, rendered_prompt)
-                if cache is not None and key is not None:
-                    cache_keys[index] = key
-                    cached = cache.get(key)
-                    cached_response = cached.get("response") if cached else None
-                    if isinstance(cached_response, str) and cached_response.strip():
-                        responses[index] = cached_response
-                        continue
-                missing_indices.append(index)
-                missing_messages.append(rendered_prompt)
-
-            # Use vLLM only for uncached prompts. Empty responses are deliberately
-            # left out of the cache so a transient failure can be retried later.
-            if missing_messages:
-                logger.debug("Processing %d uncached prompts", len(missing_messages))
-                outputs: list[RequestOutput] = self.llm.generate(
-                    missing_messages,
-                    self._sampling_params_for_items(
-                        [valid_original_items[index] for index in missing_indices]
-                    ),
-                    use_tqdm=False,  # Avoid progress bar conflicts
-                )
-                for index, output in zip(missing_indices, outputs, strict=True):
-                    response = self._extract_model_response(output)
-                    responses[index] = response
-                    key = cache_keys.get(index)
-                    if cache is not None and key is not None and response.strip():
-                        cache.set(key, {"response": response})
-            else:
-                logger.debug("All prompts in batch were served from cache")
+            outputs: list[RequestOutput] = self.llm.generate(
+                batch_messages,
+                self._sampling_params_for_items(valid_original_items),
+                use_tqdm=False,  # Avoid progress bar conflicts
+            )
+            responses = [self._extract_model_response(output) for output in outputs]
 
             self._write_response_results(valid_original_items, responses)
             logger.debug(
@@ -880,7 +845,6 @@ class VerifierOfflineInferenceRunner:
 
             # Process data in batches
             self._process_batches(eval_dataset)
-            log_cache_stats(getattr(self, "cache", None), logger, "Verifier inference")
 
             logger.info(
                 f"✨ Final data processing completed. Results saved to {self.args.output_file}"

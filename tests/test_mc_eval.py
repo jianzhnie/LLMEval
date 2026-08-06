@@ -424,7 +424,6 @@ def _make_ll_client(max_retries: int = 0):
     client.max_retries = max_retries
     client.base_url = "http://test/v1"
     client.seed = 0
-    client.cache = None
     client.client = MagicMock()
     return client
 

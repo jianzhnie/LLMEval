@@ -20,8 +20,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from llmeval.cache import ContentAddressedCache
-
 
 # ── Mock heavy dependencies ──
 # Only stub modules that are genuinely absent — a bare ModuleType stub has
@@ -202,7 +200,6 @@ def _make_client(max_retries: int = 0):
     client.max_retries = max_retries
     client.tool_choice = "none"
     client.base_url = "http://example.test/v1"
-    client.model_revision = "revision-1"
     client.client = MagicMock()
     return client
 
@@ -264,16 +261,6 @@ class TestGetContent:
         client.client.chat.completions.create.return_value = _fake_completion([None])
         result = client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
         assert result == ""
-
-    def test_empty_content_is_not_cached(self, tmp_path: Path) -> None:
-        client = _make_client()
-        client.cache = ContentAddressedCache(tmp_path, "inference")
-        client.client.chat.completions.create.return_value = _fake_completion([None])
-
-        assert client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False) == ""
-        assert client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False) == ""
-        assert client.client.chat.completions.create.call_count == 2
-        assert client.cache.stats().writes == 0
 
     def test_context_length_returns_empty(self) -> None:
         client = _make_client()

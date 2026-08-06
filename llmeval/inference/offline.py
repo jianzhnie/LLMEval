@@ -26,7 +26,6 @@ from transformers import HfArgumentParser
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
-from llmeval.cache import ContentAddressedCache, build_cache, log_cache_stats
 from llmeval.inference.common import (
     expand_data_with_resume,
     load_jsonl,
@@ -71,13 +70,6 @@ class OfflineInferenceRunner:
         self._file_lock: threading.Lock = threading.Lock()
         self.llm: LLM | None = None
         self.sampling_params: SamplingParams | None = None
-        self.cache: ContentAddressedCache | None = build_cache(
-            getattr(args, "content_cache_dir", ""),
-            "inference",
-            force_recompute=getattr(args, "force_recompute", False),
-            read_only=getattr(args, "read_only_cache", False),
-            rank=getattr(args, "cache_rank", None),
-        )
         self.system_prompt: str | None = SYSTEM_PROMPT_FACTORY.get(
             args.system_prompt_type
         )
@@ -284,7 +276,7 @@ class OfflineInferenceRunner:
     def _write_response_results(
         self, original_items: Sequence[dict[str, Any]], responses: Sequence[str]
     ) -> None:
-        """Persist non-empty responses, whether generated or read from cache."""
+        """Persist non-empty generated responses."""
         if len(original_items) != len(responses):
             raise ValueError("original_items and responses must have equal length")
         with self._file_lock:
@@ -310,35 +302,6 @@ class OfflineInferenceRunner:
             except Exception as e:
                 logger.error(f"Error writing batch results: {e}")
                 raise OSError(f"Failed to write batch results: {e}") from e
-
-    def _cache_key(
-        self, item: dict[str, Any], messages: list[dict[str, str]]
-    ) -> str | None:
-        """Build a generation key from stable inputs and all output parameters."""
-        cache = getattr(self, "cache", None)
-        if cache is None:
-            return None
-        payload = {
-            "backend": "offline_chat",
-            "model_name": self.args.model_name_or_path,
-            "model_revision": getattr(self.args, "model_revision", None),
-            "messages": messages,
-            "generation_params": {
-                "max_tokens": self.args.max_tokens,
-                "temperature": self.args.temperature,
-                "top_p": self.args.top_p,
-                "top_k": self.args.top_k,
-                "repetition_penalty": self.args.repetition_penalty,
-                "do_sample": getattr(self.args, "do_sample", True),
-                "skip_special_tokens": getattr(self.args, "skip_special_tokens", True),
-                "enable_thinking": getattr(self.args, "enable_thinking", False),
-            },
-            "sampling_seed": sample_seed_for_item(self.args.seed, item),
-            "postprocess_version": "offline_chat_v1",
-            "doc_id": item.get("doc_id"),
-            "sample_index": item.get("sample_index"),
-        }
-        return cache.key(payload)
 
     def _extract_model_response(self, output: RequestOutput) -> str:
         """Extract text response from vLLM output object.
@@ -453,45 +416,16 @@ class OfflineInferenceRunner:
             )
             return
 
-        cache = getattr(self, "cache", None)
-        responses: list[str] = [""] * len(valid_items)
-        missing_indices: list[int] = []
-        missing_messages: list[list[dict[str, str]]] = []
-        cache_keys: dict[int, str] = {}
-        for index, (item, messages) in enumerate(
-            zip(valid_items, valid_messages, strict=True)
-        ):
-            key = self._cache_key(item, messages)
-            if cache is not None and key is not None:
-                cache_keys[index] = key
-                cached = cache.get(key)
-                cached_response = cached.get("response") if cached else None
-                if isinstance(cached_response, str) and cached_response.strip():
-                    responses[index] = cached_response
-                    continue
-            missing_indices.append(index)
-            missing_messages.append(messages)
-
         try:
-            if missing_messages:
-                logger.debug("Processing %d uncached prompts", len(missing_messages))
-                missing_items = [valid_items[index] for index in missing_indices]
-                outputs: list[RequestOutput] = self.llm.chat(
-                    missing_messages,
-                    self._sampling_params_for_items(missing_items),
-                    use_tqdm=False,
-                    chat_template_kwargs={
-                        "enable_thinking": getattr(self.args, "enable_thinking", False)
-                    },
-                )
-                for index, output in zip(missing_indices, outputs, strict=True):
-                    response = self._extract_model_response(output)
-                    responses[index] = response
-                    key = cache_keys.get(index)
-                    if cache is not None and key is not None and response.strip():
-                        cache.set(key, {"response": response})
-            else:
-                logger.debug("All prompts in batch were served from cache")
+            outputs: list[RequestOutput] = self.llm.chat(
+                valid_messages,
+                self._sampling_params_for_items(valid_items),
+                use_tqdm=False,
+                chat_template_kwargs={
+                    "enable_thinking": getattr(self.args, "enable_thinking", False)
+                },
+            )
+            responses = [self._extract_model_response(output) for output in outputs]
             self._write_response_results(valid_items, responses)
         except Exception as e:
             logger.error(f"❌ Error during vLLM processing for this batch: {e}")
@@ -571,7 +505,6 @@ class OfflineInferenceRunner:
 
             # Process data in batches
             self._process_batches(eval_dataset)
-            log_cache_stats(getattr(self, "cache", None), logger, "Offline inference")
 
             logger.info(
                 f"✨ Final data processing completed. Results saved to {self.args.output_file}"

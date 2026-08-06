@@ -302,7 +302,7 @@ class VLLMEngineArguments:
     )
     model_revision: str | None = field(
         default=None,
-        metadata={"help": "Optional model revision used for cache keys."},
+        metadata={"help": "Optional model revision to load."},
     )
     trust_remote_code: bool = field(
         default=True, metadata={"help": "Whether to trust remote code."}
@@ -350,22 +350,6 @@ class VLLMEngineArguments:
         metadata={"help": "Enforce eager execution for debugging purposes."},
     )
     seed: int = field(default=0, metadata={"help": "Random seed for initialization."})
-    content_cache_dir: str = field(
-        default="",
-        metadata={"help": "Optional content-addressed inference cache directory."},
-    )
-    force_recompute: bool = field(
-        default=False, metadata={"help": "Ignore existing inference cache entries."}
-    )
-    read_only_cache: bool = field(
-        default=False, metadata={"help": "Do not write inference cache entries."}
-    )
-    cache_rank: str | None = field(
-        default=None,
-        metadata={
-            "help": "Optional rank-specific cache namespace; defaults to RANK when set."
-        },
-    )
     device: str = field(
         default="cuda",
         metadata={"help": 'Device to use for inference (e.g., "cuda", "auto").'},
@@ -422,14 +406,30 @@ class VLLMEngineArguments:
             self.rope_scaling_dict = None
         else:
             try:
-                self.rope_scaling_dict = json.loads(text)
-                logger.info(
-                    f"Successfully parsed rope_scaling: {self.rope_scaling_dict}"
-                )
+                parsed = json.loads(text)
             except json.JSONDecodeError as e:
                 raise ValueError(
                     f"Invalid JSON string for rope_scaling: {self.rope_scaling}. Error: {e}"
                 ) from e
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    f"rope_scaling must be a JSON object, but got "
+                    f"{type(parsed).__name__}: {self.rope_scaling}"
+                )
+            self.rope_scaling_dict = parsed
+            logger.info(f"Successfully parsed rope_scaling: {self.rope_scaling_dict}")
+
+        # Validate optional engine limits
+        if self.max_num_batched_tokens is not None and self.max_num_batched_tokens < 1:
+            raise ValueError(
+                f"max_num_batched_tokens must be positive, but got {self.max_num_batched_tokens}."
+            )
+        if self.max_num_seqs is not None and self.max_num_seqs < 1:
+            raise ValueError(
+                f"max_num_seqs must be positive, but got {self.max_num_seqs}."
+            )
+        if self.seed < 0:
+            raise ValueError(f"seed must be non-negative, got: {self.seed}")
 
 
 @dataclass
@@ -528,24 +528,6 @@ class OnlineInferArguments(
     """
 
     seed: int = field(default=0, metadata={"help": "Generation seed sent to the API."})
-    model_revision: str | None = field(
-        default=None,
-        metadata={"help": "Optional served model revision used in cache keys."},
-    )
-    content_cache_dir: str = field(
-        default="",
-        metadata={"help": "Optional content-addressed inference cache directory."},
-    )
-    force_recompute: bool = field(
-        default=False, metadata={"help": "Ignore existing inference cache entries."}
-    )
-    read_only_cache: bool = field(
-        default=False, metadata={"help": "Do not write inference cache entries."}
-    )
-    cache_rank: str | None = field(
-        default=None,
-        metadata={"help": "Optional rank-specific cache namespace."},
-    )
 
     def __post_init__(self) -> None:
         """Validate all inherited arguments."""
@@ -674,7 +656,7 @@ class MCInferConfig:
         tool_choice (str): Tool calling mode: "none", "auto", or a tool name.
         n_shot (int): Few-shot example count (0 = zero-shot).
         few_shot_file (str): Dev file for few-shot examples
-            (falls back to input_file when empty).
+            (required when n_shot > 0; never falls back to the evaluation set).
         api_key (str): API key; defaults to the OPENAI_API_KEY env var.
 
     Raises:
@@ -694,10 +676,6 @@ class MCInferConfig:
     model_name: str = field(
         default="longcat-flash",
         metadata={"help": "Served model name used in requests."},
-    )
-    model_revision: str | None = field(
-        default=None,
-        metadata={"help": "Optional served model revision used in cache keys."},
     )
     mode: str = field(
         default="loglikelihood",
@@ -747,7 +725,13 @@ class MCInferConfig:
     )
     few_shot_file: str = field(
         default="",
-        metadata={"help": "Dev file for few-shot examples (falls back to input_file)."},
+        metadata={
+            "help": (
+                "Dev file for few-shot examples. Required when n_shot > 0: "
+                "few-shot examples are never sampled from the evaluation set, "
+                "to avoid leakage."
+            )
+        },
     )
     api_key: str = field(
         default_factory=lambda: os.environ.get("OPENAI_API_KEY", "EMPTY"),
@@ -771,20 +755,6 @@ class MCInferConfig:
     seed: int = field(
         default=0, metadata={"help": "Generation and few-shot sampling seed."}
     )
-    content_cache_dir: str = field(
-        default="",
-        metadata={"help": "Optional content-addressed inference cache directory."},
-    )
-    force_recompute: bool = field(
-        default=False, metadata={"help": "Ignore existing inference cache entries."}
-    )
-    read_only_cache: bool = field(
-        default=False, metadata={"help": "Do not write inference cache entries."}
-    )
-    cache_rank: str | None = field(
-        default=None,
-        metadata={"help": "Optional rank-specific cache namespace."},
-    )
 
     def __post_init__(self) -> None:
         """
@@ -803,6 +773,10 @@ class MCInferConfig:
             )
         if not self.base_url.strip():
             raise ValueError("base_url cannot be empty")
+        if not self.base_url.startswith(("http://", "https://")):
+            raise ValueError(
+                f"Base URL must start with http:// or https://, but got {self.base_url}"
+            )
         if not self.model_name.strip():
             raise ValueError("model_name cannot be empty")
         if self.max_workers <= 0:
@@ -854,7 +828,7 @@ class EvalTaskArguments:
         input_key (str): Key for input text in dataset.
         label_key (str): Key for target/label text in dataset.
         response_key (str): Key for model generated text.
-        cache_path (str): JSONL file path for saving cached results. Existing
+        cache_path (str): Legacy name for the evaluation result JSONL path. Existing
             directory paths are resolved to a task-specific JSONL file.
         max_workers (int): Maximum number of worker threads for parallel processing.
 
@@ -921,28 +895,12 @@ class EvalTaskArguments:
     seed: int = field(
         default=0, metadata={"help": "Random seed for bootstrap uncertainty."}
     )
-    content_cache_dir: str = field(
-        default="",
-        metadata={"help": "Optional content-addressed evaluation cache directory."},
-    )
-    force_recompute: bool = field(
-        default=False, metadata={"help": "Ignore existing evaluation cache entries."}
-    )
-    read_only_cache: bool = field(
-        default=False, metadata={"help": "Do not write evaluation cache entries."}
-    )
     bootstrap_samples: int = field(
         default=1000,
         metadata={"help": "Number of bootstrap resamples for uncertainty."},
     )
     confidence_level: float = field(
         default=0.95, metadata={"help": "Bootstrap confidence level."}
-    )
-    model_name: str = field(
-        default="", metadata={"help": "Optional model identifier for cache keys."}
-    )
-    model_revision: str = field(
-        default="", metadata={"help": "Optional model revision for cache keys."}
     )
 
     def __post_init__(self) -> None:

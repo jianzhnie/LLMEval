@@ -123,7 +123,11 @@ def strip_reasoning_wrappers(text: str) -> str:
 
     answer_match = _ANSWER_TAG_RE.search(text)
     if answer_match:
-        return answer_match.group(1).strip()
+        extracted = answer_match.group(1).strip()
+        if extracted:
+            return extracted
+        # Empty <answer></answer> tags carry no signal — fall through to the
+        # think/raw-text fallbacks so a real answer outside the tag is kept.
 
     think_match = _THINK_END_RE.search(text)
     if think_match:

@@ -24,7 +24,6 @@ import openai
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
-from llmeval.cache import build_cache, log_cache_stats
 from llmeval.inference.common import (
     expand_group_for_sampling,
     is_explicit_tool_choice,
@@ -74,11 +73,6 @@ class InferenceClient:
         tool_choice: str = "none",
         api_key: str | None = None,
         seed: int = 0,
-        content_cache_dir: str = "",
-        force_recompute: bool = False,
-        read_only_cache: bool = False,
-        model_revision: str | None = None,
-        cache_rank: str | None = None,
         organization: str | None = None,
     ) -> None:
         """Initialize the inference client with API configuration and validation.
@@ -102,14 +96,6 @@ class InferenceClient:
         self.max_retries: int = max_retries
         self.tool_choice: str = tool_choice
         self.seed = seed
-        self.model_revision = model_revision
-        self.cache = build_cache(
-            content_cache_dir,
-            "inference",
-            force_recompute=force_recompute,
-            read_only=read_only_cache,
-            rank=cache_rank,
-        )
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
         # Token usage counters, accumulated under _usage_lock in
@@ -229,28 +215,12 @@ class InferenceClient:
             top_k,
             enable_thinking,
         )
-        cache = getattr(self, "cache", None)
-        cache_key = (
-            cache.key(self._cache_payload(call_args, "online_chat"))
-            if cache is not None
-            else None
-        )
-        if cache is not None and cache_key is not None:
-            cached = cache.get(cache_key)
-            if cached is not None and isinstance(cached.get("content"), str):
-                return cached["content"]
         completion = self._request_with_retry(call_args)
         if completion is None:
             return ""  # context length exceeded (logged in _request_with_retry)
         # Reasoning models may return content=None (thinking exhausted
         # max_tokens); normalize to "" so callers can treat it uniformly
-        content = completion.choices[0].message.content or ""
-        if cache is not None and cache_key is not None and content.strip():
-            try:
-                cache.set(cache_key, {"content": content})
-            except Exception as exc:  # best-effort: never fail a finished request
-                logger.warning("Cache write failed, continuing without cache: %s", exc)
-        return content
+        return completion.choices[0].message.content or ""
 
     def get_contents(
         self,
@@ -303,31 +273,10 @@ class InferenceClient:
             enable_thinking,
             n=n,
         )
-        cache = getattr(self, "cache", None)
-        cache_key = (
-            cache.key(self._cache_payload(call_args, "online_chat_multi"))
-            if cache is not None
-            else None
-        )
-        if cache is not None and cache_key is not None:
-            cached = cache.get(cache_key)
-            if cached is not None and isinstance(cached.get("contents"), list):
-                return [str(content) for content in cached["contents"]]
         completion = self._request_with_retry(call_args)
         if completion is None:
             return []  # context length exceeded (logged in _request_with_retry)
-        contents = [choice.message.content or "" for choice in completion.choices]
-        if (
-            cache is not None
-            and cache_key is not None
-            and contents
-            and all(content.strip() for content in contents)
-        ):
-            try:
-                cache.set(cache_key, {"contents": contents})
-            except Exception as exc:  # best-effort: never fail a finished request
-                logger.warning("Cache write failed, continuing without cache: %s", exc)
-        return contents
+        return [choice.message.content or "" for choice in completion.choices]
 
     def _build_call_args(
         self,
@@ -386,23 +335,6 @@ class InferenceClient:
         if is_explicit_tool_choice(self.tool_choice):
             call_args["tool_choice"] = self.tool_choice
         return call_args
-
-    def _cache_payload(self, call_args: dict[str, Any], kind: str) -> dict[str, Any]:
-        """Describe all content-affecting inputs for an online request."""
-        return {
-            "backend": kind,
-            "endpoint": self.base_url,
-            "model_name": call_args.get("model"),
-            "model_revision": getattr(self, "model_revision", None),
-            "messages": call_args.get("messages", []),
-            "generation_params": {
-                key: value
-                for key, value in call_args.items()
-                if key not in {"model", "messages", "timeout"}
-            },
-            "sampling_seed": call_args.get("seed"),
-            "postprocess_version": "online_chat_v1",
-        }
 
     def _request_with_retry(self, call_args: dict[str, Any]) -> Any | None:
         """Execute a chat.completions call under the shared retry policy.
@@ -511,11 +443,6 @@ class InferenceRunner:
                 tool_choice=args.tool_choice,
                 api_key=args.api_key,
                 seed=args.seed,
-                content_cache_dir=args.content_cache_dir,
-                force_recompute=args.force_recompute,
-                read_only_cache=args.read_only_cache,
-                model_revision=getattr(args, "model_revision", None),
-                cache_rank=getattr(args, "cache_rank", None),
                 organization=args.organization,
             )
         except (OSError, ValueError) as e:
@@ -749,6 +676,12 @@ class InferenceRunner:
         # Step 1: Input Validation (all copies share the same prompt)
         query = self._extract_query(sample_items[0])
         if not query:
+            # _extract_query counted one skipped sample; the whole group is
+            # skipped, so account for the remaining copies too.
+            remaining = len(sample_items) - 1
+            if remaining > 0:
+                with self._stats_lock:
+                    self._stats["skipped"] += remaining
             return
 
         # Step 2: ONE batched API request for all copies
@@ -944,7 +877,6 @@ class InferenceRunner:
             logger.info(f"Success rate: {success_rate:.2f}%")
             logger.info(f"Total duration: {duration:.2f} seconds")
             logger.info(f"Output file: {self.args.output_file}")
-            log_cache_stats(self.client.cache, logger, "Online inference")
             logger.info("✅ Inference pipeline completed successfully\n")
 
         except Exception as e:

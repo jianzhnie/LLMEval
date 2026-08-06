@@ -46,20 +46,6 @@ class MetricValue:
             "higher_is_better": self.higher_is_better,
         }
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> MetricValue:
-        """Deserialize a metric and tolerate older cache fields."""
-        return cls(
-            value=float(data.get("value", 0.0)),
-            count=int(data.get("count", 0)),
-            stderr=(float(data["stderr"]) if data.get("stderr") is not None else None),
-            ci_low=(float(data["ci_low"]) if data.get("ci_low") is not None else None),
-            ci_high=(
-                float(data["ci_high"]) if data.get("ci_high") is not None else None
-            ),
-            higher_is_better=bool(data.get("higher_is_better", True)),
-        )
-
 
 @dataclass
 class EvaluationResult:
@@ -76,7 +62,6 @@ class EvaluationResult:
     failure_counts: dict[str, int] = field(default_factory=dict)
     per_item: list[dict[str, Any]] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
-    cache_key: str | None = None
     primary_metric: str | None = None
 
     @property
@@ -104,51 +89,11 @@ class EvaluationResult:
             "timeout_count": self.timeout_count,
             "failure_counts": dict(self.failure_counts),
             "details": self.details,
-            "cache_key": self.cache_key,
             "primary_metric": self.primary_metric,
         }
         if include_per_item:
             payload["per_item"] = self.per_item
         return payload
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> EvaluationResult:
-        """Deserialize a cached result and reject malformed metric payloads."""
-        raw_metrics = data.get("metrics", {})
-        if not isinstance(raw_metrics, dict):
-            raise ValueError("Evaluation result metrics must be an object")
-        metrics = {
-            str(name): MetricValue.from_dict(value)
-            for name, value in raw_metrics.items()
-            if isinstance(value, dict)
-        }
-        if not metrics and raw_metrics:
-            raise ValueError("Evaluation result contains no valid metrics")
-        return cls(
-            task_name=str(data.get("task_name", "")),
-            task_version=str(data.get("task_version", "")),
-            metrics=metrics,
-            sample_count=int(data.get("sample_count", 0)),
-            effective_sample_count=int(data.get("effective_sample_count", 0)),
-            failed_count=int(data.get("failed_count", 0)),
-            skipped_count=int(data.get("skipped_count", 0)),
-            timeout_count=int(data.get("timeout_count", 0)),
-            failure_counts={
-                str(name): int(value)
-                for name, value in (data.get("failure_counts") or {}).items()
-                if isinstance(value, int | float) and int(value) >= 0
-            },
-            per_item=(
-                [dict(item) for item in data["per_item"] if isinstance(item, dict)]
-                if isinstance(data.get("per_item"), list)
-                else []
-            ),
-            details=(dict(data["details"]) if isinstance(data.get("details"), dict) else {}),
-            cache_key=(str(data["cache_key"]) if data.get("cache_key") else None),
-            primary_metric=(
-                str(data["primary_metric"]) if data.get("primary_metric") else None
-            ),
-        )
 
 
 @dataclass

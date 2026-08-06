@@ -118,7 +118,7 @@ class MCScoreResult:
     correct_bytes:
         Number of items answered correctly under *acc_bytes*.
     per_item:
-        Per-item scoring records (written to the JSONL cache file).
+        Per-item scoring records written to the JSONL result file.
     """
 
     acc: float = 0.0
@@ -153,7 +153,7 @@ def score_loglikelihood_result(
         MC inference loglikelihood mode). Newer inference outputs also include
         ``choice_tokens`` to record the actual answer tokens scored.
     cache_path:
-        Path for the per-item JSONL cache.  A ``<stem>.summary.json`` metrics
+        Path for the per-item JSONL result file. A ``<stem>.summary.json`` metrics
         file is written alongside it.
     max_workers:
         Maximum process-pool workers (capped by dataset size and CPU count).
@@ -255,8 +255,6 @@ def merge_generate_records(
             generations = []
 
         raw_indices = item.get("sample_indices")
-        if raw_indices is None:
-            raw_indices = item.get("sample_indices")
         if (
             isinstance(raw_indices, list)
             and len(raw_indices) == len(generations)
@@ -320,7 +318,7 @@ def score_generate_result(
     response_key:
         Name of the generation-list field (e.g. ``"gen"``).
     cache_path:
-        Path for the per-item JSONL cache.  A ``<stem>.summary.json`` metrics
+        Path for the per-item JSONL result file. A ``<stem>.summary.json`` metrics
         file is written alongside it.
     max_workers:
         Maximum process-pool workers (capped by dataset size and CPU count).
@@ -870,7 +868,8 @@ def extract_answer(text: str) -> str:
 
     # 2. Last standalone A-J letter in the text (excluding "I"/"a" stopwords).
     matches = [
-        letter for letter in _LAST_LETTER_RE.findall(text)
+        letter
+        for letter in _LAST_LETTER_RE.findall(text)
         if letter not in _FALLBACK_STOPWORDS
     ]
     if matches:
@@ -886,15 +885,14 @@ MC_GENERATION_PIPELINE = MC_FILTER_REGISTRY.build_pipeline(
 
 
 # ===========================================================================
-# Cache persistence
+# Result persistence
 # ===========================================================================
 
 
 def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
     """Persist per-item records (JSONL) and an aggregated metrics summary (JSON).
 
-    The summary is written to ``<cache_path>.summary.json`` alongside the
-    JSONL file.
+    The summary is written next to the JSONL result file.
     """
     cache_path = Path(cache_path)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -907,31 +905,26 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
     # Aggregated metrics summary (JSON).
     summary_path = cache_path.with_suffix(".summary.json")
     question_total = len(result.per_item)
-    # Match the weight() convention below: per-sample records default to 0
-    # samples, all other records count as one sample each.
-    sample_total = sum(
-        max(int(record.get("sample_total", 1)), 1) for record in result.per_item
-    )
+    def sample_count(record: dict[str, Any]) -> int:
+        """Count generations when available, otherwise one scored observation."""
+        if "sample_total" in record:
+            return max(int(record["sample_total"]), 0)
+        return 1
 
-    def weight(record: dict[str, Any]) -> int:
-        return (
-            max(int(record.get("sample_total", 0)), 0)
-            if record.get("aggregation") == "per_sample"
-            else 1
-        )
+    sample_total = sum(sample_count(record) for record in result.per_item)
 
     failed_count = sum(
-        weight(record)
+        sample_count(record)
         for record in result.per_item
         if record.get("evaluation_status") == "failed"
     )
     skipped_count = sum(
-        weight(record)
+        sample_count(record)
         for record in result.per_item
         if record.get("evaluation_status") == "skipped"
     )
     timeout_count = sum(
-        weight(record)
+        sample_count(record)
         for record in result.per_item
         if record.get("evaluation_status") == "timeout"
     )

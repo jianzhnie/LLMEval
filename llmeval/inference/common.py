@@ -244,7 +244,9 @@ def load_resume_state(
                         next_index += 1
                 completed.update(indices)
     except OSError as exc:
-        logger.error("Error reading resume state from %s: %s", output_file, exc)
+        # Continuing with a partially-read state would re-generate completed
+        # samples and append duplicate rows — fail loudly instead.
+        raise OSError(f"Failed to read resume state from {output_file}: {exc}") from exc
     return state
 
 
@@ -427,7 +429,9 @@ def expand_group_for_sampling(
         if not (
             isinstance(requested_indices, list)
             and len(requested_indices) == sample_count
-            and all(isinstance(index, int) and index >= 0 for index in requested_indices)
+            and all(
+                isinstance(index, int) and index >= 0 for index in requested_indices
+            )
         ):
             sample_start = int(item.get("_llmeval_sample_start", 0))
             requested_indices = list(range(sample_start, sample_start + sample_count))

@@ -33,7 +33,6 @@ import openai
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
-from llmeval.cache import ContentAddressedCache, build_cache, log_cache_stats
 from llmeval.inference.common import (
     is_explicit_tool_choice,
     is_local_endpoint,
@@ -135,7 +134,9 @@ class FewShotFormatter:
             index
             for index, item in enumerate(self._few_shot_pool)
             if item.get("prompt", "") != test_prompt
-            and (not document_id or str(item.get("doc_id", "")) != document_id)
+            and (
+                not str(document_id) or str(item.get("doc_id", "")) != str(document_id)
+            )
         ]
         if len(candidates) < self.n_shot:
             if identity not in self._warned_insufficient:
@@ -185,11 +186,6 @@ class MCLoglikelihoodClient:
         max_retries: int = 3,
         api_key: str = "",
         seed: int = 0,
-        content_cache_dir: str = "",
-        force_recompute: bool = False,
-        read_only_cache: bool = False,
-        model_revision: str | None = None,
-        cache_rank: str | None = None,
         organization: str | None = None,
     ) -> None:
         """Initialize the client with API configuration.
@@ -206,26 +202,21 @@ class MCLoglikelihoodClient:
         self.timeout: int = timeout
         self.max_retries: int = max_retries
         self.seed = seed
-        self.model_revision = model_revision
-        self.cache = build_cache(
-            content_cache_dir,
-            "inference",
-            force_recompute=force_recompute,
-            read_only=read_only_cache,
-            rank=cache_rank,
-        )
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
         if self.api_key == "EMPTY":
             log = logger.debug if is_local_endpoint(base_url) else logger.warning
             log("Using default 'EMPTY' API key.")
 
-        # Initialize OpenAI client with validated configuration
+        # Initialize OpenAI client with validated configuration.
+        # max_retries=0: retries are handled by call_with_retry; letting the
+        # SDK retry internally would multiply attempts invisibly.
         self.client: openai.OpenAI = openai.OpenAI(
             api_key=self.api_key,
             base_url=base_url,
             timeout=httpx.Timeout(self.timeout),
             organization=organization,
+            max_retries=0,
         )
         logger.info(
             f"Using API Key: ***, Timeout: {self.timeout}, "
@@ -253,30 +244,6 @@ class MCLoglikelihoodClient:
             among the top predictions get float("-inf"). All -inf when the
             request fails after all retries.
         """
-
-        payload = {
-            "kind": "mc_first_token_logprobs",
-            "backend": "online_completions",
-            "base_url": getattr(self.client, "base_url", None),
-            "model_name": self.model_name,
-            "model_revision": getattr(self, "model_revision", None),
-            "prompt": prompt,
-            "choices": choice_texts,
-            "generation_params": {
-                "max_tokens": 1,
-                "temperature": 0,
-                "logprobs": 20,
-                "echo": False,
-            },
-            "sampling_seed": getattr(self, "seed", 0),
-            "postprocess_version": "mc_first_token_v1",
-        }
-        cache = getattr(self, "cache", None)
-        key = cache.key(payload) if cache is not None else None
-        if cache is not None and key is not None:
-            cached = cache.get(key)
-            if cached is not None and isinstance(cached.get("scores"), list):
-                return [float(score) for score in cached["scores"]]
 
         def do_request() -> list[float]:
             resp = self.client.completions.create(
@@ -320,37 +287,10 @@ class MCLoglikelihoodClient:
             # Request failed (4xx / exhausted retries / context length): the
             # all-"-inf" result marks the item failed downstream, never scored.
             return [float("-inf")] * len(choice_texts)
-        if cache is not None and key is not None:
-            cache.set(key, {"scores": choice_logprobs})
         return choice_logprobs
 
     def score_continuations(self, request: LoglikelihoodRequest) -> LoglikelihoodResult:
         """Score complete continuations and return a validated typed result."""
-        payload = {
-            "kind": "mc_continuation_logprobs_v2",
-            "backend": "online_completions",
-            "base_url": self.base_url,
-            "model_name": self.model_name,
-            "model_revision": getattr(self, "model_revision", None),
-            "request": request.cache_identity(),
-            "generation_params": {
-                "max_tokens": 1,
-                "temperature": 0,
-                "logprobs": 20,
-                "echo": True,
-            },
-            "sampling_seed": getattr(self, "seed", 0),
-            "postprocess_version": "mc_continuation_v2",
-        }
-        cache = getattr(self, "cache", None)
-        key = cache.key(payload) if cache is not None else None
-        if cache is not None and key is not None:
-            cached = cache.get(key)
-            if cached is not None:
-                try:
-                    return LoglikelihoodResult.from_cache_value(request, cached)
-                except (TypeError, ValueError) as exc:
-                    logger.warning("Ignoring invalid continuation cache entry: %s", exc)
 
         def do_request() -> LoglikelihoodResult:
             prompts = [
@@ -493,8 +433,6 @@ class MCLoglikelihoodClient:
             return LoglikelihoodResult.failure(request, str(exc))
         if result is None:
             return LoglikelihoodResult.failure(request, "context_length_exceeded")
-        if cache is not None and key is not None:
-            cache.set(key, result.to_cache_value())
         return result
 
     def get_choices_continuation_logprobs(
@@ -541,7 +479,6 @@ class MCRunner:
         # Initialize client with error handling (loglikelihood mode only;
         # generate mode builds a plain OpenAI client per run)
         self.client: MCLoglikelihoodClient | None = None
-        self.cache: ContentAddressedCache | None = None
         if config.mode == "loglikelihood":
             try:
                 self.client = MCLoglikelihoodClient(
@@ -551,23 +488,10 @@ class MCRunner:
                     max_retries=config.max_retries,
                     api_key=config.api_key,
                     seed=config.seed,
-                    content_cache_dir=config.content_cache_dir,
-                    force_recompute=config.force_recompute,
-                    read_only_cache=config.read_only_cache,
-                    model_revision=config.model_revision,
-                    cache_rank=config.cache_rank,
                     organization=config.organization,
                 )
             except (OSError, ValueError) as e:
                 raise RuntimeError(f"Failed to initialize MC client: {e}") from e
-        elif config.content_cache_dir:
-            self.cache = build_cache(
-                config.content_cache_dir,
-                "inference",
-                force_recompute=config.force_recompute,
-                read_only=config.read_only_cache,
-                rank=config.cache_rank,
-            )
 
         # Set up system prompt with validation (generate mode)
         self.system_prompt: str | None = None
@@ -651,7 +575,9 @@ class MCRunner:
             used_indices = completed_indices.get(identity, set())
             completed = sum(index < target_samples for index in used_indices)
             if completed == 0:
-                completed = min(max(legacy_counts.get(rendered_prompt, 0), 0), target_samples)
+                completed = min(
+                    max(legacy_counts.get(rendered_prompt, 0), 0), target_samples
+                )
             is_completed = completed >= target_samples
             if not is_completed:
                 if self.config.mode == "generate":
@@ -685,14 +611,14 @@ class MCRunner:
         Used both for resume filtering and inference so the two always agree,
         even when n_shot > 0 changes the prompt that gets written to output.
         """
+        raw_prompt = item.get(self.config.input_key) or item.get("prompt") or ""
+        prompt = raw_prompt if isinstance(raw_prompt, str) else str(raw_prompt)
         fs_prefix = (
-            self._few_shot_fmt.get_prefix(
-                item.get(self.config.input_key, ""), str(item.get("doc_id", ""))
-            )
+            self._few_shot_fmt.get_prefix(prompt, str(item.get("doc_id", "")))
             if self._few_shot_fmt
             else ""
         )
-        return fs_prefix + item.get(self.config.input_key, "")
+        return fs_prefix + prompt
 
     # ------------------------------------------------------------------
     # Concurrent processing
@@ -941,10 +867,11 @@ class MCRunner:
             total_samples,
         )
         gen_client: openai.OpenAI = openai.OpenAI(
-            api_key=self.config.api_key,
+            api_key=self.config.api_key or os.environ.get("OPENAI_API_KEY", "EMPTY"),
             base_url=self.config.base_url,
             timeout=httpx.Timeout(self.config.request_timeout),
             organization=self.config.organization,
+            max_retries=0,  # retries are handled by call_with_retry
         )
 
         base_messages: list[dict[str, str]] = []
@@ -1004,38 +931,6 @@ class MCRunner:
         if is_explicit_tool_choice(self.config.tool_choice):
             call_args["tool_choice"] = self.config.tool_choice
 
-        cache = getattr(self, "cache", None)
-        cache_payload = {
-            "kind": "mc_generate",
-            "backend": "online_chat",
-            "base_url": self.config.base_url,
-            "model_name": self.config.model_name,
-            "model_revision": self.config.model_revision,
-            "messages": messages,
-            "generation_params": call_args,
-            "sampling_seed": self.config.seed,
-            "postprocess_version": "mc_generate_v1",
-        }
-        cache_key = cache.key(cache_payload) if cache is not None else None
-        if cache is not None and cache_key is not None:
-            cached = cache.get(cache_key)
-            if cached is not None and isinstance(cached.get("generations"), list):
-                generations = [str(value) for value in cached["generations"]]
-                cached_positions = cached.get("response_positions")
-                generation_positions = (
-                    [int(value) for value in cached_positions]
-                    if isinstance(cached_positions, list)
-                    and len(cached_positions) == len(generations)
-                    and all(isinstance(value, int) for value in cached_positions)
-                    else list(range(len(generations)))
-                )
-            else:
-                generations = []
-                generation_positions = []
-        else:
-            generations = []
-            generation_positions = []
-
         def do_request() -> tuple[list[str], list[int]]:
             resp = client.chat.completions.create(**call_args)
             # Reasoning models may return content=None (thinking exhausted
@@ -1062,21 +957,14 @@ class MCRunner:
                     used_positions.add(position)
             return response_generations, response_positions
 
-        if not generations:
-            try:
-                response_data = call_with_retry(do_request, self.config.max_retries)
-                if response_data is not None:
-                    generations, generation_positions = response_data
-                if generations and cache is not None and cache_key is not None:
-                    cache.set(
-                        cache_key,
-                        {
-                            "generations": generations,
-                            "response_positions": generation_positions,
-                        },
-                    )
-            except ClientError as e:
-                raise RuntimeError(f"Generate produced no usable text: {e}") from e
+        generations: list[str] = []
+        generation_positions: list[int] = []
+        try:
+            response_data = call_with_retry(do_request, self.config.max_retries)
+            if response_data is not None:
+                generations, generation_positions = response_data
+        except ClientError as e:
+            raise RuntimeError(f"Generate produced no usable text: {e}") from e
         if not generations:
             # Context-length rejection (None) or null/empty content ("")
             raise RuntimeError("Generate produced no usable text (empty response)")
@@ -1129,10 +1017,6 @@ class MCRunner:
         # Quick accuracy summary for loglikelihood mode
         if self.config.mode == "loglikelihood":
             self.print_loglikelihood_summary()
-        cache = getattr(self, "cache", None)
-        if cache is None and self.client is not None:
-            cache = getattr(self.client, "cache", None)
-        log_cache_stats(cache, logger, "MC inference")
 
     def print_loglikelihood_summary(self) -> None:
         """Print quick accuracy from in-memory stats."""

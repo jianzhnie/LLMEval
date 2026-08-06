@@ -4,7 +4,7 @@ Architecture matches ``mc_score.py``:
     * Module-level picklable worker (``_process_code_item``)
     * Serial / parallel dispatcher (``_score_items``)
     * Aggregate result dataclass (``CodeScoreResult``)
-    * JSONL + summary cache persistence (``write_cache``)
+    * JSONL + summary result persistence (``write_cache``)
 """
 
 from __future__ import annotations
@@ -53,10 +53,11 @@ _DEFAULT_EXEC_TIMEOUT: float = 3.0
 # ---------------------------------------------------------------------------
 
 _FENCE_RE: re.Pattern[str] = re.compile(
-    r"```(?:\w+)?\s*\n(.*?)\n\s*```",
+    r"```(?:\w+)?\s*\n(.*?)\n?\s*```",
     re.DOTALL,
 )
-"""Fenced code block: `` ```lang\\n...\\n``` ``."""
+"""Fenced code block: opening fence + code + closing fence. The newline
+before the closing fence is optional so compact outputs still match."""
 
 _CODE_START_RE: re.Pattern[str] = re.compile(
     r"^\s*(?:def |from |import |class |@)",
@@ -72,6 +73,9 @@ _STOP_MARKERS: re.Pattern[str] = re.compile(
 
 _TOP_LEVEL_PREFIXES: tuple[str, ...] = ("def ", "from ", "import ", "class ", "@")
 """Python prefixes that can start a standalone candidate program."""
+
+_MAX_PREFIX_PARSE_LINES: int = 500
+"""Line cap for the quadratic longest-valid-prefix parse search."""
 
 _HUMANEVAL_PROMPT_MODES: tuple[str, ...] = (
     "human_eval",
@@ -151,6 +155,10 @@ CODE_GENERATION_PIPELINE = CODE_FILTER_REGISTRY.build_pipeline(
 def _longest_valid_python_prefix(code: str) -> str:
     """Return the longest prefix of *code* that parses as Python."""
     lines = code.rstrip().splitlines()
+    # Cap the O(n^2) prefix search: pathologically long outputs (e.g.
+    # repetition loops) would otherwise trigger one ast.parse per line.
+    if len(lines) > _MAX_PREFIX_PARSE_LINES:
+        lines = lines[:_MAX_PREFIX_PARSE_LINES]
     for end in range(len(lines), 0, -1):
         candidate = "\n".join(lines[:end]).rstrip()
         if not candidate:
@@ -365,6 +373,23 @@ def _process_code_item(
         "filtered_gen": code,
         "filter_trace": filter_trace,
     }
+
+    # -- guard: missing test harness ---------------------------------------------
+    # An empty test harness is a dataset problem, not a model failure: without
+    # it ANY executable candidate would be scored "passed". Skip the item so
+    # it stays out of the Pass@k denominator while retaining debug artifacts.
+    if not test_code.strip():
+        record = {
+            "task_id": task_id,
+            "group_id": group_id,
+            "sample_index": sample_index,
+            "passed": False,
+            "result": f"skipped: empty test harness in label field {label_key!r}",
+            "evaluation_status": "skipped",
+            "stderr": "",
+        }
+        record.update(filter_artifacts)
+        return idx, record
 
     if not gen_str.strip():
         record = _failure(task_id, "failed: empty generation", group_id, sample_index)
@@ -610,7 +635,7 @@ def _score_code_task_result(
     response_key : str
         Dict key for the model output (e.g. ``"gen"``).
     cache_path : str | Path
-        Path for the per-item JSONL cache.  A ``.summary.json`` is written
+        Path for the per-item JSONL result file. A ``.summary.json`` is written
         alongside it.
     max_workers : int
         Maximum Pebble ``ProcessPool`` workers (≤ 1 = serial).
@@ -784,13 +809,19 @@ def score_code_result(
     failed_count = sum(
         _code_record_status(record) == "failed" for record in result.per_item
     )
+    skipped_count = sum(
+        _code_record_status(record) == "skipped" for record in result.per_item
+    )
     return ScorerResult(
         metrics=metrics,
         observations=observations,
         per_item=result.per_item,
         sample_count=result.total,
-        effective_sample_count=max(result.total - failed_count - timeout_count, 0),
+        effective_sample_count=max(
+            result.total - failed_count - skipped_count - timeout_count, 0
+        ),
         failed_count=failed_count,
+        skipped_count=skipped_count,
         timeout_count=timeout_count,
     )
 
@@ -821,7 +852,7 @@ def score_code(
 
 
 # ===========================================================================
-# Cache persistence
+# Result persistence
 # ===========================================================================
 
 

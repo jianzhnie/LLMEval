@@ -51,7 +51,10 @@ class TestLoadJsonl:
 
 class TestCountCompletedSamples:
     def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
-        assert load_resume_state(tmp_path / "none.jsonl", "prompt", "gen").completed_count == 0
+        assert (
+            load_resume_state(tmp_path / "none.jsonl", "prompt", "gen").completed_count
+            == 0
+        )
 
     def test_empty_file_returns_empty(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
@@ -132,16 +135,12 @@ class TestExpandDataWithResume:
     def test_regenerates_only_missing_indices(self) -> None:
         """A mid-run failure must be retried, not the highest contiguous count."""
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        expanded = expand_data_with_resume(
-            raw, {("q1", "p"): {0, 2}}, {}, "prompt", 4
-        )
+        expanded = expand_data_with_resume(raw, {("q1", "p"): {0, 2}}, {}, "prompt", 4)
         assert [item["sample_index"] for item in expanded] == [1, 3]
 
     def test_all_completed_yields_nothing(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        expanded = expand_data_with_resume(
-            raw, {("q1", "p"): {0, 1}}, {}, "prompt", 2
-        )
+        expanded = expand_data_with_resume(raw, {("q1", "p"): {0, 1}}, {}, "prompt", 2)
         assert expanded == []
 
     def test_falls_back_to_legacy_counts(self) -> None:
@@ -318,7 +317,9 @@ class TestSaveFailedItems:
         save_failed_items(out, [{"error": "x"}])
         assert (tmp_path / "sub" / "dir" / "output_failed.jsonl").exists()
 
-    def test_resume_appends_without_losing_previous_failures(self, tmp_path: Path) -> None:
+    def test_resume_appends_without_losing_previous_failures(
+        self, tmp_path: Path
+    ) -> None:
         out = tmp_path / "output.jsonl"
         save_failed_items(out, [{"sample_index": 0, "error": "first"}])
         save_failed_items(out, [{"sample_index": 2, "error": "second"}])

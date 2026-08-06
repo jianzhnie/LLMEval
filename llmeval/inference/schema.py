@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
-
-LOGLIKELIHOOD_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -45,14 +42,6 @@ class LoglikelihoodRequest:
     def scored_continuation(self, index: int) -> str:
         """Return the exact text whose token logprobs must be summed."""
         return f"{self.continuation_prefix}{self.continuations[index]}"
-
-    def cache_identity(self) -> dict[str, Any]:
-        """Return the backend-independent portion of a cache key."""
-        return {
-            "schema_version": LOGLIKELIHOOD_SCHEMA_VERSION,
-            "context": self.context,
-            "continuations": list(self.continuations),
-        }
 
 
 @dataclass(frozen=True)
@@ -113,51 +102,6 @@ class ChoiceLoglikelihood:
         """Build an explicitly failed choice result."""
         return cls(continuation=continuation, scored_text=scored_text, error=error)
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize this choice for a content-addressed cache entry."""
-        return {
-            "continuation": self.continuation,
-            "scored_text": self.scored_text,
-            "token_logprobs": list(self.token_logprobs),
-            "token_texts": list(self.token_texts),
-            "token_ids": list(self.token_ids) if self.token_ids is not None else None,
-            "error": self.error,
-        }
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> ChoiceLoglikelihood:
-        """Deserialize and validate a cached choice result."""
-        continuation = value.get("continuation")
-        scored_text = value.get("scored_text")
-        raw_logprobs = value.get("token_logprobs")
-        raw_tokens = value.get("token_texts")
-        raw_ids = value.get("token_ids")
-        if not isinstance(continuation, str) or not isinstance(scored_text, str):
-            raise ValueError("cached choice text fields must be strings")
-        if not isinstance(raw_logprobs, list) or not isinstance(raw_tokens, list):
-            raise ValueError("cached choice token fields must be lists")
-        if any(
-            isinstance(item, bool) or not isinstance(item, int | float)
-            for item in raw_logprobs
-        ):
-            raise ValueError("cached choice logprobs must be numeric")
-        if any(not isinstance(item, str) for item in raw_tokens):
-            raise ValueError("cached choice tokens must be strings")
-        if raw_ids is not None and not isinstance(raw_ids, list):
-            raise ValueError("cached choice token IDs must be a list or null")
-        if raw_ids is not None and any(
-            isinstance(item, bool) or not isinstance(item, int) for item in raw_ids
-        ):
-            raise ValueError("cached choice token IDs must be integers")
-        return cls(
-            continuation=continuation,
-            scored_text=scored_text,
-            token_logprobs=tuple(float(item) for item in raw_logprobs),
-            token_texts=tuple(raw_tokens),
-            token_ids=tuple(raw_ids) if raw_ids is not None else None,
-            error=(str(value["error"]) if value.get("error") is not None else None),
-        )
-
 
 @dataclass(frozen=True)
 class LoglikelihoodResult:
@@ -206,41 +150,3 @@ class LoglikelihoodResult:
             exact=False,
             error=error,
         )
-
-    def to_cache_value(self) -> dict[str, Any]:
-        """Serialize a complete exact result for persistent caching."""
-        if not self.complete:
-            raise ValueError("incomplete loglikelihood results cannot be cached")
-        return {
-            "result_schema_version": LOGLIKELIHOOD_SCHEMA_VERSION,
-            "request": self.request.cache_identity(),
-            "choices": [choice.to_dict() for choice in self.choices],
-            "exact": True,
-        }
-
-    @classmethod
-    def from_cache_value(
-        cls, request: LoglikelihoodRequest, value: dict[str, Any]
-    ) -> LoglikelihoodResult:
-        """Deserialize a cache entry and reject stale or misaligned shapes."""
-        if value.get("result_schema_version") != LOGLIKELIHOOD_SCHEMA_VERSION:
-            raise ValueError("unsupported loglikelihood cache schema")
-        if value.get("request") != request.cache_identity():
-            raise ValueError("cached loglikelihood request does not match")
-        raw_choices = value.get("choices")
-        if not isinstance(raw_choices, list):
-            raise ValueError("cached loglikelihood choices must be a list")
-        if value.get("exact") is not True:
-            raise ValueError("cached loglikelihood result must be exact")
-        result = cls(
-            request=request,
-            choices=tuple(
-                ChoiceLoglikelihood.from_dict(choice)
-                for choice in raw_choices
-                if isinstance(choice, dict)
-            ),
-            exact=True,
-        )
-        if not result.complete:
-            raise ValueError("cached loglikelihood result is incomplete")
-        return result
