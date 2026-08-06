@@ -1,6 +1,7 @@
 """Tests for llmeval.inference.online.
 
-Focuses on request behavior, thread-safe writing, and concurrent grouping --
+Focuses on request behavior, thread-safe writing, and independent sample
+processing --
 all testable without a live vLLM server.  The shared data-loading / resume
 helpers are covered by tests/test_inference_common.py.
 """
@@ -446,11 +447,11 @@ class TestGetContents:
             client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=1)
 
 
-# ── InferenceRunner.load_data (n_samples scheduling metadata) ─────
+# ── InferenceRunner.load_data (one record per sample) ─────────────
 
 
 class TestLoadData:
-    def test_load_data_sets_remaining_n_samples(self, tmp_path: Path) -> None:
+    def test_load_data_expands_remaining_samples(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path, n_samples=4)
         Path(runner.args.input_file).write_text(
             json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "a"}) + "\n",
@@ -463,83 +464,49 @@ class TestLoadData:
 
         loaded = runner.load_data()
 
-        assert loaded[0]["doc_id"] == "test:0"
-        assert loaded[0]["n_samples"] == 2
+        assert len(loaded) == 2
+        assert all(item["doc_id"] == "test:0" for item in loaded)
+        assert [item["sample_index"] for item in loaded] == [2, 3]
+        assert all(item["expected_samples"] == 4 for item in loaded)
 
-
-# ── InferenceRunner.process_item_group (batched n-parameter path) ──
-
-
-class TestProcessItemGroup:
-    def test_batch_writes_one_line_per_copy(self, tmp_path: Path) -> None:
-        runner = _make_runner(tmp_path, n_samples=3)
-        runner.client = MagicMock()
-        runner.client.get_contents.return_value = ["s1", "s2", "s3"]
-
-        items = [{"prompt": "q", "answer": "a", "n_samples": 3}]
-        runner.process_item_group(items)
-
-        runner.client.get_contents.assert_called_once()
-        assert runner.client.get_contents.call_args.kwargs["n"] == 3
-        lines = (tmp_path / "output.jsonl").read_text().strip().split("\n")
-        assert len(lines) == 3
-        parsed = [json.loads(x) for x in lines]
-        assert all("n_samples" not in item for item in parsed)
-        gens = sorted(item["gen"][0] for item in parsed)
-        assert gens == ["s1", "s2", "s3"]
-        assert runner._stats["processed"] == 3
-
-    def test_empty_sample_counted_failed(self, tmp_path: Path) -> None:
-        runner = _make_runner(tmp_path, n_samples=3)
-        runner.client = MagicMock()
-        runner.client.get_contents.return_value = ["s1", "", "s3"]
-
-        runner.process_item_group([{"prompt": "q", "answer": "a"}] * 3)
-
-        assert runner._stats["processed"] == 2
-        assert runner._stats["failed"] == 1
-
-    def test_short_batch_counts_missing_failed(self, tmp_path: Path) -> None:
-        runner = _make_runner(tmp_path, n_samples=3)
-        runner.client = MagicMock()
-        runner.client.get_contents.return_value = ["only-one"]
-
-        runner.process_item_group([{"prompt": "q", "answer": "a"}] * 3)
-
-        assert runner._stats["processed"] == 1
-        assert runner._stats["failed"] == 2
-
-    def test_empty_responses_fail_whole_group(self, tmp_path: Path) -> None:
+    def test_load_data_preserves_non_contiguous_missing_indices(
+        self, tmp_path: Path
+    ) -> None:
         runner = _make_runner(tmp_path, n_samples=4)
-        runner.client = MagicMock()
-        runner.client.get_contents.return_value = []  # e.g. context length
+        Path(runner.args.input_file).write_text(
+            json.dumps({"doc_id": "test:0", "prompt": "q"}) + "\n",
+            encoding="utf-8",
+        )
+        Path(runner.args.output_file).write_text(
+            json.dumps(
+                {
+                    "doc_id": "test:0",
+                    "prompt": "q",
+                    "gen": ["zero", "two"],
+                    "sample_indices": [0, 2],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
-        runner.process_item_group([{"prompt": "q", "answer": "a"}] * 4)
+        loaded = runner.load_data()
 
-        assert runner._stats["failed"] == 4
-        assert runner._stats["processed"] == 0
-        assert not (tmp_path / "output.jsonl").exists()
-
-    def test_singleton_delegates_to_process_item(self, tmp_path: Path) -> None:
-        runner = _make_runner(tmp_path, n_samples=1)
-        runner.client = MagicMock()
-        runner.client.get_content.return_value = "solo"
-
-        runner.process_item_group([{"prompt": "q", "answer": "a"}])
-
-        assert runner.client.get_content.called
-        assert not runner.client.get_contents.called
-        assert runner._stats["processed"] == 1
+        assert [item["sample_index"] for item in loaded] == [1, 3]
+        assert all(item["expected_samples"] == 4 for item in loaded)
+        assert all(not any(key.startswith("_llmeval_") for key in item) for item in loaded)
 
 
-# ── InferenceRunner._process_concurrently grouping ────────────────
+# ── InferenceRunner._process_concurrently ─────────────────────────
 
 
-class TestConcurrentGrouping:
-    def test_same_prompt_grouped_into_one_batch(self, tmp_path: Path) -> None:
+class TestConcurrentProcessing:
+    def test_expanded_samples_use_independent_single_requests(
+        self, tmp_path: Path
+    ) -> None:
         runner = _make_runner(tmp_path, n_samples=3)
         runner.client = MagicMock()
-        runner.client.get_contents.return_value = ["s1", "s2", "s3"]
+        runner.client.get_content.side_effect = ["s1", "s2", "s3"]
 
         Path(runner.args.input_file).write_text(
             json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "a"}) + "\n",
@@ -547,16 +514,16 @@ class TestConcurrentGrouping:
         )
         loaded = runner.load_data()
 
-        assert len(loaded) == 1
-        assert loaded[0]["n_samples"] == 3
+        assert len(loaded) == 3
+        assert [item["sample_index"] for item in loaded] == [0, 1, 2]
         runner._process_concurrently(loaded)
 
-        runner.client.get_contents.assert_called_once()
-        assert runner.client.get_contents.call_args.kwargs["n"] == 3
+        assert runner.client.get_content.call_count == 3
+        assert all("n" not in call.kwargs for call in runner.client.get_content.call_args_list)
         assert runner._stats["processed"] == 3
 
     def test_non_str_prompt_does_not_crash_run(self, tmp_path: Path) -> None:
-        """Non-hashable/non-str prompts form singleton groups instead of raising."""
+        """Non-string prompts are still handled as independent samples."""
         runner = _make_runner(tmp_path)
         runner.client = MagicMock()
         runner.client.get_content.return_value = "ok"
@@ -573,7 +540,7 @@ class TestConcurrentGrouping:
     def test_failed_tasks_file_records_prompt(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path, n_samples=2)
         runner.client = MagicMock()
-        runner.client.get_contents.side_effect = RuntimeError("server down")
+        runner.client.get_content.side_effect = RuntimeError("server down")
 
         runner._process_concurrently([{"prompt": "qq", "answer": "a"}] * 2)
 
@@ -581,5 +548,5 @@ class TestConcurrentGrouping:
         assert failed_file.exists()
         record = json.loads(failed_file.read_text().strip().split("\n")[0])
         assert record["prompt"] == "qq"
-        assert record["samples"] == 2
+        assert record["sample_index"] is None
         assert "server down" in record["error"]

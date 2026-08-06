@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import collections
 import copy
-import hashlib
 import json
 import logging
 import os
@@ -34,9 +33,10 @@ from llmeval.inference.common import (
     missing_sample_indices,
     process_batches_with_policy,
     redact_config_for_logging,
+    require_document_id,
     sample_seed_for_item,
     save_failed_items,
-    to_public_result_schema,
+    validate_document_ids,
 )
 from llmeval.utils.config import VerifierInferArguments
 from llmeval.utils.log import init_logger
@@ -57,9 +57,6 @@ _PAREN_LETTER_RE: re.Pattern[str] = re.compile(r"\(([A-D])\)", re.IGNORECASE)
 _STANDALONE_LETTER_RE: re.Pattern[str] = re.compile(
     r"(?<![A-Za-z])([A-D])(?![A-Za-z])", re.IGNORECASE
 )
-_VERIFIER_RESUME_KEY = "llmeval_verifier_id"
-
-
 def _last_n_strs(text: str, n: int) -> str:
     """Return the last n whitespace-separated tokens as a string."""
     tokens = text.split()
@@ -327,30 +324,6 @@ class VerifierOfflineInferenceRunner:
         response_key = self.args.response_key
         return input_key, label_key, response_key
 
-    def _resume_id(self, item: dict[str, Any]) -> str:
-        """Resolve the prepared dataset ID for verifier resume.
-
-        New benchmark files carry ``doc_id`` from the preparation stage. The
-        hash fallback is retained only for legacy verifier inputs that predate
-        the dataset ID field.
-        """
-        document_id = item.get("doc_id")
-        if document_id:
-            return str(document_id)
-        existing = item.get(_VERIFIER_RESUME_KEY)
-        if existing:
-            return str(existing)
-
-        input_key, label_key, response_key = self._effective_keys()
-        payload = {
-            "prompt": item.get(input_key) or item.get("prompt"),
-            "gold": item.get(label_key),
-            "response": item.get(response_key),
-        }
-        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-        digest = hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()
-        return f"verifier:{digest}"
-
     def convert_to_compass_verifier_format(self, item: dict[str, Any]) -> str | None:
         """
         Convert input data item to Verifier prompt format.
@@ -468,9 +441,7 @@ class VerifierOfflineInferenceRunner:
                                 original_item, model_response
                             )
                             f.write(
-                                json.dumps(
-                                    to_public_result_schema(result), ensure_ascii=False
-                                )
+                                    json.dumps(result, ensure_ascii=False)
                                 + "\n"
                             )
                             f.flush()
@@ -516,8 +487,8 @@ class VerifierOfflineInferenceRunner:
         Returns:
             Processed result item ready for JSON serialization.
         """
+        require_document_id(original_item)
         result = original_item.copy()
-        result[_VERIFIER_RESUME_KEY] = self._resume_id(original_item)
         result["Verifier_response"] = model_response
 
         # Optionally strip original large fields to reduce output size
@@ -563,16 +534,16 @@ class VerifierOfflineInferenceRunner:
             self.args.output_file,
             repair_truncated_last_line=getattr(self.args, "repair_resume", False),
         ):
-            prompt_key = (
-                item.get(_VERIFIER_RESUME_KEY)
-                or item.get(self.args.input_key)
-                or item.get("prompt")
-            )
-
             # Inference completion is independent from whether the judgment
             # parser could classify the model response.
-            if prompt_key is not None and item.get("Verifier_response"):
-                key = str(prompt_key)
+            if item.get("Verifier_response"):
+                document_id = item.get("doc_id")
+                if document_id is None or not str(document_id).strip():
+                    raise ValueError(
+                        f"Verifier resume file {self.args.output_file} contains a "
+                        "completed row without required 'doc_id'"
+                    )
+                key = str(document_id)
                 raw_index = item.get("sample_index")
                 if type(raw_index) is int and raw_index >= 0:
                     sample_index = raw_index
@@ -608,6 +579,7 @@ class VerifierOfflineInferenceRunner:
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
         # Check for completed samples
+        validate_document_ids(raw_data)
         completed_indices = self.get_completed_sample_indices()
         total_completed = sum(len(indices) for indices in completed_indices.values())
 
@@ -615,29 +587,16 @@ class VerifierOfflineInferenceRunner:
             logger.info(f"Found {total_completed} completed samples from previous run")
 
         expanded_data: list[dict[str, Any]] = []
-        skipped_items = 0
-        seen_resume_ids: set[str] = set()
-        for item in raw_data:
-            if not isinstance(item, dict):
-                skipped_items += 1
-                continue
-            resume_id = self._resume_id(item)
-            if resume_id in seen_resume_ids:
-                raise ValueError(
-                    f"Duplicate verifier resume id {resume_id!r}; provide a unique "
-                    "doc_id for every input row"
-                )
-            seen_resume_ids.add(resume_id)
+        for index, item in enumerate(raw_data):
+            resume_id = require_document_id(item, index)
             used_indices = completed_indices.get(resume_id, set())
             for sample_index in missing_sample_indices(
                 self.args.n_samples, used_indices
             ):
                 expanded_item = copy.deepcopy(item)
-                expanded_item[_VERIFIER_RESUME_KEY] = resume_id
                 expanded_item["sample_index"] = sample_index
+                expanded_item["expected_samples"] = self.args.n_samples
                 expanded_data.append(expanded_item)
-        if skipped_items > 0:
-            logger.warning(f"Skipped {skipped_items} non-dict item(s)")
         if not expanded_data:
             logger.warning("No data to process after expansion")
 

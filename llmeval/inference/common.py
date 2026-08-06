@@ -1,20 +1,8 @@
-"""Shared data-loading and resume helpers for the inference runners.
+"""Shared infrastructure for inference runners.
 
-The online, offline, verifier, and MC runners all implement the same pipeline
-stages: load JSONL input, recover completed sample indices from the output file,
-expand the dataset to ``n_samples`` copies per prompt, and persist
-failed items for debugging.  Those helpers live here so each runner module
-stays focused on its own backend (OpenAI API vs. vLLM engine).
-
-Functions
----------
-load_jsonl                 — parse a line-delimited JSON file
-load_resume_state          — stable sample indices and legacy counts for resume
-expand_data_with_resume    — expand raw items to remaining per-sample copies
-prepare_data_with_resume   — attach remaining sample counts for batched online runs
-sample_count_for_item      — read the runtime sample count from an item
-expand_group_for_sampling   — expand grouped prompt records by sample count
-save_failed_items          — persist failure records next to the output file
+This module owns backend-independent concerns: JSONL parsing, resume-state
+validation, sampling-plan construction, configuration redaction, and failure
+auditing.  Backend-specific request shapes stay in the online/offline runners.
 """
 
 from __future__ import annotations
@@ -36,23 +24,17 @@ __all__ = [
     "ResumeState",
     "build_vllm_llm_kwargs",
     "expand_data_with_resume",
-    "expand_group_for_sampling",
     "is_explicit_tool_choice",
     "is_local_endpoint",
     "iter_resume_records",
     "load_jsonl",
     "load_resume_state",
-    "missing_indices_for_item",
     "missing_sample_indices",
-    "prepare_data_with_resume",
     "process_batches_with_policy",
     "redact_config_for_logging",
     "require_document_id",
-    "resolve_resume_identity",
-    "sample_count_for_item",
     "sample_seed_for_item",
     "save_failed_items",
-    "to_public_result_schema",
     "validate_document_ids",
 ]
 
@@ -64,17 +46,10 @@ def _batch_item_identity(item: dict[str, Any]) -> dict[str, Any]:
     identity: dict[str, Any] = {}
     for key in (
         "doc_id",
-        "llmeval_verifier_id",
         "sample_index",
-        "_llmeval_requested_sample_indices",
     ):
         if key in item:
-            public_key = (
-                "requested_sample_indices"
-                if key == "_llmeval_requested_sample_indices"
-                else key
-            )
-            identity[public_key] = item[key]
+            identity[key] = item[key]
     return identity
 
 
@@ -186,7 +161,7 @@ def sample_seed_for_item(base_seed: int, item: dict[str, Any]) -> int:
     """
     if base_seed < 0:
         raise ValueError(f"base_seed must be non-negative, got {base_seed}")
-    document_id = str(item.get("doc_id") or item.get("llmeval_verifier_id") or "")
+    document_id = str(item.get("doc_id") or "")
     prompt = str(item.get("prompt") or item.get("question") or "")
     sample_index = item.get("sample_index", 0)
     try:
@@ -273,6 +248,12 @@ def load_resume_state(
                     f"Resume file {output_path} line {line_num} has a completed "
                     "response but no non-empty prompt"
                 )
+            internal_fields = [key for key in item if key.startswith("_llmeval_")]
+            if internal_fields:
+                raise ValueError(
+                    f"Resume file {output_path} line {line_num} uses unsupported "
+                    f"internal fields: {internal_fields}"
+                )
 
             document_id = item.get("doc_id")
             if not document_id:
@@ -286,11 +267,7 @@ def load_resume_state(
             completed = state.completed_indices.setdefault(identity, set())
             index_fields = [
                 key
-                for key in (
-                    "sample_indices",
-                    "_llmeval_sample_indices",
-                    "_llmeval_requested_sample_indices",
-                )
+                for key in ("sample_indices",)
                 if key in item
             ]
             if len(index_fields) > 1:
@@ -407,47 +384,49 @@ def missing_sample_indices(target_samples: int, completed: set[int]) -> list[int
     return [index for index in range(target_samples) if index not in completed]
 
 
-def resolve_resume_identity(
-    item: dict[str, Any], input_key: str, index: int | None = None
-) -> tuple[str, str]:
-    """Return the validated stable ``(doc_id, prompt)`` resume identity."""
-    if not input_key:
-        raise ValueError("input_key must be non-empty")
-    prompt_value = item.get(input_key) or item.get("prompt")
-    prompt = str(prompt_value) if prompt_value is not None else ""
-    if not prompt.strip():
-        location = f" at index {index}" if index is not None else ""
-        raise ValueError(
-            f"Input record{location} has no non-empty prompt under "
-            f"{input_key!r} or 'prompt'"
-        )
-    return require_document_id(item, index), prompt
-
-
-def missing_indices_for_item(
-    item: dict[str, Any],
-    *,
-    input_key: str,
-    target_samples: int,
+def expand_data_with_resume(
+    raw_data: list[dict[str, Any]],
     completed_indices: dict[tuple[str, str], set[int]],
     legacy_counts: dict[str, int],
-    index: int | None = None,
-) -> tuple[tuple[str, str], list[int]]:
-    """Resolve one item's stable identity and exact missing sample indices."""
-    identity = resolve_resume_identity(item, input_key, index)
-    completed = set(completed_indices.get(identity, set()))
-    if not completed:
-        completed.update(range(max(legacy_counts.get(identity[1], 0), 0)))
-    return identity, missing_sample_indices(target_samples, completed)
+    input_key: str,
+    n_samples: int,
+    *,
+    prompt_resolver: Callable[[dict[str, Any]], str] | None = None,
+) -> list[dict[str, Any]]:
+    """Expand every input into one record per missing sample index.
 
+    All inference backends consume this canonical shape and generate exactly
+    one response per record. Explicit indices preserve holes during resume.
+    """
+    if not input_key:
+        raise ValueError("input_key must be non-empty")
+    if n_samples <= 0:
+        raise ValueError(f"n_samples must be positive, got {n_samples}")
 
-def to_public_result_schema(item: dict[str, Any]) -> dict[str, Any]:
-    """Copy a result and remove inference-only request metadata."""
-    result = dict(item)
-    for key in tuple(result):
-        if key.startswith("_llmeval_"):
-            result.pop(key)
-    return result
+    validate_document_ids(raw_data)
+    expanded: list[dict[str, Any]] = []
+    for index, source in enumerate(raw_data):
+        if prompt_resolver is None:
+            prompt_value = source.get(input_key) or source.get("prompt")
+            prompt = str(prompt_value) if prompt_value is not None else ""
+        else:
+            prompt = str(prompt_resolver(source))
+        if not prompt.strip():
+            raise ValueError(
+                f"Input record at index {index} has no non-empty prompt under "
+                f"{input_key!r} or 'prompt'"
+            )
+
+        identity = (str(source["doc_id"]), prompt)
+        completed = set(completed_indices.get(identity, set()))
+        if not completed:
+            completed.update(range(max(legacy_counts.get(prompt, 0), 0)))
+        for sample_index in missing_sample_indices(n_samples, completed):
+            item = copy.deepcopy(source)
+            item["sample_index"] = sample_index
+            item["expected_samples"] = n_samples
+            expanded.append(item)
+    return expanded
 
 
 def build_vllm_llm_kwargs(args: Any) -> dict[str, Any]:
@@ -517,141 +496,6 @@ def redact_config_for_logging(
     return result if isinstance(result, dict) else {}
 
 
-def expand_data_with_resume(
-    raw_data: list[dict[str, Any]],
-    completed_indices: dict[tuple[str, str], set[int]],
-    legacy_counts: dict[str, int],
-    input_key: str,
-    n_samples: int,
-) -> list[dict[str, Any]]:
-    """Expand raw items into per-sample copies for every index still missing.
-
-    Explicit index sets preserve holes from partially failed batched requests,
-    so resume regenerates the missing sample instead of duplicating a later one.
-
-    Args:
-        raw_data: Items loaded from the input file; each must carry ``doc_id``.
-        completed_indices: Completed sample indices per ``(doc_id, prompt)``.
-        legacy_counts: Prompt-keyed completed counts for legacy output rows
-            that predate stable IDs (treated as contiguous from index 0).
-        input_key: Prompt field name (``"prompt"`` used as fallback).
-        n_samples: Target number of samples per prompt.
-
-    Returns:
-        Expanded dataset holding only the samples still to process, each tagged
-        with its ``sample_index``.
-    """
-    validate_document_ids(raw_data)
-
-    expanded_data: list[dict[str, Any]] = []
-    for index, item in enumerate(raw_data):
-        _, missing = missing_indices_for_item(
-            item,
-            input_key=input_key,
-            target_samples=n_samples,
-            completed_indices=completed_indices,
-            legacy_counts=legacy_counts,
-            index=index,
-        )
-        for sample_index in missing:
-            expanded_item = copy.deepcopy(item)
-            expanded_item["sample_index"] = sample_index
-            expanded_item["expected_samples"] = n_samples
-            expanded_data.append(expanded_item)
-    return expanded_data
-
-
-def prepare_data_with_resume(
-    raw_data: list[dict[str, Any]],
-    completed_indices: dict[tuple[str, str], set[int]],
-    legacy_counts: dict[str, int],
-    input_key: str,
-    n_samples: int,
-    sample_count_key: str = "n_samples",
-) -> list[dict[str, Any]]:
-    """Prepare grouped online requests using the exact missing sample indices.
-
-    Stable-ID output can contain holes when one choice in a batched request was
-    empty or failed. The returned metadata preserves those holes so a resumed
-    request regenerates precisely ``target - completed`` rather than assuming
-    completed samples form a prefix.
-    """
-    if not input_key:
-        raise ValueError("input_key must be non-empty")
-    if n_samples <= 0:
-        raise ValueError(f"n_samples must be positive, got {n_samples}")
-
-    validate_document_ids(raw_data)
-    prepared_data: list[dict[str, Any]] = []
-    for index, item in enumerate(raw_data):
-        _, missing = missing_indices_for_item(
-            item,
-            input_key=input_key,
-            target_samples=n_samples,
-            completed_indices=completed_indices,
-            legacy_counts=legacy_counts,
-            index=index,
-        )
-        if not missing:
-            continue
-
-        prepared_item = copy.deepcopy(item)
-        prepared_item[sample_count_key] = len(missing)
-        prepared_item["_llmeval_target_samples"] = n_samples
-        prepared_item["_llmeval_requested_sample_indices"] = missing
-        prepared_data.append(prepared_item)
-
-    return prepared_data
-
-
-def sample_count_for_item(
-    item: dict[str, Any], sample_count_key: str = "n_samples"
-) -> int:
-    """Return the sample count stored on a prepared item."""
-    try:
-        return max(1, int(item.get(sample_count_key, 1)))
-    except (TypeError, ValueError):
-        return 1
-
-
-def expand_group_for_sampling(
-    items: list[dict[str, Any]], sample_count_key: str = "n_samples"
-) -> list[dict[str, Any]]:
-    """Expand grouped prompt records according to their stored sample counts."""
-    if not any(sample_count_key in item for item in items if isinstance(item, dict)):
-        return items
-
-    sample_items: list[dict[str, Any]] = []
-    for item in items:
-        sample_count = sample_count_for_item(item, sample_count_key)
-        requested_indices = item.get("_llmeval_requested_sample_indices")
-        if requested_indices is None:
-            sample_start = int(item.get("_llmeval_sample_start", 0))
-            requested_indices = list(range(sample_start, sample_start + sample_count))
-        elif not (
-            isinstance(requested_indices, list)
-            and len(requested_indices) == sample_count
-            and all(type(index) is int and index >= 0 for index in requested_indices)
-            and len(set(requested_indices)) == len(requested_indices)
-        ):
-            raise ValueError(
-                "_llmeval_requested_sample_indices must contain exactly "
-                f"{sample_count} unique non-negative ints"
-            )
-        for sample_index in requested_indices:
-            sample_item = to_public_result_schema(item)
-            if "doc_id" in item:
-                sample_item["sample_index"] = sample_index
-            # The target sample count is used by the caller's result builder
-            # for ``expected_samples``; strip the request-scoped indices but
-            # keep the target so resumed rows report the full depth.
-            sample_item["_llmeval_target_samples"] = int(
-                item.get("_llmeval_target_samples", sample_count)
-            )
-            sample_items.append(sample_item)
-    return sample_items
-
-
 def is_explicit_tool_choice(tool_choice: str | None) -> bool:
     """Return whether ``tool_choice`` should be sent to the API.
 
@@ -700,9 +544,7 @@ def _failure_id(entry: dict[str, Any]) -> str:
     identity = {
         "doc_id": source.get("doc_id"),
         "sample_index": source.get("sample_index"),
-        "sample_indices": source.get("sample_indices")
-        or source.get("requested_sample_indices")
-        or source.get("_llmeval_requested_sample_indices"),
+        "sample_indices": source.get("sample_indices"),
         "error_category": entry.get("error_category")
         or entry.get("error_type")
         or "unknown",

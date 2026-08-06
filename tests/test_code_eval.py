@@ -903,7 +903,6 @@ class TestCodeSampleIndexProtocol:
         _, records = self._score(items, tmp_path)
         assert [record["sample_index"] for record in records] == [1, 3]
         assert all("sample_indices" not in record for record in records)
-        assert all("_llmeval_group_id" not in record for record in records)
 
     @pytest.mark.parametrize(
         "bad_fields",

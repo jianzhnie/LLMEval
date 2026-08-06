@@ -248,14 +248,14 @@ class TestVerifierResume:
         assert first["temperature"] == second["temperature"] == 0.0
         assert first["skip_special_tokens"] is False
 
-    def test_resume_id_survives_compacted_output(self, tmp_path: Path) -> None:
+    def test_doc_id_survives_compacted_output(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
-        item = {"prompt": "q", "answer": "4", "gen": ["4"]}
+        item = {"doc_id": "doc:1", "prompt": "q", "answer": "4", "gen": ["4"]}
         result = runner._prepare_result_item(item, "\\boxed{A}")
 
         assert result["prompt"] == ""
         assert result["gen"] == ""
-        assert result["llmeval_verifier_id"]
+        assert result["doc_id"] == "doc:1"
 
         Path(runner.args.output_file).write_text(
             json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -265,11 +265,11 @@ class TestVerifierResume:
             for key, indices in runner.get_completed_sample_indices().items()
         }
 
-        assert counts[result["llmeval_verifier_id"]] == 1
+        assert counts["doc:1"] == 1
 
-    def test_load_data_skips_completed_resume_id(self, tmp_path: Path) -> None:
+    def test_load_data_skips_completed_doc_id(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
-        item = {"prompt": "q", "answer": "4", "gen": ["4"]}
+        item = {"doc_id": "doc:1", "prompt": "q", "answer": "4", "gen": ["4"]}
         Path(runner.args.input_file).write_text(
             json.dumps(item, ensure_ascii=False) + "\n", encoding="utf-8"
         )
@@ -280,20 +280,26 @@ class TestVerifierResume:
 
         assert runner.load_data() == []
 
+    def test_load_data_requires_doc_id(self, tmp_path: Path) -> None:
+        runner = self._runner(tmp_path)
+        Path(runner.args.input_file).write_text(
+            json.dumps({"prompt": "q", "answer": "4", "gen": ["4"]}) + "\n"
+        )
+
+        with pytest.raises(ValueError, match="missing required 'doc_id'"):
+            runner.load_data()
+
     def test_response_with_unparsed_judgment_is_still_complete(
         self, tmp_path: Path
     ) -> None:
         runner = self._runner(tmp_path)
-        item = {"prompt": "q", "answer": "4", "gen": ["4"]}
+        item = {"doc_id": "doc:1", "prompt": "q", "answer": "4", "gen": ["4"]}
         Path(runner.args.input_file).write_text(json.dumps(item) + "\n")
         result = runner._prepare_result_item(item, "unclassifiable response")
         result["Verifier_judgment"] = ""
         Path(runner.args.output_file).write_text(json.dumps(result) + "\n")
 
-        assert (
-            len(runner.get_completed_sample_indices()[result["llmeval_verifier_id"]])
-            == 1
-        )
+        assert len(runner.get_completed_sample_indices()["doc:1"]) == 1
         assert runner.load_data() == []
 
     def test_resume_preserves_missing_sample_index(self, tmp_path: Path) -> None:
@@ -322,7 +328,7 @@ class TestVerifierResume:
             json.dumps(duplicate) + "\n" + json.dumps(duplicate) + "\n"
         )
 
-        with pytest.raises(ValueError, match="Duplicate verifier resume id"):
+        with pytest.raises(ValueError, match="Duplicate doc_id"):
             runner.load_data()
 
     def test_process_batches_can_record_and_continue(self, tmp_path: Path) -> None:
@@ -345,22 +351,3 @@ class TestVerifierResume:
         failure = json.loads(failed_path.read_text().strip())
         assert failure["error_category"] == "batch_processing"
         assert failure["items"] == [{"doc_id": "d1", "sample_index": 2}]
-
-    def test_failed_batch_preserves_legacy_verifier_identity(
-        self, tmp_path: Path
-    ) -> None:
-        runner = self._runner(tmp_path)
-        runner.args.batch_size = 1
-        runner.args.fail_fast = False
-        runner.process_and_write_batch = MagicMock(side_effect=RuntimeError("bad"))
-
-        runner._process_batches(
-            [{"llmeval_verifier_id": "legacy:abc", "sample_index": 0}]
-        )
-
-        failure = json.loads(
-            (tmp_path / "verifier_failed.jsonl").read_text().strip()
-        )
-        assert failure["items"] == [
-            {"llmeval_verifier_id": "legacy:abc", "sample_index": 0}
-        ]

@@ -277,10 +277,11 @@ def _failure(
 
 def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
     """Build a placeholder record for items that could not be scored."""
+    task_id = str(item.get("task_id", ""))
     return _failure_record(
-        item.get("task_id", item.get("_llmeval_group_id", "")),
+        task_id,
         "scoring error",
-        group_id=item.get("_llmeval_group_id", item.get("task_id", "")),
+        group_id=task_id,
         sample_index=item.get("sample_index", 0),
         evaluation_status="failed",
     )
@@ -374,9 +375,7 @@ def _process_code_item(
     idx, item, label_key, response_key, exec_timeout, allow_unsafe_code = args
 
     # -- resolve identifiers ----------------------------------------------------
-    group_id: str = str(
-        item.get("_llmeval_group_id") or item.get("task_id", f"task_{idx}")
-    )
+    group_id: str = str(item.get("task_id", f"task_{idx}"))
     sample_index: int = int(item.get("sample_index", 0))
     task_id: str = str(item.get("task_id") or group_id)
     prompt: str = str(item.get("prompt", ""))
@@ -603,7 +602,6 @@ def _expand_code_samples(
             sample_item = item.copy()
             sample_item.pop("sample_indices", None)
             sample_item[response_key] = []
-            sample_item["_llmeval_group_id"] = group_id
             sample_item.pop("sample_index", None)
             expanded.append(sample_item)
             continue
@@ -621,7 +619,6 @@ def _expand_code_samples(
             sample_item = item.copy()
             sample_item.pop("sample_indices", None)
             sample_item[response_key] = [sample]
-            sample_item["_llmeval_group_id"] = group_id
             sample_item["sample_index"] = sample_index
             expanded.append(sample_item)
     return expanded
@@ -773,10 +770,6 @@ def _score_code_task_result(
         problems=problems,
         per_item=records,
     )
-    # ``_llmeval_group_id`` is request-scoped metadata used only while
-    # expanding and grouping samples. It must not leak into persisted results.
-    for record in result.per_item:
-        record.pop("_llmeval_group_id", None)
     if persist_legacy:
         write_cache(result, cache_path)
 

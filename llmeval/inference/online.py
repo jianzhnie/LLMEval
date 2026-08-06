@@ -25,16 +25,14 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
-    expand_group_for_sampling,
+    expand_data_with_resume,
     is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
     load_resume_state,
-    prepare_data_with_resume,
     redact_config_for_logging,
-    sample_count_for_item,
+    sample_seed_for_item,
     save_failed_items,
-    to_public_result_schema,
 )
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
@@ -173,6 +171,8 @@ class InferenceClient:
         top_p: float,
         top_k: int,
         enable_thinking: bool,
+        *,
+        seed: int | None = None,
     ) -> str:
         """Fetch content from the OpenAI API with comprehensive retry logic.
 
@@ -215,6 +215,7 @@ class InferenceClient:
             top_p,
             top_k,
             enable_thinking,
+            seed=seed,
         )
         completion = self._request_with_retry(call_args)
         if completion is None:
@@ -235,11 +236,11 @@ class InferenceClient:
         enable_thinking: bool,
         n: int,
     ) -> list[str]:
-        """Fetch n samples for the same prompt in ONE request (API `n` parameter).
+        """Deprecated multi-sample API kept for compatibility tests and clients.
 
-        Sending n separate requests would re-run the prefill (system prompt +
-        query) n times; with n>1 the server prefills once and samples n
-        completions, which is significantly cheaper for pass@k-style evals.
+        Production benchmark inference expands samples before dispatch and
+        calls :meth:`get_content` once per sample. New callers should follow
+        that protocol so resume state remains one row per sample.
 
         Args:
             query: User's input query
@@ -313,6 +314,7 @@ class InferenceClient:
         top_k: int,
         enable_thinking: bool,
         n: int = 1,
+        seed: int | None = None,
     ) -> dict[str, Any]:
         """Validate inputs and assemble chat.completions call arguments.
 
@@ -350,7 +352,7 @@ class InferenceClient:
                 "chat_template_kwargs": {"enable_thinking": enable_thinking},
             },
             "timeout": self.timeout,
-            "seed": getattr(self, "seed", 0),
+            "seed": getattr(self, "seed", 0) if seed is None else seed,
         }
         # n: only sent for multi-sample requests (single-sample default is 1)
         if n > 1:
@@ -505,12 +507,12 @@ class InferenceRunner:
         This method performs several key operations:
         1. Loads and validates the input data file
         2. Checks for previously completed samples
-        3. Annotates each remaining prompt with an ``n_samples`` count
+        3. Expands each remaining sample into one request record
         4. Validates data structure and content
 
         Returns:
-            List[Dict[str, Any]]: Prompt records to process, with ``n_samples``
-                set to the remaining sample count after resume.
+            List[Dict[str, Any]]: One record per remaining sample, each with a
+                stable ``sample_index``.
 
         Raises:
             FileNotFoundError: If input file doesn't exist
@@ -539,19 +541,18 @@ class InferenceRunner:
                 resume_state.completed_count,
             )
 
-        prepared_data = prepare_data_with_resume(
+        prepared_data = expand_data_with_resume(
             raw_data,
             resume_state.completed_indices,
             resume_state.legacy_counts,
             self.args.input_key,
             self.args.n_samples,
         )
-        total_remaining = sum(sample_count_for_item(item) for item in prepared_data)
+        total_remaining = len(prepared_data)
 
         if not prepared_data:
             logger.warning("No data to process after preparation")
 
-        logger.info(f"Total remaining prompts to process: {len(prepared_data)}")
         logger.info(f"Total remaining samples to process: {total_remaining}")
         return prepared_data
 
@@ -565,7 +566,7 @@ class InferenceRunner:
             try:
                 with open(self.args.output_file, "a", encoding="utf-8") as f:
                     f.write(
-                        json.dumps(to_public_result_schema(result), ensure_ascii=False)
+                        json.dumps(result, ensure_ascii=False)
                         + "\n"
                     )
                     f.flush()  # Ensure data is immediately written
@@ -622,18 +623,10 @@ class InferenceRunner:
             return None
 
         result = item.copy()
-        expected_samples = int(
-            item.get("_llmeval_target_samples", sample_count_for_item(item))
-        )
-        result.pop("n_samples", None)
-        result.pop("_llmeval_sample_start", None)
-        result.pop("_llmeval_requested_sample_indices", None)
-        result.pop("_llmeval_target_samples", None)
         existing = result.get(self.args.response_key)
         gen_list = list(existing) if isinstance(existing, list) else []
         gen_list.append(response)
         result[self.args.response_key] = gen_list
-        result["expected_samples"] = expected_samples
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
@@ -664,6 +657,7 @@ class InferenceRunner:
             return None
 
         # Step 2: API Request
+        base_seed = self.args.seed if type(self.args.seed) is int else 0
         response = self.client.get_content(
             query=query,
             system_prompt=self.system_prompt,
@@ -673,6 +667,7 @@ class InferenceRunner:
             top_p=self.args.top_p,
             top_k=self.args.top_k,
             enable_thinking=self.args.enable_thinking,
+            seed=sample_seed_for_item(base_seed, item),
         )
 
         # Step 3: Response Processing
@@ -693,173 +688,45 @@ class InferenceRunner:
 
         return result
 
-    def process_item_group(self, items: list[dict[str, Any]]) -> None:
-        """Process one prompt group with a single batched request when possible.
-
-        ``load_data`` records the remaining sample count in ``n_samples``.
-        This method issues one request with the API's n parameter (one prefill,
-        n samples) and writes one result line per sample, keeping the output
-        format identical to per-sample processing.
-
-        Args:
-            items: Records sharing the same prompt (len >= 1)
-        """
-        sample_items = expand_group_for_sampling(items)
-        request_n_samples = len(sample_items)
-
-        if request_n_samples == 1:
-            self.process_item(sample_items[0])
-            return
-
-        # Step 1: Input Validation (all copies share the same prompt)
-        query = self._extract_query(sample_items[0])
-        if not query:
-            # _extract_query counted one skipped sample; the whole group is
-            # skipped, so account for the remaining copies too.
-            remaining = len(sample_items) - 1
-            if remaining > 0:
-                with self._stats_lock:
-                    self._stats["skipped"] += remaining
-            return
-
-        # Step 2: ONE batched API request for all copies
-        responses = self.client.get_contents(
-            query=query,
-            system_prompt=self.system_prompt,
-            model_name=self.args.model_name,
-            max_tokens=self.args.max_tokens,
-            temperature=self.args.temperature,
-            top_p=self.args.top_p,
-            top_k=self.args.top_k,
-            enable_thinking=self.args.enable_thinking,
-            n=request_n_samples,
-        )
-        if not responses:
-            # Context-length rejection (or exhausted retries): every copy of
-            # this prompt failed. get_contents returns either exactly
-            # request_n_samples entries or [] — never a partial list.
-            with self._stats_lock:
-                self._stats["failed"] += request_n_samples
-            return
-
-        # Steps 3+4: Per-copy result building and persistence. get_contents
-        # returns either exactly request_n_samples entries or [] (never a
-        # partial list), so a missing count here only guards against mocked
-        # or subclassed clients; keep it for safety.
-        for item, response in zip(sample_items, responses, strict=False):
-            result = self._build_result(item, response)
-            if not result:
-                continue  # empty response already counted failed in _build_result
-            try:
-                self._write_result(result)
-                with self._stats_lock:
-                    self._stats["processed"] += 1
-            except OSError as e:
-                logger.error(f"Failed to write result: {e}")
-                with self._stats_lock:
-                    self._stats["failed"] += 1
-        # Fewer choices than requested: count the missing copies as failed.
-        missing = request_n_samples - len(responses)
-        if missing > 0:
-            logger.warning(
-                f"Batched request returned {len(responses)}/{request_n_samples} samples"
-            )
-            with self._stats_lock:
-                self._stats["failed"] += missing
-
-    def _group_sample_count(self, items: list[dict[str, Any]]) -> int:
-        """Return the number of samples represented by a concurrent group."""
-        return len(expand_group_for_sampling(items))
-
     def _process_concurrently(self, expanded_data: list[dict[str, Any]]) -> None:
-        """Process items concurrently using thread pool with error handling and progress tracking.
-
-        Records that share a prompt are grouped and processed with a single
-        batched request (API n parameter, one prefill for n samples). Records
-        with n_samples=1 go through the regular per-item path.
-
-        Args:
-            expanded_data: List of data items to process, where each item is a
-                        dictionary containing the input data and metadata
-
-        Note:
-            - Uses ThreadPoolExecutor for concurrent processing
-            - Implements proper error handling for each thread
-            - Shows progress bar with tqdm
-            - Maintains thread safety with class-level file lock
-        """
-        total_tasks = sum(
-            sample_count_for_item(item) if isinstance(item, dict) else 1
-            for item in expanded_data
-        )
+        """Process one independent request per expanded sample."""
         failed_tasks: list[dict[str, Any]] = []
-
-        # Group by stable document ID for batched (n-parameter) sampling.
-        # Using the prompt as the key would merge distinct records that happen
-        # to contain the same text and would corrupt their resume counts.
-        groups: dict[Any, list[dict[str, Any]]] = {}
-        for idx, item in enumerate(expanded_data):
-            key: Any = None
-            if isinstance(item, dict):
-                candidate = item.get("doc_id")
-                if candidate is not None and str(candidate).strip():
-                    key = str(candidate)
-                else:
-                    # Direct callers and legacy in-memory inputs may not carry
-                    # an ID yet; preserve the old prompt grouping in that case.
-                    prompt = item.get(self.args.input_key) or item.get("prompt")
-                    if isinstance(prompt, str) and prompt:
-                        key = prompt
-            if key is None:
-                key = ("__invalid__", idx)
-            groups.setdefault(key, []).append(item)
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.args.max_workers, thread_name_prefix="inference_worker"
         ) as executor:
             futures = {
-                executor.submit(self.process_item_group, group): group
-                for group in groups.values()
+                executor.submit(self.process_item, item): item
+                for item in expanded_data
             }
 
             with tqdm(
-                total=total_tasks, desc="Processing samples", unit="sample"
+                total=len(expanded_data), desc="Processing samples", unit="sample"
             ) as pbar:
                 for future in concurrent.futures.as_completed(futures):
-                    group = futures[future]
+                    item = futures[future]
                     try:
                         future.result()
                     except Exception as e:
-                        logger.warning("Inference group failed: %s", e)
-                        group_samples = self._group_sample_count(group)
+                        logger.warning("Inference sample failed: %s", e)
                         with self._stats_lock:
-                            self._stats["failed"] += group_samples
-                        sample = group[0]
-                        prompt_val = (
-                            sample.get(self.args.input_key, "") or sample.get("prompt")
-                            if isinstance(sample, dict)
-                            else None
-                        )
+                            self._stats["failed"] += 1
+                        prompt_val = item.get(self.args.input_key) or item.get("prompt")
                         failed_tasks.append(
                             {
-                                "doc_id": sample.get("doc_id")
-                                if isinstance(sample, dict)
-                                else None,
-                                "sample_index": sample.get("sample_index")
-                                if isinstance(sample, dict)
-                                else None,
+                                "doc_id": item.get("doc_id"),
+                                "sample_index": item.get("sample_index"),
                                 self.args.input_key: (
                                     str(prompt_val)[:200]
                                     if prompt_val is not None
                                     else None
                                 ),
-                                "samples": group_samples,
                                 "error": str(e),
                                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                             }
                         )
                     finally:
-                        pbar.update(self._group_sample_count(group))
+                        pbar.update(1)
 
         if failed_tasks:
             logger.warning(f"Total failed tasks: {len(failed_tasks)}")
@@ -901,7 +768,7 @@ class InferenceRunner:
         output_path = Path(self.args.output_file)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        total_samples = sum(sample_count_for_item(item) for item in eval_dataset)
+        total_samples = len(eval_dataset)
         logger.info(f"⏳ Processing {total_samples} samples")
         self._process_concurrently(eval_dataset)
 

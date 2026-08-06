@@ -365,96 +365,25 @@ class TestProcessGenerateItem:
         with pytest.raises(RuntimeError, match="no usable text"):
             runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
 
-    def test_multiple_samples_are_requested_and_preserved(self, tmp_path: Path) -> None:
+    def test_single_sample_request_preserves_index(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         runner.config.n_samples = 3
         client = MagicMock()
         client.chat.completions.create.return_value.choices = [
-            _generation_choice(text, index)
-            for index, text in enumerate(("a", "b", "c"))
+            _generation_choice("b")
         ]
 
         result = runner.process_generate_item(
-            {"prompt": "q", "answer": "A"}, client, []
-        )
-
-        assert result["gen"] == ["a", "b", "c"]
-        assert result["sample_indices"] == [0, 1, 2]
-
-    def test_empty_middle_sample_is_compacted_for_resume(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path, mode="generate")
-        runner.config.n_samples = 3
-        client = MagicMock()
-        client.chat.completions.create.return_value.choices = [
-            _generation_choice("a", 0),
-            _generation_choice("", 1),
-            _generation_choice("c", 2),
-        ]
-
-        result = runner.process_generate_item(
-            {"prompt": "q", "answer": "A", "_llmeval_sample_start": 0},
+            {"doc_id": "q1", "prompt": "q", "answer": "A", "sample_index": 1},
             client,
             [],
         )
 
-        assert result["gen"] == ["a", "c"]
-        assert result["sample_indices"] == [0, 2]
-        assert client.chat.completions.create.call_args.kwargs["n"] == 3
-
-    def test_non_contiguous_requested_indices_are_preserved(
-        self, tmp_path: Path
-    ) -> None:
-        runner = _make_mc_runner(tmp_path, mode="generate")
-        client = MagicMock()
-        client.chat.completions.create.return_value.choices = [
-            _generation_choice("b", 0),
-            _generation_choice("d", 1),
-        ]
-
-        result = runner.process_generate_item(
-            {
-                "prompt": "q",
-                "answer": "A",
-                "_llmeval_remaining_samples": 2,
-                "_llmeval_requested_sample_indices": [1, 3],
-            },
-            client,
-            [],
-        )
-
-        assert result["sample_indices"] == [1, 3]
-
-    def test_invalid_requested_indices_are_rejected(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path, mode="generate")
-        client = MagicMock()
-        client.chat.completions.create.return_value.choices = [
-            _generation_choice("a", 0),
-            _generation_choice("b", 1),
-        ]
-
-        with pytest.raises(RuntimeError, match="requested_sample_indices"):
-            runner.process_generate_item(
-                {
-                    "prompt": "q",
-                    "answer": "A",
-                    "_llmeval_remaining_samples": 2,
-                    "_llmeval_requested_sample_indices": [1, 1],
-                },
-                client,
-                [],
-            )
-
-    def test_duplicate_response_positions_are_rejected(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path, mode="generate")
-        runner.config.n_samples = 2
-        client = MagicMock()
-        client.chat.completions.create.return_value.choices = [
-            _generation_choice("a", 0),
-            _generation_choice("b", 0),
-        ]
-
-        with pytest.raises(RuntimeError, match="duplicate sample position"):
-            runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
+        assert result["gen"] == ["b"]
+        assert result["sample_index"] == 1
+        request = client.chat.completions.create.call_args.kwargs
+        assert "n" not in request
+        assert request["seed"] != runner.config.seed
 
 
 class TestMCStableResume:
@@ -468,6 +397,9 @@ class TestMCStableResume:
         )
 
         first = runner.load_data()
+        assert [item["sample_index"] for item in first] == [0, 1, 2]
+        assert all(item["expected_samples"] == 3 for item in first)
+        assert all(not any(key.startswith("_llmeval_") for key in item) for item in first)
         document_id = first[0]["doc_id"]
         Path(runner.config.output_file).write_text(
             json.dumps(
@@ -484,8 +416,9 @@ class TestMCStableResume:
         remaining = runner.load_data()
 
         assert len(remaining) == 1
-        assert remaining[0]["_llmeval_remaining_samples"] == 1
-        assert remaining[0]["_llmeval_sample_start"] == 2
+        assert remaining[0]["sample_index"] == 2
+        assert remaining[0]["expected_samples"] == 3
+        assert not any(key.startswith("_llmeval_") for key in remaining[0])
 
     def test_mixed_stable_and_legacy_output_both_resume(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
@@ -536,8 +469,10 @@ class TestMCStableResume:
 
         remaining = runner.load_data()
 
-        assert remaining[0]["_llmeval_remaining_samples"] == 1
-        assert remaining[0]["_llmeval_requested_sample_indices"] == [1]
+        assert len(remaining) == 1
+        assert remaining[0]["sample_index"] == 1
+        assert remaining[0]["expected_samples"] == 3
+        assert not any(key.startswith("_llmeval_") for key in remaining[0])
 
 
 class TestMCRunnerEndToEnd:

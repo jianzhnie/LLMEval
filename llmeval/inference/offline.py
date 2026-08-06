@@ -35,7 +35,6 @@ from llmeval.inference.common import (
     redact_config_for_logging,
     sample_seed_for_item,
     save_failed_items,
-    to_public_result_schema,
 )
 from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.log import init_logger
@@ -238,7 +237,7 @@ class OfflineInferenceRunner:
                         zip(original_items, responses, strict=True)
                     ):
                         if model_response and model_response.strip():
-                            result = to_public_result_schema(original_item)
+                            result = dict(original_item)
                             existing = result.get(self.args.response_key)
                             gen_list: list[str] = (
                                 list(existing) if isinstance(existing, list) else []
@@ -319,8 +318,7 @@ class OfflineInferenceRunner:
                 resume_state.completed_count,
             )
 
-        # Expand data according to n_samples and resume functionality
-        expanded_data: list[dict[str, Any]] = expand_data_with_resume(
+        expanded_data = expand_data_with_resume(
             raw_data,
             resume_state.completed_indices,
             resume_state.legacy_counts,

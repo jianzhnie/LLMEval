@@ -14,13 +14,10 @@ import pytest
 
 from llmeval.inference.common import (
     expand_data_with_resume,
-    expand_group_for_sampling,
     is_explicit_tool_choice,
     load_jsonl,
     load_resume_state,
-    prepare_data_with_resume,
     redact_config_for_logging,
-    sample_count_for_item,
     sample_seed_for_item,
     save_failed_items,
 )
@@ -153,33 +150,33 @@ class TestCountCompletedSamples:
 
 
 class TestExpandDataWithResume:
-    def test_expands_to_n_samples(self) -> None:
+    def test_expands_all_samples(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
         expanded = expand_data_with_resume(raw, {}, {}, "prompt", 3)
         assert [item["sample_index"] for item in expanded] == [0, 1, 2]
 
-    def test_copies_are_independent(self) -> None:
-        raw = [{"doc_id": "q1", "prompt": "p", "gen": ["existing"]}]
-        expanded = expand_data_with_resume(raw, {}, {}, "prompt", 2)
-        expanded[0]["gen"].append("new")
-        assert expanded[1]["gen"] == ["existing"]
-        assert raw[0]["gen"] == ["existing"]
-
     def test_regenerates_only_missing_indices(self) -> None:
         """A mid-run failure must be retried, not the highest contiguous count."""
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        expanded = expand_data_with_resume(raw, {("q1", "p"): {0, 2}}, {}, "prompt", 4)
+        expanded = expand_data_with_resume(
+            raw, {("q1", "p"): {0, 2}}, {}, "prompt", 4
+        )
         assert [item["sample_index"] for item in expanded] == [1, 3]
 
     def test_all_completed_yields_nothing(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        expanded = expand_data_with_resume(raw, {("q1", "p"): {0, 1}}, {}, "prompt", 2)
-        assert expanded == []
+        assert expand_data_with_resume(
+            raw, {("q1", "p"): {0, 1}}, {}, "prompt", 2
+        ) == []
 
     def test_falls_back_to_legacy_counts(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "legacy"}]
         expanded = expand_data_with_resume(raw, {}, {"legacy": 1}, "prompt", 2)
         assert [item["sample_index"] for item in expanded] == [1]
+
+    def test_rejects_non_positive_sample_count(self) -> None:
+        with pytest.raises(ValueError, match="n_samples must be positive"):
+            expand_data_with_resume([{"doc_id": "q1", "prompt": "q"}], {}, {}, "prompt", 0)
 
     def test_requires_document_id(self) -> None:
         with pytest.raises(ValueError, match="missing required 'doc_id'"):
@@ -190,36 +187,15 @@ class TestExpandDataWithResume:
             expand_data_with_resume([{"doc_id": "q1"}], {}, {}, "prompt", 1)
 
 
-class TestPrepareDataWithResume:
-    def test_sets_remaining_sample_count(self) -> None:
-        raw = [{"doc_id": "q1", "prompt": "q", "answer": "a1"}]
-        prepared = prepare_data_with_resume(raw, {}, {}, "prompt", 3)
-        assert prepared[0]["n_samples"] == 3
-        assert prepared[0]["_llmeval_requested_sample_indices"] == [0, 1, 2]
+class TestExpandedSamples:
+    def test_offline_adapter_keeps_independent_sample_copies(self) -> None:
+        raw = [{"doc_id": "q1", "prompt": "p", "gen": ["existing"]}]
+        expanded = expand_data_with_resume(raw, {}, {}, "prompt", 2)
 
-    def test_rejects_non_positive_sample_count(self) -> None:
-        with pytest.raises(ValueError, match="n_samples must be positive"):
-            prepare_data_with_resume(
-                [{"doc_id": "q1", "prompt": "q"}], {}, {}, "prompt", 0
-            )
-
-    def test_stable_ids_preserve_non_contiguous_missing_indices(self) -> None:
-        prepared = prepare_data_with_resume(
-            [{"doc_id": "q1", "prompt": "q"}],
-            {("q1", "q"): {0, 2}},
-            {},
-            "prompt",
-            4,
-        )
-        assert prepared[0]["n_samples"] == 2
-        assert prepared[0]["_llmeval_requested_sample_indices"] == [1, 3]
-        expanded = expand_group_for_sampling(prepared)
-        assert [item["sample_index"] for item in expanded] == [1, 3]
-
-    def test_missing_prompt_is_schema_error(self) -> None:
-        with pytest.raises(ValueError, match="no non-empty prompt"):
-            prepare_data_with_resume([{"doc_id": "q1"}], {}, {}, "prompt", 1)
-
+        expanded[0]["gen"].append("new")
+        assert [item["sample_index"] for item in expanded] == [0, 1]
+        assert expanded[1]["gen"] == ["existing"]
+        assert raw[0]["gen"] == ["existing"]
 
 class TestLoggingRedaction:
     def test_redacts_nested_credentials_without_mutating_input(self) -> None:
@@ -235,49 +211,6 @@ class TestLoggingRedaction:
             "cookie": "***",
         }
         assert payload["api_key"] == "secret"
-
-
-class TestSampleCountHelpers:
-    def test_sample_count_for_item_defaults_to_one(self) -> None:
-        assert sample_count_for_item({"prompt": "q"}) == 1
-
-    def test_sample_count_for_item_reads_n_samples(self) -> None:
-        assert sample_count_for_item({"n_samples": 4}) == 4
-
-    def test_expand_group_for_sampling_repeats_each_item(self) -> None:
-        items = [
-            {
-                "prompt": "q",
-                "n_samples": 2,
-                "doc_id": "doc:q",
-                "_llmeval_sample_start": 3,
-            }
-        ]
-        expanded = expand_group_for_sampling(items)
-        assert len(expanded) == 2
-        assert expanded[0] is not items[0]
-        assert [item["sample_index"] for item in expanded] == [3, 4]
-
-    def test_expand_group_preserves_target_samples_on_resume(self) -> None:
-        # A resumed batch carries _llmeval_target_samples (the full depth) and
-        # _llmeval_requested_sample_indices (the exact missing indices). The
-        # expanded copies must keep the target so online._build_result writes
-        # expected_samples == 4, and must not leak request-scoped fields.
-        items = [
-            {
-                "prompt": "q",
-                "n_samples": 2,
-                "doc_id": "doc:q",
-                "_llmeval_target_samples": 4,
-                "_llmeval_requested_sample_indices": [2, 3],
-            }
-        ]
-        expanded = expand_group_for_sampling(items)
-        assert [item["sample_index"] for item in expanded] == [2, 3]
-        for item in expanded:
-            assert item["_llmeval_target_samples"] == 4
-            assert "_llmeval_requested_sample_indices" not in item
-            assert "_llmeval_sample_start" not in item
 
 
 class TestSampleSeed:
@@ -357,7 +290,7 @@ class TestStableResumeCounts:
             ("q1", "q"): {2}
         }
 
-    def test_legacy_private_sample_indices_are_honored(self, tmp_path: Path) -> None:
+    def test_internal_resume_fields_are_rejected(self, tmp_path: Path) -> None:
         output = tmp_path / "output.jsonl"
         output.write_text(
             json.dumps(
@@ -365,15 +298,14 @@ class TestStableResumeCounts:
                     "doc_id": "q1",
                     "prompt": "q",
                     "gen": ["a", "b"],
-                    "_llmeval_requested_sample_indices": [1, 3],
+                    "_llmeval_legacy": [1, 3],
                 }
             )
             + "\n"
         )
 
-        assert load_resume_state(output, "prompt", "gen").completed_indices == {
-            ("q1", "q"): {1, 3}
-        }
+        with pytest.raises(ValueError, match="unsupported internal fields"):
+            load_resume_state(output, "prompt", "gen")
 
     def test_duplicate_explicit_indices_are_rejected(self, tmp_path: Path) -> None:
         output = tmp_path / "output.jsonl"

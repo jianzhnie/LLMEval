@@ -34,16 +34,14 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
+    expand_data_with_resume,
     is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
     load_resume_state,
-    missing_sample_indices,
     redact_config_for_logging,
-    require_document_id,
+    sample_seed_for_item,
     save_failed_items,
-    to_public_result_schema,
-    validate_document_ids,
 )
 from llmeval.inference.schema import (
     ChoiceLoglikelihood,
@@ -547,7 +545,6 @@ class MCRunner:
             json.JSONDecodeError: If the input file contains invalid JSON
         """
         raw_data = load_jsonl(self.config.input_file)
-        validate_document_ids(raw_data)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
         resume_state = load_resume_state(
@@ -556,50 +553,23 @@ class MCRunner:
             self.config.response_key,
             repair_truncated_last_line=getattr(self.config, "repair_resume", False),
         )
-        completed_indices = resume_state.completed_indices
-        completed_ids = {document_id for document_id, _ in completed_indices}
-        legacy_counts = resume_state.legacy_counts
-
-        remaining: list[dict[str, Any]] = []
-        for index, raw_item in enumerate(raw_data):
-            item = raw_item.copy()
-            document_id = require_document_id(item, index)
-            target_samples = (
-                self.config.n_samples if self.config.mode == "generate" else 1
-            )
-            rendered_prompt = self.build_prompt(item)
-            identity = (document_id, rendered_prompt)
-            used_indices = completed_indices.get(identity, set())
-            completed = sum(index < target_samples for index in used_indices)
-            if completed == 0:
-                completed = min(
-                    max(legacy_counts.get(rendered_prompt, 0), 0), target_samples
-                )
-            is_completed = completed >= target_samples
-            if not is_completed:
-                if self.config.mode == "generate":
-                    effective_used = used_indices or set(range(completed))
-                    missing_indices = missing_sample_indices(
-                        target_samples, effective_used
-                    )
-                    item["_llmeval_remaining_samples"] = len(missing_indices)
-                    item["_llmeval_requested_sample_indices"] = missing_indices
-                    item["_llmeval_sample_start"] = missing_indices[0]
-                else:
-                    item["sample_index"] = completed
-                remaining.append(item)
-
-        if completed_ids or legacy_counts:
-            logger.info(
-                "Found %d completed items.",
-                len(completed_ids) + len(legacy_counts),
-            )
-
-        total_remaining_samples = sum(
-            int(item.get("_llmeval_remaining_samples", 1)) for item in remaining
+        target_samples = self.config.n_samples if self.config.mode == "generate" else 1
+        remaining = expand_data_with_resume(
+            raw_data,
+            resume_state.completed_indices,
+            resume_state.legacy_counts,
+            self.config.input_key,
+            target_samples,
+            prompt_resolver=self.build_prompt,
         )
-        logger.info("Total remaining items to process: %d", len(remaining))
-        logger.info("Total remaining samples to process: %d", total_remaining_samples)
+
+        if resume_state.completed_count:
+            logger.info(
+                "Found %d completed samples.",
+                resume_state.completed_count,
+            )
+
+        logger.info("Total remaining samples to process: %d", len(remaining))
         return remaining
 
     def build_prompt(self, item: dict[str, Any]) -> str:
@@ -660,15 +630,8 @@ class MCRunner:
                                 self._stats["skipped"] += 1
                         else:
                             self._write_result(result)
-                            generated = result.get(self.config.response_key)
-                            processed_count = (
-                                len(generated)
-                                if self.config.mode == "generate"
-                                and isinstance(generated, list)
-                                else 1
-                            )
                             with self._stats_lock:
-                                self._stats["processed"] += processed_count
+                                self._stats["processed"] += 1
                                 if result.get("correct"):
                                     self._stats["correct"] += 1
                     pbar.update(1)
@@ -689,7 +652,7 @@ class MCRunner:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(output_path, "a", encoding="utf-8") as f:
                     f.write(
-                        json.dumps(to_public_result_schema(result), ensure_ascii=False)
+                        json.dumps(result, ensure_ascii=False)
                         + "\n"
                     )
                     f.flush()  # Ensure data is immediately written
@@ -853,10 +816,7 @@ class MCRunner:
         Args:
             remaining: Items left after resume filtering (see load_data)
         """
-        total_samples = sum(
-            int(item.get("_llmeval_remaining_samples", self.config.n_samples))
-            for item in remaining
-        )
+        total_samples = len(remaining)
         logger.info(
             "⏳ Processing %d item(s), %d generation sample(s)",
             len(remaining),
@@ -916,101 +876,45 @@ class MCRunner:
             "max_tokens": self.config.max_tokens,
             "temperature": self.config.temperature,
             "timeout": self.config.request_timeout,
-            "seed": self.config.seed,
+            "seed": sample_seed_for_item(self.config.seed, item),
         }
-        request_samples = int(
-            item.get("_llmeval_remaining_samples", self.config.n_samples)
-        )
-        if request_samples > 1:
-            call_args["n"] = request_samples
         # tool_choice: only send when explicitly configured
         if is_explicit_tool_choice(self.config.tool_choice):
             call_args["tool_choice"] = self.config.tool_choice
 
-        def do_request() -> tuple[list[str], list[int]]:
+        def do_request() -> str:
             resp = client.chat.completions.create(**call_args)
-            # Reasoning models may return content=None (thinking exhausted
-            # max_tokens); discard empty choices so failed samples are not
-            # written as completed generations.
             raw_choices = getattr(resp, "choices", []) or []
             if not isinstance(raw_choices, list | tuple):
                 try:
                     raw_choices = [raw_choices[0]]
                 except (IndexError, TypeError):
                     raw_choices = []
-            response_generations: list[str] = []
-            response_positions: list[int] = []
-            used_positions: set[int] = set()
-            for fallback_position, choice in enumerate(raw_choices):
-                raw_position = getattr(choice, "index", None)
-                position = fallback_position if raw_position is None else raw_position
-                if type(position) is not int or position < 0:
-                    raise RuntimeError(
-                        f"Generate returned invalid sample position: {position!r}"
-                    )
-                if position >= request_samples:
-                    raise RuntimeError(
-                        f"Generate returned out-of-range sample position: {position}"
-                    )
-                if position in used_positions:
-                    raise RuntimeError(
-                        f"Generate returned duplicate sample position: {position}"
-                    )
-                used_positions.add(position)
-                content = getattr(getattr(choice, "message", None), "content", None)
-                if content:
-                    response_generations.append(str(content))
-                    response_positions.append(position)
-            return response_generations, response_positions
+            if not raw_choices:
+                raise RuntimeError("Generate returned no choices")
+            content = getattr(getattr(raw_choices[0], "message", None), "content", None)
+            if not content:
+                raise RuntimeError("Generate returned empty content")
+            return str(content)
 
-        generations: list[str] = []
-        generation_positions: list[int] = []
+        generation: str | None = None
         try:
-            response_data = call_with_retry(do_request, self.config.max_retries)
-            if response_data is not None:
-                generations, generation_positions = response_data
-        except ClientError as e:
+            generation = call_with_retry(do_request, self.config.max_retries)
+        except (ClientError, RuntimeError) as e:
             raise RuntimeError(f"Generate produced no usable text: {e}") from e
-        if not generations:
+        if not generation:
             # Context-length rejection (None) or null/empty content ("")
             raise RuntimeError("Generate produced no usable text (empty response)")
-
-        requested_indices = item.get("_llmeval_requested_sample_indices")
-        if requested_indices is None:
-            sample_start = int(item.get("_llmeval_sample_start", 0))
-            requested_indices = list(
-                range(sample_start, sample_start + request_samples)
-            )
-        elif not (
-            isinstance(requested_indices, list)
-            and len(requested_indices) == request_samples
-            and all(type(index) is int and index >= 0 for index in requested_indices)
-            and len(set(requested_indices)) == len(requested_indices)
-        ):
-            raise RuntimeError(
-                "Invalid _llmeval_requested_sample_indices: expected "
-                f"{request_samples} unique non-negative ints"
-            )
-        if any(
-            position < 0 or position >= len(requested_indices)
-            for position in generation_positions
-        ):
-            raise RuntimeError("Generate returned an invalid sample position")
-        sample_indices = [
-            requested_indices[position] for position in generation_positions
-        ]
 
         result = {
             self.config.input_key: prompt,
             self.config.label_key: gold,
-            self.config.response_key: generations,
+            self.config.response_key: [generation],
             **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
             "expected_samples": self.config.n_samples,
         }
-        if len(sample_indices) == 1:
-            result["sample_index"] = sample_indices[0]
-        else:
-            result["sample_indices"] = sample_indices
+        if "sample_index" in item:
+            result["sample_index"] = item["sample_index"]
         return result
 
     # ------------------------------------------------------------------
