@@ -481,7 +481,10 @@ def _math_record_status(
     if failure_stage == "input":
         # Gold-truth parsing failed: the dataset row itself is unusable.
         return "skipped"
-    if failure_stage in {"inference", "extraction", "verification"}:
+    # Extraction failures are NOT excluded: the model produced a response but
+    # no parseable answer, which counts as a completed incorrect observation
+    # (grade is already 0.0). They fall through to the checks below.
+    if failure_stage in {"inference", "verification"}:
         return "failed"
     response = item.get(response_key)
     label = item.get(label_key)

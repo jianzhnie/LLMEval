@@ -491,6 +491,14 @@ def check_correctness(
         _cleanup_tmp(tmp_path)
         return _fail(task_id, "failed: SegmentationFault")
 
+    # -- killed by another signal ------------------------------------------------
+    # e.g. SIGKILL/SIGXCPU from RLIMIT_CPU on an infinite loop, or the OOM
+    # killer. The candidate code caused this, so report it separately from a
+    # worker that simply failed to write its result file.
+    if p.exitcode is not None and p.exitcode < 0:
+        _cleanup_tmp(tmp_path)
+        return _fail(task_id, f"failed: killed by signal {-p.exitcode}")
+
     # -- collect result ----------------------------------------------------------
     try:
         with open(tmp_path, encoding="utf-8") as f:

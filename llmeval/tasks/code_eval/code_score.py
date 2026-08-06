@@ -688,7 +688,12 @@ def _score_code_task_result(
 
     correct = sum(1 for r in records if r.get("passed"))
     pass_at_k, problems = _compute_pass_at_k(records, k_values)
-    pass_at_1 = pass_at_k.get("pass@1", 0.0)
+    # pass@1 is always computable (every completed group has n >= 1), so
+    # derive it independently of ``k_values`` rather than defaulting to 0.0
+    # when the caller did not request k=1.
+    pass_at_1 = pass_at_k.get("pass@1")
+    if pass_at_1 is None:
+        pass_at_1 = _compute_pass_at_k(records, (1,))[0].get("pass@1", 0.0)
 
     # Log failures for diagnostics (up to 10).
     failures = [r for r in records if not r.get("passed")]
@@ -730,7 +735,9 @@ def _code_observations(result: CodeScoreResult) -> dict[str, list[float]]:
         grouped.setdefault(group_id, []).append(record)
 
     observations: dict[str, list[float]] = {}
-    for name in result.pass_at_k:
+    # pass@1 is always observable (n >= 1 for every group), even when the
+    # caller's ``k_values`` did not include it.
+    for name in dict.fromkeys(["pass@1", *result.pass_at_k]):
         try:
             k = int(name.removeprefix("pass@"))
         except ValueError:
@@ -748,6 +755,9 @@ def _code_observations(result: CodeScoreResult) -> dict[str, list[float]]:
 def _is_code_infrastructure_failure(record: dict[str, Any]) -> bool:
     """Distinguish scorer/worker failures from ordinary incorrect programs."""
     result = str(record.get("result", "")).lower()
+    # Note: "failed: killed by signal N" (e.g. RLIMIT_CPU/OOM killing a worker
+    # running an infinite loop) is deliberately absent — the candidate code
+    # caused it, so it counts as a completed (incorrect) model observation.
     return result in {
         "scoring error",
         "failed: could not start worker process",

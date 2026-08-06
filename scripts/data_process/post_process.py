@@ -52,7 +52,7 @@ def compute_token_lengths(
     return {
         "prompt_length": prompt_length,
         "gen_length": gen_length,
-        "max_token_length": prompt_length + gen_length,
+        "total_token_length": prompt_length + gen_length,
         "has_boxed": has_boxed,
     }
 
@@ -60,8 +60,8 @@ def compute_token_lengths(
 def should_keep_example(example: dict[str, Any], max_token_length: int) -> bool:
     """Determine if example should be kept based on filtering criteria."""
     # Keep examples that have boxed{} and are within token limit
-    exceeded = example["max_token_length"] > max_token_length
-    return not example["has_boxed"] or exceeded
+    exceeded = example["total_token_length"] > max_token_length
+    return example["has_boxed"] and not exceeded
 
 
 def load_and_validate_args() -> argparse.Namespace:
@@ -90,7 +90,7 @@ def load_and_validate_args() -> argparse.Namespace:
         "--max_token_length",
         type=int,
         default=128,
-        help="Maximum allowed token length for 'gen' field",
+        help="Maximum allowed combined token length of prompt and gen fields",
     )
     parser.add_argument(
         "--num_proc", type=int, default=16, help="Number of processes for filtering"

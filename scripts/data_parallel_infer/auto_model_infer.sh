@@ -420,7 +420,18 @@ acquire_lock() {
 }
 
 release_lock() {
-    rm -f "$LOCK_FILE"
+    # 仅当锁文件中的 PID 等于当前进程 PID 时才删除锁文件，
+    # 避免未持锁的进程（如发现他人正在运行而报错退出时）误删持锁进程的锁，
+    # 导致第三个进程可以并发进入
+    if [[ -f "$LOCK_FILE" ]]; then
+        local lock_pid
+        lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || true)
+        if [[ -n "$lock_pid" && "$lock_pid" == "$$" ]]; then
+            rm -f "$LOCK_FILE"
+        else
+            log_warn "锁文件不属于当前进程 (锁内 PID: '${lock_pid:-空}', 当前 PID: $$)，跳过删除"
+        fi
+    fi
 }
 
 # 权限检查函数
@@ -594,6 +605,44 @@ validate_config() {
 #                  核心功能函数区域
 # =======================================================
 
+# 由端口列表构建匹配本任务 vLLM 进程的 ERE 模式（供 pkill/pgrep -f 使用）
+# 带端口边界 ([[:space:]]|$)，避免 "--port 6000" 误匹配 "--port 60001" 等前缀端口
+# Args:
+#   $@: ports (int...) - 本任务使用的服务端口列表
+# Returns:
+#   打印匹配模式字符串
+build_vllm_kill_pattern() {
+    local port_regex
+    port_regex=$(IFS='|'; echo "$*")
+    echo "vllm serve.*--port (${port_regex})([[:space:]]|\$)"
+}
+
+# 获取指定节点上本任务使用的端口列表（按全局 NODES/PORTS 下标对齐规则）
+# Args:
+#   $1: node (string) - 节点地址
+# Returns:
+#   打印该节点的端口列表（空格分隔），未找到时输出为空
+get_node_ports() {
+    local node="$1"
+    local -a node_ports=()
+    if [[ ${#PORTS[@]} -gt 0 ]]; then
+        for ((i = 0; i < ${#NODES[@]}; i++)); do
+            if [[ "${NODES[i]}" == "$node" ]]; then
+                for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
+                    local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
+                    node_ports+=("${PORTS[port_idx]}")
+                done
+                break
+            fi
+        done
+    fi
+    if [[ ${#node_ports[@]} -gt 0 ]]; then
+        echo "${node_ports[@]}"
+    else
+        echo ""
+    fi
+}
+
 # 停止指定节点上的 vLLM 服务
 # Args:
 #   $1: node (string) - 节点地址
@@ -603,14 +652,25 @@ validate_config() {
 stop_service_on_node() {
     local node="$1"
     local port="${2:-}"
-    local search_pattern="vllm serve"
 
     log_info "🛑 正在停止节点 ${node} 上的 vLLM 服务..."
 
-    # 如果指定了端口，则精确停止该端口的服务
+    # 仅匹配本任务使用的端口，避免裸 'vllm serve' 模式误杀节点上其他任务/用户的 vLLM 进程
+    local -a ports=()
     if [[ -n "$port" ]]; then
-        search_pattern="vllm serve.*--port ${port}"
+        ports=("$port")
+    else
+        # 未指定端口时，回退到该节点在全局端口列表中的所有端口
+        read -r -a ports <<< "$(get_node_ports "$node")" || true
     fi
+
+    if [[ ${#ports[@]} -eq 0 ]]; then
+        log_warn "⚠️ 无法确定节点 ${node} 上本任务使用的端口，跳过清理以避免误杀其他 vLLM 进程"
+        return 0
+    fi
+
+    local search_pattern
+    search_pattern=$(build_vllm_kill_pattern "${ports[@]}")
 
     # 优雅关闭：先发送 SIGTERM
     if ! ssh_run "$node" "pkill -f '${search_pattern}' || true"; then
@@ -645,12 +705,30 @@ stop_service_on_node() {
 stop_services() {
     log_info "🛑 脚本退出，正在停止所有远程模型服务..."
 
-    local search_pattern="vllm serve"
     local pids=()
 
     # 遍历当前已知的节点列表 (可能已被 main 函数更新为 available_nodes)
-    for node in "${NODES[@]}"; do
-        log_info "正在停止节点 ${node} 上的 vLLM 进程..."
+    for ((i = 0; i < ${#NODES[@]}; i++)); do
+        local node="${NODES[i]}"
+        # 仅匹配本任务在该节点上使用的端口，避免裸 'vllm serve' 模式
+        # 误杀节点上其他任务/用户的 vLLM 进程
+        local -a node_ports=()
+        if [[ ${#PORTS[@]} -gt 0 ]]; then
+            for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
+                local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
+                node_ports+=("${PORTS[port_idx]}")
+            done
+        fi
+
+        if [[ ${#node_ports[@]} -eq 0 ]]; then
+            log_warn "⚠️ 无法确定节点 ${node} 上本任务使用的端口，跳过清理以避免误杀其他 vLLM 进程"
+            continue
+        fi
+
+        local search_pattern
+        search_pattern=$(build_vllm_kill_pattern "${node_ports[@]}")
+
+        log_info "正在停止节点 ${node} 上的 vLLM 进程 (端口: ${node_ports[*]})..."
         (
             # 使用 pkill 优雅地发送 SIGTERM，并忽略错误（如果进程已停止）
             ssh_run "$node" "pkill -f '${search_pattern}' || true"
@@ -1076,7 +1154,12 @@ run_task_batch_parallel() {
     if [[ ${#commands[@]} -gt 0 ]]; then
         local combined_cmd=$(printf "%s " "${commands[@]}")
         log_info "🚀 节点 ${node}: ${instance_idx}) .. 提交  ${#commands[@]} 个 OpenAI API Server 推理任务..."
-        ssh_run "$node" "$combined_cmd" >/dev/null 2>&1
+        # 提交失败（SSH 异常）时明确报错退出，而不是静默继续：
+        # 否则后续等待循环会因节点上没有任务而误判“任务已完成”
+        if ! ssh_run "$node" "$combined_cmd" >/dev/null 2>&1; then
+            log_error "❌ 节点 ${node} 推理任务提交失败（SSH 异常），请检查节点连通性后重试"
+            return 1
+        fi
         # 添加一个小延迟以确保任务正确启动
         sleep 2
     else
@@ -1099,7 +1182,14 @@ wait_for_batch_completion_and_cleanup() {
 
     while [[ $total_wait_time -lt $max_wait_time ]]; do
         local current_running_tasks
-        current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null || echo "0")
+        # 区分 SSH 失败与 pgrep 真返回 0：SSH 抖动时不判定完成，
+        # 打 warning 并跳过本轮检查，避免误杀仍在运行的推理服务
+        if ! current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null); then
+            log_warn "⚠️ 节点 ${node} 状态检查失败（SSH 异常，可能是网络抖动），跳过本轮检查，继续等待..."
+            sleep $wait_interval
+            total_wait_time=$((total_wait_time + wait_interval))
+            continue
+        fi
 
         if [[ $current_running_tasks -le 0 ]]; then
             log_info "✅ 节点 ${node} 上的 ${expected_count} 个推理任务已完成"

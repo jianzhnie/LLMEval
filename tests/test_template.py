@@ -49,3 +49,27 @@ class TestIsChatTemplateApplied:
 
     def test_empty_string_returns_false(self) -> None:
         assert is_chat_template_applied("") is False
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "Use <sub>2</sub> for subscripts in chemistry.",
+            "E = mc<sup>2</sup> is famous.",
+            "A <span> tag wraps inline text.",
+            "The <strong> tag marks important text.",
+        ],
+    )
+    def test_html_s_prefixed_tags_return_false(self, query: str) -> None:
+        assert is_chat_template_applied(query) is False
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "<s>",
+            "</s>",
+            "<s>\n[INST] hello [/INST]",
+            "prefix <s> suffix",
+        ],
+    )
+    def test_complete_s_tags_return_true(self, query: str) -> None:
+        assert is_chat_template_applied(query) is True

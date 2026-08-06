@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import signal
 import sys
 import tempfile
 import types
@@ -28,7 +30,9 @@ if "pebble" not in sys.modules and not importlib.util.find_spec("pebble"):
 
 from llmeval.tasks.code_eval.code_score import (
     CodeScoreResult,
+    _code_record_status,
     _failure_code_record,
+    _is_code_infrastructure_failure,
     _process_code_item,
     _strip_think_tags,
     estimate_pass_at_k,
@@ -411,6 +415,91 @@ class TestScoreCode:
         assert summary["total"] == 2
         assert summary["problems"] == 1
         assert [record["sample_index"] for record in records] == [0, 1]
+
+    def test_pass_at_1_reported_when_k_values_exclude_1(
+        self, tmp_path: Path
+    ) -> None:
+        """pass@1 is computed even when the caller's k_values omit 1."""
+        items = [
+            {
+                "task_id": "task/0",
+                "prompt": "def add(a, b):\n",
+                "answer": "\nassert add(1, 2) == 3\n",
+                "gen": ["    return a * b", "    return a + b"],
+            }
+        ]
+        cache_path = tmp_path / "code.jsonl"
+        result = score_code_result(
+            items,
+            "answer",
+            "gen",
+            cache_path,
+            max_workers=0,
+            exec_timeout=3.0,
+            k_values=(2,),
+            allow_unsafe_code=True,
+        )
+
+        assert result.metrics["pass@1"] == pytest.approx(0.5)
+        assert result.metrics["pass@2"] == pytest.approx(1.0)
+        assert result.observations["pass@1"] == [pytest.approx(0.5)]
+        summary = json.loads(cache_path.with_suffix(".summary.json").read_text())
+        assert summary["pass_at_1"] == pytest.approx(0.5)
+
+    def test_killed_by_signal_is_completed_observation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A worker killed by a signal (RLIMIT/OOM) is the model's fault."""
+        # The reliability guard blocks os.kill inside candidate code, so
+        # simulate the kill at the execution layer and use the fork start
+        # method so the patched function reaches the worker process.
+        monkeypatch.setenv("LLMEVAL_MP_METHOD", "fork")
+
+        def _self_killing_execute(
+            check_program: str, timeout: float, exec_globals: object = None
+        ) -> tuple[str, str]:
+            os.kill(os.getpid(), signal.SIGKILL)
+            return ("passed", "")  # pragma: no cover - unreachable
+
+        monkeypatch.setattr(
+            "llmeval.tasks.code_eval.execute.unsafe_execute", _self_killing_execute
+        )
+
+        items = [
+            {
+                "task_id": "task/0",
+                "prompt": "def f():\n",
+                "answer": "\nassert f() == 1\n",
+                "gen": ["    return 1"],
+            }
+        ]
+        result = score_code_result(
+            items,
+            "answer",
+            "gen",
+            tmp_path / "killed.jsonl",
+            max_workers=0,
+            exec_timeout=3.0,
+            allow_unsafe_code=True,
+        )
+
+        record = result.per_item[0]
+        assert record["passed"] is False
+        assert record["result"].startswith("failed: killed by signal")
+        assert record["evaluation_status"] == "completed"
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 1
+        assert result.metrics["pass@1"] == 0.0
+
+    def test_record_status_classification(self) -> None:
+        """Signal kills are model failures; missing results are infra failures."""
+        killed = {"result": "failed: killed by signal 9"}
+        assert _code_record_status(killed) == "completed"
+        assert not _is_code_infrastructure_failure(killed)
+
+        missing = {"result": "failed: worker did not produce a result"}
+        assert _code_record_status(missing) == "failed"
+        assert _is_code_infrastructure_failure(missing)
 
     def test_failure_record(self) -> None:
         """_failure_code_record marks every item as failed."""

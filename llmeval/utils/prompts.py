@@ -51,10 +51,12 @@ _SPECIAL_TOKEN_MARKERS = (
 )
 
 # Llama-style control tokens need context to avoid false positives: bare
-# <s>/</s> collide with HTML strikethrough tags and [INST] can appear glued
-# to ordinary text, so <s>/</s> must sit at the start of the string or right
-# after whitespace/a line start, and [INST] must not touch word characters.
-_S_TAG_RE: re.Pattern[str] = re.compile(r"(?m)(?:^|(?<=\s))</?s>")
+# <s>/</s> collide with HTML tags (<sub>, <sup>, <span>, <strong>, ...) and
+# [INST] can appear glued to ordinary text, so <s>/</s> must be a complete
+# tag sitting at the start of the string or right after whitespace/a line
+# start, followed by whitespace or the end of the string, and [INST] must
+# not touch word characters.
+_S_TAG_RE: re.Pattern[str] = re.compile(r"(?m)(?:^|(?<=\s))</?s>(?=\s|$)")
 _INST_TAG_RE: re.Pattern[str] = re.compile(r"(?<!\w)\[/?INST\](?!\w)")
 
 

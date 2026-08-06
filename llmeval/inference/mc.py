@@ -751,12 +751,9 @@ class MCRunner:
         choice_token_ids: list[list[int] | None] | None = None
         if scoring_mode == "continuation":
             candidate_scores: list[list[float]]
-            try:
-                candidate_scores = self.client.get_choices_continuation_logprobs(
-                    prompt, choice_tokens
-                )
-            except AttributeError:
-                candidate_scores = []
+            candidate_scores = self.client.get_choices_continuation_logprobs(
+                prompt, choice_tokens
+            )
             if (
                 isinstance(candidate_scores, list)
                 and len(candidate_scores) == len(choice_tokens)
