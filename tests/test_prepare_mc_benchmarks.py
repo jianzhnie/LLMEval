@@ -14,8 +14,6 @@ def test_mmlu_pro_builds_dynamic_prompt_without_fixed_template() -> None:
         "test:0",
     )
 
-    assert result["prompt"] == (
-        "Which option?\nA. first\nB. second\nC. third\nAnswer:"
-    )
+    assert result["prompt"] == ("Which option?\nA. first\nB. second\nC. third\nAnswer:")
     assert result["gold"] == 1
     assert result["answer"] == "B"

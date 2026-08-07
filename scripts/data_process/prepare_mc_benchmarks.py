@@ -112,6 +112,7 @@ def _format_mc_row(
         choices: list of choice texts (for loglikelihood mode)
         gold:    integer index of correct answer (for loglikelihood mode)
     """
+
     def choice_labels(count: int) -> list[str]:
         labels: list[str] = []
         for index in range(count):

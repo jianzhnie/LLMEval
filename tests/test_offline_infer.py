@@ -245,7 +245,9 @@ class TestOfflineInferenceRunner:
         runner = _runner(tmp_path, fail_fast=False)
         good_output = SimpleNamespace(outputs=[SimpleNamespace(text="ok")])
 
-        def chat(messages: list[object], *_args: object, **_kwargs: object) -> list[object]:
+        def chat(
+            messages: list[object], *_args: object, **_kwargs: object
+        ) -> list[object]:
             if len(messages) > 1 or messages[0][0]["content"] == "bad":
                 raise ValueError("context length exceeded")
             return [good_output]
