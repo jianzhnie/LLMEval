@@ -7,7 +7,7 @@ This module provides a small, documented wrapper around vLLM to:
 - Run batched chat inference
 - Persist unified results incrementally for robustness
 
-The output schema appends generations into a `gen` list for each input record.
+The output schema stores one generation and one sample index per JSONL row.
 """
 
 from __future__ import annotations
@@ -44,6 +44,18 @@ from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applie
 logger = init_logger("offline_vllm_infer", logging.INFO)
 
 
+def _sample_failure(
+    item: dict[str, Any], category: str, error: object
+) -> dict[str, Any]:
+    """Build a compact failed-sample audit record."""
+    return {
+        "item": {key: item[key] for key in ("doc_id", "sample_index") if key in item},
+        "error_category": category,
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }
+
+
 class OfflineInferenceRunner:
     """Main class to handle offline inference with the vLLM engine.
 
@@ -57,7 +69,6 @@ class OfflineInferenceRunner:
         args: Configuration arguments for the inference process
         _file_lock: Thread lock for safe file writing operations
         llm: vLLM engine instance (initialized during setup)
-        sampling_params: Sampling parameters for text generation
         system_prompt: System prompt text (resolved from system_prompt_type)
     """
 
@@ -73,26 +84,12 @@ class OfflineInferenceRunner:
         self.args: OfflineInferArguments = args
         self._file_lock: threading.Lock = threading.Lock()
         self.llm: LLM | None = None
-        self.sampling_params: SamplingParams | None = None
         self.system_prompt: str | None = SYSTEM_PROMPT_FACTORY.get(
             args.system_prompt_type
         )
 
-    def setup_vllm_engine(self) -> tuple[LLM, SamplingParams]:
-        """Initialize the vLLM engine and sampling parameters.
-
-        This method handles the complete setup of the vLLM engine including:
-        - Model loading with specified parameters
-        - HuggingFace overrides configuration
-        - Sampling parameters setup
-        - Comprehensive error handling and logging
-
-        Returns:
-            A tuple containing the LLM instance and SamplingParams instance.
-
-        Raises:
-            RuntimeError: If engine initialization fails.
-        """
+    def setup_vllm_engine(self) -> LLM:
+        """Initialize and return the configured vLLM engine."""
         logger.info("=" * 60)
         logger.info("🚀 Initializing vLLM Engine")
         logger.info(f"Model: {self.args.model_name_or_path}")
@@ -115,11 +112,8 @@ class OfflineInferenceRunner:
         llm: LLM = LLM(**llm_kwargs)
         logger.info("✅ vLLM engine loaded successfully")
 
-        # Configure sampling parameters
-        sampling_params = self._build_sampling_params(self.args.seed)
-
         logger.info("✅ vLLM engine initialization completed")
-        return llm, sampling_params
+        return llm
 
     def _build_sampling_params(self, seed: int) -> SamplingParams:
         """Build generation parameters for one deterministic sample stream."""
@@ -230,26 +224,26 @@ class OfflineInferenceRunner:
         """Persist non-empty generated responses."""
         if len(original_items) != len(responses):
             raise ValueError("original_items and responses must have equal length")
+        valid_pairs: list[tuple[dict[str, Any], str]] = []
+        failures: list[dict[str, Any]] = []
+        for item, response in zip(original_items, responses, strict=True):
+            if response and response.strip():
+                valid_pairs.append((item, response))
+            else:
+                failures.append(
+                    _sample_failure(item, "inference", "empty model response")
+                )
+        self._handle_sample_failures(failures)
+        if not valid_pairs:
+            return
         with self._file_lock:
             try:
                 with open(self.args.output_file, "a", encoding="utf-8") as f:
-                    for idx, (original_item, model_response) in enumerate(
-                        zip(original_items, responses, strict=True)
-                    ):
-                        if model_response and model_response.strip():
-                            result = dict(original_item)
-                            existing = result.get(self.args.response_key)
-                            gen_list: list[str] = (
-                                list(existing) if isinstance(existing, list) else []
-                            )
-                            gen_list.append(model_response)
-                            result[self.args.response_key] = gen_list
-                            f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                            f.flush()
-                        else:
-                            logger.warning(
-                                "Empty response for item %d, skipping write", idx
-                            )
+                    for original_item, model_response in valid_pairs:
+                        result = dict(original_item)
+                        result[self.args.response_key] = [model_response]
+                        f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    f.flush()
             except Exception as e:
                 raise OSError(f"Failed to write batch results: {e}") from e
 
@@ -320,8 +314,7 @@ class OfflineInferenceRunner:
 
         expanded_data = expand_data_with_resume(
             raw_data,
-            resume_state.completed_indices,
-            resume_state.legacy_counts,
+            resume_state,
             self.args.input_key,
             self.args.n_samples,
         )
@@ -352,18 +345,29 @@ class OfflineInferenceRunner:
             logger.warning("Empty batch data provided")
             return
 
-        if self.llm is None or self.sampling_params is None:
+        if self.llm is None:
             raise RuntimeError(
                 "vLLM engine is not initialized. Call setup_vllm_engine() first."
             )
 
-        # Keep only items that successfully convert to message format
-        valid_items, valid_messages = self._filter_valid_items(batch_data)
-
+        valid_items: list[dict[str, Any]] = []
+        valid_messages: list[list[dict[str, str]]] = []
+        invalid_items: list[dict[str, Any]] = []
+        for item in batch_data:
+            try:
+                messages = self.convert_to_messages_format(item)
+            except ValueError as exc:
+                invalid_items.append(_sample_failure(item, "input_validation", exc))
+                continue
+            if messages is None:
+                invalid_items.append(
+                    _sample_failure(item, "input_validation", "invalid or empty prompt")
+                )
+                continue
+            valid_items.append(item)
+            valid_messages.append(messages)
+        self._handle_sample_failures(invalid_items)
         if not valid_messages:
-            logger.warning(
-                "All items in this batch failed message conversion; skipping."
-            )
             return
 
         outputs: list[RequestOutput] = self.llm.chat(
@@ -377,37 +381,17 @@ class OfflineInferenceRunner:
         responses = [self._extract_model_response(output) for output in outputs]
         self._write_response_results(valid_items, responses)
 
-    def _filter_valid_items(
-        self, batch_data: Sequence[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], list[list[dict[str, str]]]]:
-        """Filter batch data to keep only valid items that can be converted to messages.
-
-        This method processes each item in the batch and attempts to convert it
-        to the messages format, keeping only those that succeed.
-
-        Args:
-            batch_data: Input batch data to filter.
-
-        Returns:
-            Tuple of (valid_items, valid_messages).
-        """
-        valid_items: list[dict[str, Any]] = []
-        valid_messages: list[list[dict[str, str]]] = []
-
-        for item in batch_data:
-            try:
-                messages: list[dict[str, str]] | None = self.convert_to_messages_format(
-                    item
-                )
-                if messages is not None:
-                    valid_items.append(item)
-                    valid_messages.append(messages)
-            except ValueError as e:
-                # Log the error but continue processing other items
-                logger.warning(f"Failed to convert item to messages format: {e}")
-                continue
-
-        return valid_items, valid_messages
+    def _handle_sample_failures(self, failures: list[dict[str, Any]]) -> None:
+        """Apply the configured strict or auditing policy to sample failures."""
+        if not failures:
+            return
+        if self.args.fail_fast:
+            first = failures[0]
+            raise ValueError(
+                f"Sample {first['item']} failed {first['error_category']}: "
+                f"{first['error']}"
+            )
+        save_failed_items(self.args.output_file, failures)
 
     def run(self) -> None:
         """Run the main inference process end-to-end.
@@ -444,7 +428,7 @@ class OfflineInferenceRunner:
         logger.info(f"⏳ Starting to process {len(eval_dataset)} entries")
 
         # Initialize vLLM engine
-        self.llm, self.sampling_params = self.setup_vllm_engine()
+        self.llm = self.setup_vllm_engine()
 
         # Process data in batches
         self._process_batches(eval_dataset)

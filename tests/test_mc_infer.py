@@ -369,9 +369,7 @@ class TestProcessGenerateItem:
         runner = _make_mc_runner(tmp_path, mode="generate")
         runner.config.n_samples = 3
         client = MagicMock()
-        client.chat.completions.create.return_value.choices = [
-            _generation_choice("b")
-        ]
+        client.chat.completions.create.return_value.choices = [_generation_choice("b")]
 
         result = runner.process_generate_item(
             {"doc_id": "q1", "prompt": "q", "answer": "A", "sample_index": 1},
@@ -399,18 +397,24 @@ class TestMCStableResume:
         first = runner.load_data()
         assert [item["sample_index"] for item in first] == [0, 1, 2]
         assert all(item["expected_samples"] == 3 for item in first)
-        assert all(not any(key.startswith("_llmeval_") for key in item) for item in first)
+        assert all(
+            not any(key.startswith("_llmeval_") for key in item) for item in first
+        )
         document_id = first[0]["doc_id"]
         Path(runner.config.output_file).write_text(
-            json.dumps(
-                {
-                    "doc_id": document_id,
-                    "prompt": "q",
-                    "answer": "A",
-                    "gen": ["a", "b"],
-                }
+            "".join(
+                json.dumps(
+                    {
+                        "doc_id": document_id,
+                        "prompt": "q",
+                        "answer": "A",
+                        "gen": [text],
+                        "sample_index": index,
+                    }
+                )
+                + "\n"
+                for index, text in ((0, "a"), (1, "b"))
             )
-            + "\n"
         )
 
         remaining = runner.load_data()
@@ -437,10 +441,18 @@ class TestMCStableResume:
                     "doc_id": stable_id,
                     "prompt": "first",
                     "gen": ["A"],
+                    "sample_index": 0,
                 }
             )
             + "\n"
-            + json.dumps({"prompt": "second", "gen": ["B"]})
+            + json.dumps(
+                {
+                    "doc_id": "test:1",
+                    "prompt": "second",
+                    "gen": ["B"],
+                    "sample_index": 0,
+                }
+            )
             + "\n"
         )
 
@@ -455,16 +467,19 @@ class TestMCStableResume:
             json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "A"}) + "\n"
         )
         Path(runner.config.output_file).write_text(
-            json.dumps(
-                {
-                    "doc_id": "test:0",
-                    "prompt": "q",
-                    "answer": "A",
-                    "gen": ["a", "c"],
-                    "sample_indices": [0, 2],
-                }
+            "".join(
+                json.dumps(
+                    {
+                        "doc_id": "test:0",
+                        "prompt": "q",
+                        "answer": "A",
+                        "gen": [text],
+                        "sample_index": index,
+                    }
+                )
+                + "\n"
+                for index, text in ((0, "a"), (2, "c"))
             )
-            + "\n"
         )
 
         remaining = runner.load_data()

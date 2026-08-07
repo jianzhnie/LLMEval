@@ -224,85 +224,6 @@ class InferenceClient:
         # max_tokens); normalize to "" so callers can treat it uniformly
         return completion.choices[0].message.content or ""
 
-    def get_contents(
-        self,
-        query: str,
-        system_prompt: str | None,
-        model_name: str,
-        max_tokens: int,
-        temperature: float,
-        top_p: float,
-        top_k: int,
-        enable_thinking: bool,
-        n: int,
-    ) -> list[str]:
-        """Deprecated multi-sample API kept for compatibility tests and clients.
-
-        Production benchmark inference expands samples before dispatch and
-        calls :meth:`get_content` once per sample. New callers should follow
-        that protocol so resume state remains one row per sample.
-
-        Args:
-            query: User's input query
-            system_prompt: System prompt for the conversation (optional)
-            model_name: The model to use for generation
-            max_tokens: Maximum tokens to generate per sample
-            temperature: The sampling temperature (0.0 to 2.0)
-            top_p: The top-p value for nucleus sampling (0.0 to 1.0)
-            top_k: The top-k value for sampling (positive integer)
-            enable_thinking: Whether to enable the "thinking" feature
-            n: Number of samples to generate for this prompt (must be >= 1)
-
-        Returns:
-            List of generated content strings, one per returned choice
-            (null contents normalized to ""). Empty list when the request
-            could not produce samples (e.g. context length exceeded).
-
-        Raises:
-            ClientError: If there's a non-retryable API issue or max retries exceeded
-            ValueError: If input parameters are invalid or out of range
-        """
-        if n < 1:
-            raise ValueError(f"n must be >= 1, got: {n}")
-        call_args = self._build_call_args(
-            query,
-            system_prompt,
-            model_name,
-            max_tokens,
-            temperature,
-            top_p,
-            top_k,
-            enable_thinking,
-            n=n,
-        )
-        completion = self._request_with_retry(call_args)
-        if completion is None:
-            return []  # context length exceeded (logged in _request_with_retry)
-        choices = completion.choices
-        choice_indices = [getattr(choice, "index", None) for choice in choices]
-        indexed = any(index is not None for index in choice_indices)
-        if indexed and any(type(index) is not int for index in choice_indices):
-            raise ValueError("Response choices contain invalid non-integer indices")
-
-        ordered = [""] * n
-        if indexed:
-            used: set[int] = set()
-            for choice, index in zip(choices, choice_indices, strict=True):
-                assert isinstance(index, int)
-                if index < 0 or index >= n:
-                    raise ValueError(f"Response choice index out of range: {index}")
-                if index in used:
-                    raise ValueError(f"Duplicate response choice index: {index}")
-                used.add(index)
-                ordered[index] = choice.message.content or ""
-            return ordered
-
-        if len(choices) > n:
-            raise ValueError(f"Response returned {len(choices)} choices for n={n}")
-        for index, choice in enumerate(choices):
-            ordered[index] = choice.message.content or ""
-        return ordered
-
     def _build_call_args(
         self,
         query: str,
@@ -313,7 +234,6 @@ class InferenceClient:
         top_p: float,
         top_k: int,
         enable_thinking: bool,
-        n: int = 1,
         seed: int | None = None,
     ) -> dict[str, Any]:
         """Validate inputs and assemble chat.completions call arguments.
@@ -327,7 +247,6 @@ class InferenceClient:
             top_p: Nucleus sampling threshold
             top_k: Top-k sampling parameter (sent via extra_body)
             enable_thinking: Whether to enable the "thinking" feature
-            n: Number of samples per request; only sent when > 1
 
         Returns:
             Keyword arguments dict for client.chat.completions.create.
@@ -354,9 +273,6 @@ class InferenceClient:
             "timeout": self.timeout,
             "seed": getattr(self, "seed", 0) if seed is None else seed,
         }
-        # n: only sent for multi-sample requests (single-sample default is 1)
-        if n > 1:
-            call_args["n"] = n
         # tool_choice: only send when explicitly configured (vLLM 0.23+ supports it)
         if is_explicit_tool_choice(self.tool_choice):
             call_args["tool_choice"] = self.tool_choice
@@ -365,7 +281,6 @@ class InferenceClient:
     def _request_with_retry(self, call_args: dict[str, Any]) -> Any | None:
         """Execute a chat.completions call under the shared retry policy.
 
-        Shared by get_content (single sample) and get_contents (n samples).
         The attempt loop and classification policy live in
         :func:`llmeval.utils.retry.call_with_retry` (same as mc.py); only the
         request itself — plus a structure probe so malformed responses are
@@ -543,8 +458,7 @@ class InferenceRunner:
 
         prepared_data = expand_data_with_resume(
             raw_data,
-            resume_state.completed_indices,
-            resume_state.legacy_counts,
+            resume_state,
             self.args.input_key,
             self.args.n_samples,
         )
@@ -565,10 +479,7 @@ class InferenceRunner:
         with self._file_lock:
             try:
                 with open(self.args.output_file, "a", encoding="utf-8") as f:
-                    f.write(
-                        json.dumps(result, ensure_ascii=False)
-                        + "\n"
-                    )
+                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
                     f.flush()  # Ensure data is immediately written
             except Exception as e:
                 raise OSError(f"Failed to write batch results: {e}") from e
@@ -623,10 +534,7 @@ class InferenceRunner:
             return None
 
         result = item.copy()
-        existing = result.get(self.args.response_key)
-        gen_list = list(existing) if isinstance(existing, list) else []
-        gen_list.append(response)
-        result[self.args.response_key] = gen_list
+        result[self.args.response_key] = [response]
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
@@ -676,15 +584,9 @@ class InferenceRunner:
             return None
 
         # Step 4: Result Persistence
-        try:
-            self._write_result(result)
-            with self._stats_lock:
-                self._stats["processed"] += 1
-        except OSError as e:
-            logger.error(f"Failed to write result: {e}")
-            with self._stats_lock:
-                self._stats["failed"] += 1
-            return None
+        self._write_result(result)
+        with self._stats_lock:
+            self._stats["processed"] += 1
 
         return result
 
@@ -696,8 +598,7 @@ class InferenceRunner:
             max_workers=self.args.max_workers, thread_name_prefix="inference_worker"
         ) as executor:
             futures = {
-                executor.submit(self.process_item, item): item
-                for item in expanded_data
+                executor.submit(self.process_item, item): item for item in expanded_data
             }
 
             with tqdm(
@@ -706,7 +607,16 @@ class InferenceRunner:
                 for future in concurrent.futures.as_completed(futures):
                     item = futures[future]
                     try:
-                        future.result()
+                        result = future.result()
+                        if result is None:
+                            failed_tasks.append(
+                                {
+                                    "doc_id": item.get("doc_id"),
+                                    "sample_index": item.get("sample_index"),
+                                    "error_category": "sample_processing",
+                                    "error": "sample was skipped or returned an empty response",
+                                }
+                            )
                     except Exception as e:
                         logger.warning("Inference sample failed: %s", e)
                         with self._stats_lock:

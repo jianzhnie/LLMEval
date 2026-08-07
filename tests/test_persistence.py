@@ -36,9 +36,13 @@ def test_serialization_failure_preserves_old_file_and_cleans_temp(
     assert list(tmp_path.glob(f".{output.name}.*.tmp")) == []
 
 
-def test_interrupted_generator_preserves_old_file_and_cleans_temp(
-    tmp_path: Path,
-) -> None:
+def test_interrupted_generator_preserves_temp_for_recovery(tmp_path: Path) -> None:
+    """A KeyboardInterrupt mid-write must propagate and keep the temp file.
+
+    The destination stays untouched (still the previous complete content);
+    the uniquely-named sibling temporary is preserved so a partial write is
+    not silently discarded — the user can recover it after the interrupt.
+    """
     output = tmp_path / "result.jsonl"
     original = '{"old": true}\n'
     output.write_text(original)
@@ -51,4 +55,6 @@ def test_interrupted_generator_preserves_old_file_and_cleans_temp(
         atomic_write_jsonl(output, records())
 
     assert output.read_text() == original
-    assert list(tmp_path.glob(f".{output.name}.*.tmp")) == []
+    leftover = list(tmp_path.glob(f".{output.name}.*.tmp"))
+    assert len(leftover) == 1
+    assert json.loads(leftover[0].read_text()) == {"ok": 1}

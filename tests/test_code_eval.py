@@ -332,9 +332,11 @@ class TestScoreCode:
         result = score_code_result(
             [
                 {
+                    "task_id": "task/0",
                     "prompt": "def f():\n",
                     "answer": "\nassert f() == 1\n",
                     "gen": ["    return 2"],
+                    "sample_index": 0,
                 }
             ],
             "answer",
@@ -367,14 +369,18 @@ class TestScoreCode:
     def test_all_pass(self) -> None:
         items = [
             {
+                "task_id": "task/0",
                 "prompt": "def add(a, b):\n",
                 "answer": "\nassert add(2, 3) == 5\n",
                 "gen": ["    return a + b"],
+                "sample_index": 0,
             },
             {
+                "task_id": "task/1",
                 "prompt": "def sub(a, b):\n",
                 "answer": "\nassert sub(5, 2) == 3\n",
                 "gen": ["    return a - b"],
+                "sample_index": 0,
             },
         ]
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
@@ -405,14 +411,18 @@ class TestScoreCode:
     def test_mixed_results(self) -> None:
         items = [
             {
+                "task_id": "task/0",
                 "prompt": "def add(a, b):\n",
                 "answer": "\nassert add(2, 3) == 5\n",
                 "gen": ["    return a + b"],
+                "sample_index": 0,
             },  # correct
             {
+                "task_id": "task/1",
                 "prompt": "def sub(a, b):\n",
                 "answer": "\nassert sub(5, 2) == 3\n",
                 "gen": ["    return a * b"],
+                "sample_index": 0,
             },  # wrong
         ]
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
@@ -443,14 +453,18 @@ class TestScoreCode:
         """
         items = [
             {
+                "task_id": "task/0",
                 "prompt": "def add(a, b):\n",
                 "answer": "\nassert add(2, 3) == 5\n",
                 "gen": ["    return a + b"],
+                "sample_index": 0,
             },
             {
+                "task_id": "task/1",
                 "prompt": "def sub(a, b):\n",
                 "answer": "\nassert sub(5, 2) == 3\n",
                 "gen": ["    return a - b"],
+                "sample_index": 0,
             },
         ]
         acc = score_code(
@@ -477,7 +491,13 @@ class TestScoreCode:
 
     def test_empty_generation_marked_failed(self) -> None:
         items = [
-            {"prompt": "def foo():\n", "answer": "\nassert foo() == 1\n", "gen": [""]},
+            {
+                "task_id": "task/0",
+                "prompt": "def foo():\n",
+                "answer": "\nassert foo() == 1\n",
+                "gen": [""],
+                "sample_index": 0,
+            },
         ]
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
             cache_path = Path(tf.name)
@@ -501,8 +521,16 @@ class TestScoreCode:
                 "task_id": "task/0",
                 "prompt": "def add(a, b):\n",
                 "answer": "\nassert add(1, 2) == 3\n",
-                "gen": ["    return a * b", "    return a + b"],
-            }
+                "gen": ["    return a * b"],
+                "sample_index": 0,
+            },
+            {
+                "task_id": "task/0",
+                "prompt": "def add(a, b):\n",
+                "answer": "\nassert add(1, 2) == 3\n",
+                "gen": ["    return a + b"],
+                "sample_index": 1,
+            },
         ]
         cache_path = tmp_path / "code.jsonl"
         acc = score_code(
@@ -532,8 +560,16 @@ class TestScoreCode:
                 "task_id": "task/0",
                 "prompt": "def add(a, b):\n",
                 "answer": "\nassert add(1, 2) == 3\n",
-                "gen": ["    return a * b", "    return a + b"],
-            }
+                "gen": ["    return a * b"],
+                "sample_index": 0,
+            },
+            {
+                "task_id": "task/0",
+                "prompt": "def add(a, b):\n",
+                "answer": "\nassert add(1, 2) == 3\n",
+                "gen": ["    return a + b"],
+                "sample_index": 1,
+            },
         ]
         cache_path = tmp_path / "code.jsonl"
         result = score_code_result(
@@ -582,6 +618,7 @@ class TestScoreCode:
                 "prompt": "def f():\n",
                 "answer": "\nassert f() == 1\n",
                 "gen": ["    return 1"],
+                "sample_index": 0,
             }
         ]
         result = score_code_result(
@@ -735,6 +772,7 @@ class TestScoreCodeThinkTags:
                 "gen": [
                     "<think>I should add them</think>\n```python\n    return a + b\n```"
                 ],
+                "sample_index": 0,
             }
         ]
         acc = score_code(
@@ -762,6 +800,7 @@ class TestScoreCodePromptModes:
                 ),
                 "answer": "\nassert add(2, 3) == 5\n",
                 "gen": ["def add(a, b):\n    return a + b"],
+                "sample_index": 0,
             }
         ]
 
@@ -785,6 +824,7 @@ class TestScoreCodePromptModes:
                 "prompt": "def add(a, b):\n",
                 "answer": "\nassert add(2, 3) == 5\n",
                 "gen": ["def add(a, b):\n    return a + b"],
+                "sample_index": 0,
             }
         ]
 
@@ -806,6 +846,7 @@ class TestScoreCodePromptModes:
                 "prompt": "def add(a, b):\n",
                 "answer": "\nassert add(1, 2) == 3\n",
                 "gen": ["<answer>```python\n    return a + b\n```</answer>"],
+                "sample_index": 0,
             }
         ]
         acc = score_code(
@@ -870,6 +911,7 @@ class TestCodeSampleIndexProtocol:
             "prompt": self._PROMPT,
             "answer": self._TEST,
             "gen": gen,
+            "sample_index": 0,
             **extra,
         }
 
@@ -898,47 +940,31 @@ class TestCodeSampleIndexProtocol:
         assert [record["sample_index"] for record in records] == [0, 2]
         assert acc == pytest.approx(0.5)
 
-    def test_multi_sample_row_keeps_explicit_indices(self, tmp_path: Path) -> None:
-        items = [self._item([self._WRONG, self._RIGHT], sample_indices=[1, 3])]
-        _, records = self._score(items, tmp_path)
-        assert [record["sample_index"] for record in records] == [1, 3]
-        assert all("sample_indices" not in record for record in records)
-
-    @pytest.mark.parametrize(
-        "bad_fields",
-        [
-            {"sample_indices": [0, -1]},  # negative index
-            {"sample_indices": [0]},  # length mismatch (2 generations)
-            {"sample_indices": ["0", "1"]},  # wrong element type
-            {"sample_indices": [0, 0]},  # duplicate index
-        ],
-        ids=["negative", "length-mismatch", "wrong-type", "duplicate"],
-    )
-    def test_invalid_sample_indices_raise(
-        self, bad_fields: dict, tmp_path: Path
-    ) -> None:
-        items = [self._item([self._WRONG, self._RIGHT], **bad_fields)]
-        with pytest.raises(ValueError, match="sample_indices"):
+    def test_multi_generation_row_is_rejected(self, tmp_path: Path) -> None:
+        items = [self._item([self._WRONG, self._RIGHT])]
+        with pytest.raises(ValueError, match="one generation per row"):
             self._score(items, tmp_path)
+
+    def test_multi_sample_row_requires_task_id(self, tmp_path: Path) -> None:
+        item = self._item([self._WRONG, self._RIGHT])
+        item.pop("task_id")
+
+        with pytest.raises(ValueError, match=r"missing required.*task_id"):
+            self._score([item], tmp_path)
 
     def test_invalid_scalar_sample_index_raises(self, tmp_path: Path) -> None:
         items = [self._item([self._RIGHT], sample_index=-1)]
         with pytest.raises(ValueError, match="sample_index"):
             self._score(items, tmp_path)
 
-    def test_conflicting_single_sample_index_fields_raise(self, tmp_path: Path) -> None:
-        items = [
-            self._item(
-                [self._RIGHT], sample_index=0, sample_indices=[1]
-            )
-        ]
-        with pytest.raises(ValueError, match="exactly one"):
-            self._score(items, tmp_path)
+    def test_missing_sample_index_raises(self, tmp_path: Path) -> None:
+        item = self._item([self._RIGHT])
+        item.pop("sample_index")
+        with pytest.raises(ValueError, match="sample_index"):
+            self._score([item], tmp_path)
 
-    def test_empty_generation_with_empty_indices_is_recorded(
-        self, tmp_path: Path
-    ) -> None:
-        items = [self._item([], sample_indices=[])]
+    def test_empty_generation_is_recorded(self, tmp_path: Path) -> None:
+        items = [self._item([])]
 
         acc, records = self._score(items, tmp_path)
 
@@ -1068,6 +1094,7 @@ class TestTimeoutClassification:
                 "prompt": "def f():\n",
                 "answer": "\nf()\n",
                 "gen": ["    while True:\n        pass"],
+                "sample_index": 0,
             }
         ]
         result = score_code_result(
@@ -1104,18 +1131,21 @@ class TestDefaultScoringPath:
                 "prompt": "def add(a, b):\n",
                 "answer": "\nassert add(2, 3) == 5\n",
                 "gen": ["    return a + b"],
+                "sample_index": 0,
             },
             {
                 "task_id": "task/1",
                 "prompt": "def square(x):\n",
                 "answer": "\nassert square(3) == 9\nassert square(4) == 16\n",
                 "gen": ["    return x * x"],
+                "sample_index": 0,
             },
             {
                 "task_id": "task/2",
                 "prompt": "def sub(a, b):\n",
                 "answer": "\nassert sub(5, 2) == 3\n",
                 "gen": ["    return a + b"],  # wrong on purpose
+                "sample_index": 0,
             },
         ]
         result = score_code_result(

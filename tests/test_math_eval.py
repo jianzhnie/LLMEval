@@ -26,7 +26,13 @@ pytestmark = pytest.mark.skipif(
 def _math_item(
     answer: str, gen: list[str], task: str = "math_opensource/aime24"
 ) -> dict:
-    return {"prompt": "q", "answer": answer, "gen": gen, "task": task}
+    return {
+        "prompt": "q",
+        "answer": answer,
+        "gen": gen,
+        "task": task,
+        "sample_index": 0,
+    }
 
 
 # ===========================================================================
@@ -305,7 +311,12 @@ class TestComputeScores:
 
         data = [
             _math_item("5", ["$\\boxed{5}$"]),
-            {"prompt": "q", "answer": "3", "task": "math_opensource/aime24"},
+            {
+                "prompt": "q",
+                "answer": "3",
+                "task": "math_opensource/aime24",
+                "sample_index": 0,
+            },
         ]
         result = compute_score_result(
             eval_dataset=data,
@@ -328,20 +339,32 @@ class TestComputeScores:
 
         data = [
             {
-                **_math_item(
-                    "5",
-                    ["$\\boxed{5}$", "$\\boxed{6}$", "$\\boxed{5}$"],
-                ),
+                **_math_item("5", ["$\\boxed{5}$"]),
                 "doc_id": "aime24:0",
-                "sample_indices": [0, 1, 2],
             },
             {
-                **_math_item(
-                    "7",
-                    ["$\\boxed{8}$", "$\\boxed{7}$", "$\\boxed{8}$"],
-                ),
+                **_math_item("5", ["$\\boxed{6}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": 1,
+            },
+            {
+                **_math_item("5", ["$\\boxed{5}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": 2,
+            },
+            {
+                **_math_item("7", ["$\\boxed{8}$"]),
                 "doc_id": "aime24:1",
-                "sample_indices": [0, 1, 2],
+            },
+            {
+                **_math_item("7", ["$\\boxed{7}$"]),
+                "doc_id": "aime24:1",
+                "sample_index": 1,
+            },
+            {
+                **_math_item("7", ["$\\boxed{8}$"]),
+                "doc_id": "aime24:1",
+                "sample_index": 2,
             },
         ]
 
@@ -445,43 +468,18 @@ class TestSampleIndexProtocol:
         ]
         result = self._score(data, tmp_path)
         assert [item["sample_index"] for item in result.per_item] == [0, 2]
-        assert all("sample_indices" not in item for item in result.per_item)
         problems = result.details["problem_level"]
         assert problems[0]["sample_count"] == 2
         assert problems[0]["correct_samples"] == 1
 
-    def test_multi_sample_row_keeps_explicit_indices(self, tmp_path: Path) -> None:
+    def test_multi_generation_row_is_rejected(self, tmp_path: Path) -> None:
         data = [
             {
                 **_math_item("5", ["$\\boxed{5}$", "$\\boxed{6}$"]),
                 "doc_id": "aime24:0",
-                "sample_indices": [1, 3],
             }
         ]
-        result = self._score(data, tmp_path)
-        assert [item["sample_index"] for item in result.per_item] == [1, 3]
-
-    @pytest.mark.parametrize(
-        "bad_fields",
-        [
-            {"sample_indices": [0, -1]},  # negative index
-            {"sample_indices": [0]},  # length mismatch (2 generations)
-            {"sample_indices": ["0", "1"]},  # wrong element type
-            {"sample_indices": [0, 0]},  # duplicate index
-        ],
-        ids=["negative", "length-mismatch", "wrong-type", "duplicate"],
-    )
-    def test_invalid_sample_indices_raise(
-        self, bad_fields: dict, tmp_path: Path
-    ) -> None:
-        data = [
-            {
-                **_math_item("5", ["$\\boxed{5}$", "$\\boxed{6}$"]),
-                "doc_id": "aime24:0",
-                **bad_fields,
-            }
-        ]
-        with pytest.raises(ValueError, match="sample_indices"):
+        with pytest.raises(ValueError, match="one generation per row"):
             self._score(data, tmp_path)
 
     def test_invalid_scalar_sample_index_raises(self, tmp_path: Path) -> None:
@@ -495,26 +493,17 @@ class TestSampleIndexProtocol:
         with pytest.raises(ValueError, match="sample_index"):
             self._score(data, tmp_path)
 
-    def test_conflicting_single_sample_index_fields_raise(self, tmp_path: Path) -> None:
-        data = [
-            {
-                **_math_item("5", ["$\\boxed{5}$"]),
-                "doc_id": "aime24:0",
-                "sample_index": 0,
-                "sample_indices": [1],
-            }
-        ]
-        with pytest.raises(ValueError, match="exactly one"):
-            self._score(data, tmp_path)
+    def test_missing_sample_index_raises(self, tmp_path: Path) -> None:
+        item = {**_math_item("5", ["$\\boxed{5}$"]), "doc_id": "aime24:0"}
+        item.pop("sample_index")
+        with pytest.raises(ValueError, match="sample_index"):
+            self._score([item], tmp_path)
 
-    def test_empty_generation_with_empty_indices_is_recorded(
-        self, tmp_path: Path
-    ) -> None:
+    def test_empty_generation_is_recorded(self, tmp_path: Path) -> None:
         data = [
             {
                 **_math_item("5", []),
                 "doc_id": "aime24:0",
-                "sample_indices": [],
             }
         ]
 
@@ -523,7 +512,7 @@ class TestSampleIndexProtocol:
         assert result.sample_count == 1
         assert result.failed_count == 1
         assert result.per_item[0]["failure_stage"] == "inference"
-        assert "sample_index" not in result.per_item[0]
+        assert result.per_item[0]["sample_index"] == 0
 
     def test_idempotent_duplicate_merges(self, tmp_path: Path) -> None:
         """Same index + same content merges without error."""
@@ -607,16 +596,12 @@ class TestProblemCompleteness:
         """64 records with a repeated index (idempotent retry) are incomplete."""
         from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
 
-        rows = [
-            {**_scored_sample("p1", i, correct=False), "_math_problem_index": 0}
-            for i in range(63)
-        ]
+        rows = [_scored_sample("p1", i, correct=False) for i in range(63)]
         rows.append(dict(rows[0]))  # identical duplicate of sample 0
         problems, metrics, _ = _build_problem_level_metrics(rows, expected_samples=64)
         assert problems[0]["sample_count"] == 63  # merged idempotently
         assert problems[0]["complete"] is False
         assert metrics["problem_pass@64"] == 0.0
-        assert all("_math_problem_index" not in item for item in rows)
 
     def test_out_of_range_index_marks_incomplete(self) -> None:
         """64 records covering indices 0..62 plus 64 are incomplete."""
@@ -635,9 +620,13 @@ class TestProblemCompleteness:
 
         data = [
             {
-                **_math_item("5", ["$\\boxed{5}$", "$\\boxed{6}$"]),
+                **_math_item("5", ["$\\boxed{5}$"]),
                 "doc_id": "aime24:0",
-                "sample_indices": [0, 1],
+            },
+            {
+                **_math_item("5", ["$\\boxed{6}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": 1,
             },
             {
                 **_math_item("7", ["$\\boxed{7}$"]),

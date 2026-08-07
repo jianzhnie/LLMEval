@@ -113,7 +113,14 @@ class TestEvaluateTask:
 
     def test_mc_generate_dispatch(self, tmp_path: Path) -> None:
         """Items without 'logprobs' route to score_generate."""
-        data = [{"answer": "B", "gen": ["Answer: B"], "task": "mc_opensource/mmlu"}]
+        data = [
+            {
+                "answer": "B",
+                "gen": ["Answer: B"],
+                "sample_index": 0,
+                "task": "mc_opensource/mmlu",
+            }
+        ]
         acc = evaluate_task(
             data, "mc_opensource/mmlu", "answer", "gen", tmp_path / "mc.jsonl", 1
         )
@@ -162,6 +169,7 @@ class TestEvaluateTask:
                 "prompt": "def add(a, b):\n",
                 "answer": "\nassert add(1, 2) == 3\n",
                 "gen": ["    return a + b"],
+                "sample_index": 0,
                 "task": "code_opensource/humaneval",
             }
         ]

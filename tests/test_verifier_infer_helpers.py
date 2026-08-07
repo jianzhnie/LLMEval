@@ -24,9 +24,7 @@ _vllm_absent = importlib.util.find_spec("vllm") is None
 if _vllm_absent:
     sys.modules["vllm"] = types.ModuleType("vllm")
     sys.modules["vllm.outputs"] = types.ModuleType("vllm.outputs")
-    sys.modules["vllm"].__spec__ = importlib.machinery.ModuleSpec(
-        "vllm", loader=None
-    )
+    sys.modules["vllm"].__spec__ = importlib.machinery.ModuleSpec("vllm", loader=None)
     sys.modules["vllm.outputs"].__spec__ = importlib.machinery.ModuleSpec(
         "vllm.outputs", loader=None
     )
@@ -218,7 +216,6 @@ class TestVerifierResume:
         runner.verifier_prompt = "{question}\n{gold_answer}\n{llm_response}"
         runner.llm = None
         runner.tokenizer = None
-        runner.sampling_params = None
         return runner
 
     def test_sampling_params_are_independent_and_honor_decoding_flags(
@@ -257,15 +254,18 @@ class TestVerifierResume:
         assert result["gen"] == ""
         assert result["doc_id"] == "doc:1"
 
+        # The strict resume protocol requires each completed row to carry an
+        # explicit sample_index; the row is then counted via load_resume_state.
+        result["sample_index"] = 0
         Path(runner.args.output_file).write_text(
             json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8"
         )
-        counts = {
-            key: len(indices)
-            for key, indices in runner.get_completed_sample_indices().items()
-        }
+        Path(runner.args.input_file).write_text(
+            json.dumps(item, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
 
-        assert counts["doc:1"] == 1
+        remaining = runner.load_data()
+        assert remaining == []
 
     def test_load_data_skips_completed_doc_id(self, tmp_path: Path) -> None:
         runner = self._runner(tmp_path)
@@ -274,6 +274,7 @@ class TestVerifierResume:
             json.dumps(item, ensure_ascii=False) + "\n", encoding="utf-8"
         )
         result = runner._prepare_result_item(item, "\\boxed{A}")
+        result["sample_index"] = 0
         Path(runner.args.output_file).write_text(
             json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8"
         )
@@ -297,9 +298,11 @@ class TestVerifierResume:
         Path(runner.args.input_file).write_text(json.dumps(item) + "\n")
         result = runner._prepare_result_item(item, "unclassifiable response")
         result["Verifier_judgment"] = ""
+        result["sample_index"] = 0
         Path(runner.args.output_file).write_text(json.dumps(result) + "\n")
 
-        assert len(runner.get_completed_sample_indices()["doc:1"]) == 1
+        # A Verifier_response is complete regardless of whether the judgment
+        # parser could classify it, so the row counts as completed.
         assert runner.load_data() == []
 
     def test_resume_preserves_missing_sample_index(self, tmp_path: Path) -> None:

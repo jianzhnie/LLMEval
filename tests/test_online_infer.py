@@ -173,10 +173,11 @@ class TestProcessItem:
         original_gen = item["gen"].copy()
         result = runner.process_item(item)
 
-        # The original item's gen list should not be modified
+        # The original item's gen list should not be modified.
         assert item["gen"] == original_gen
+        # One row per sample: the fresh response replaces the prior gen.
         assert result is not None
-        assert result["gen"] == ["existing", "test response"]
+        assert result["gen"] == ["test response"]
 
 
 # ── InferenceClient request behavior ──────────────────────────────
@@ -377,74 +378,24 @@ class TestInferenceClientInit:
         assert fake_openai.call_args.kwargs["organization"] == "org-test"
 
 
-class TestGetContents:
-    def test_n_parameter_sent_and_list_returned(self) -> None:
-        client = _make_client()
-        client.client.chat.completions.create.return_value = _fake_completion(
-            ["a", "b", None]
-        )
-        result = client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=3)
-        assert result == ["a", "b", ""]  # null normalized
-        assert client.client.chat.completions.create.call_args.kwargs["n"] == 3
-
+class TestGetContentSingleSample:
     def test_single_sample_omits_n(self) -> None:
         client = _make_client()
         client.client.chat.completions.create.return_value = _fake_completion(["a"])
-        client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=1)
+        result = client.get_content("q", None, "m", 8, 0.6, 1.0, 40, False)
+        assert result == "a"
         assert "n" not in client.client.chat.completions.create.call_args.kwargs
 
-    def test_context_length_returns_empty_list(self) -> None:
+    def test_empty_query_raises(self) -> None:
         client = _make_client()
-        client.client.chat.completions.create.side_effect = _make_api_error(
-            "This model's maximum context length is 8192"
-        )
-        assert client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=4) == []
+        with pytest.raises(ValueError, match="Query cannot be empty"):
+            client.get_content("", None, "m", 8, 0.6, 1.0, 40, False)
 
-    def test_invalid_n_raises(self) -> None:
+    def test_seed_forwarded_when_provided(self) -> None:
         client = _make_client()
-        with pytest.raises(ValueError, match="n must be"):
-            client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=0)
-
-    def test_choices_are_reordered_by_explicit_index(self) -> None:
-        client = _make_client()
-        completion = _fake_completion(["c", "a", "b"])
-        for choice, index in zip(completion.choices, [2, 0, 1], strict=True):
-            choice.index = index
-        client.client.chat.completions.create.return_value = completion
-
-        result = client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=3)
-
-        assert result == ["a", "b", "c"]
-
-    def test_missing_index_preserves_empty_position(self) -> None:
-        client = _make_client()
-        completion = _fake_completion(["a", "c"])
-        for choice, index in zip(completion.choices, [0, 2], strict=True):
-            choice.index = index
-        client.client.chat.completions.create.return_value = completion
-
-        result = client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=3)
-
-        assert result == ["a", "", "c"]
-
-    def test_duplicate_choice_index_fails(self) -> None:
-        client = _make_client()
-        completion = _fake_completion(["a", "b"])
-        for choice in completion.choices:
-            choice.index = 0
-        client.client.chat.completions.create.return_value = completion
-
-        with pytest.raises(ValueError, match="Duplicate response choice index"):
-            client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=2)
-
-    def test_non_integer_choice_index_fails(self) -> None:
-        client = _make_client()
-        completion = _fake_completion(["a"])
-        completion.choices[0].index = "0"
-        client.client.chat.completions.create.return_value = completion
-
-        with pytest.raises(ValueError, match="non-integer indices"):
-            client.get_contents("q", None, "m", 8, 0.6, 1.0, 40, False, n=1)
+        client.client.chat.completions.create.return_value = _fake_completion(["a"])
+        client.get_content("q", None, "m", 8, 0.6, 1.0, 40, False, seed=42)
+        assert client.client.chat.completions.create.call_args.kwargs["seed"] == 42
 
 
 # ── InferenceRunner.load_data (one record per sample) ─────────────
@@ -458,7 +409,18 @@ class TestLoadData:
             encoding="utf-8",
         )
         Path(runner.args.output_file).write_text(
-            json.dumps({"prompt": "q", "gen": ["one", "two"]}) + "\n",
+            "".join(
+                json.dumps(
+                    {
+                        "doc_id": "test:0",
+                        "prompt": "q",
+                        "gen": [text],
+                        "sample_index": i,
+                    }
+                )
+                + "\n"
+                for i, text in ((0, "one"), (1, "two"))
+            ),
             encoding="utf-8",
         )
 
@@ -478,15 +440,18 @@ class TestLoadData:
             encoding="utf-8",
         )
         Path(runner.args.output_file).write_text(
-            json.dumps(
-                {
-                    "doc_id": "test:0",
-                    "prompt": "q",
-                    "gen": ["zero", "two"],
-                    "sample_indices": [0, 2],
-                }
-            )
-            + "\n",
+            "".join(
+                json.dumps(
+                    {
+                        "doc_id": "test:0",
+                        "prompt": "q",
+                        "gen": [text],
+                        "sample_index": i,
+                    }
+                )
+                + "\n"
+                for i, text in ((0, "zero"), (2, "two"))
+            ),
             encoding="utf-8",
         )
 
@@ -494,7 +459,9 @@ class TestLoadData:
 
         assert [item["sample_index"] for item in loaded] == [1, 3]
         assert all(item["expected_samples"] == 4 for item in loaded)
-        assert all(not any(key.startswith("_llmeval_") for key in item) for item in loaded)
+        assert all(
+            not any(key.startswith("_llmeval_") for key in item) for item in loaded
+        )
 
 
 # ── InferenceRunner._process_concurrently ─────────────────────────
@@ -519,7 +486,9 @@ class TestConcurrentProcessing:
         runner._process_concurrently(loaded)
 
         assert runner.client.get_content.call_count == 3
-        assert all("n" not in call.kwargs for call in runner.client.get_content.call_args_list)
+        assert all(
+            "n" not in call.kwargs for call in runner.client.get_content.call_args_list
+        )
         assert runner._stats["processed"] == 3
 
     def test_non_str_prompt_does_not_crash_run(self, tmp_path: Path) -> None:

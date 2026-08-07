@@ -79,7 +79,6 @@ def _runner(tmp_path: Path, **overrides: object) -> OfflineInferenceRunner:
     runner.args = _args(tmp_path, **overrides)
     runner._file_lock = threading.Lock()
     runner.llm = None
-    runner.sampling_params = None
     runner.system_prompt = None
     return runner
 
@@ -147,8 +146,13 @@ class TestOfflineInferenceRunner:
             + "\n",
             encoding="utf-8",
         )
+        # One completed sample with the strict protocol (doc_id + sample_index).
         Path(args.output_file).write_text(
-            json.dumps({"prompt": "q", "gen": ["one"]}, ensure_ascii=False) + "\n",
+            json.dumps(
+                {"doc_id": "test:0", "prompt": "q", "gen": ["one"], "sample_index": 0},
+                ensure_ascii=False,
+            )
+            + "\n",
             encoding="utf-8",
         )
         runner = _runner(tmp_path, n_samples=2)
@@ -157,6 +161,7 @@ class TestOfflineInferenceRunner:
 
         assert len(remaining) == 1
         assert remaining[0]["prompt"] == "q"
+        assert remaining[0]["sample_index"] == 1
 
     def test_write_response_results_appends_generation(self, tmp_path: Path) -> None:
         runner = _runner(tmp_path)
@@ -177,24 +182,18 @@ class TestOfflineInferenceRunner:
         import llmeval.inference.offline as offline_mod
 
         fake_llm = MagicMock(return_value="llm")
-        fake_sampling = MagicMock(return_value="sampling")
         monkeypatch.setattr(offline_mod, "LLM", fake_llm)
-        monkeypatch.setattr(offline_mod, "SamplingParams", fake_sampling)
         runner = _runner(tmp_path)
 
-        llm, sampling = runner.setup_vllm_engine()
+        llm = runner.setup_vllm_engine()
 
         assert llm == "llm"
-        assert sampling == "sampling"
         llm_kwargs = fake_llm.call_args.kwargs
         assert llm_kwargs["model"] == "test-model"
         assert llm_kwargs["device"] == "cuda"
         assert llm_kwargs["quantization"] == "awq"
         assert llm_kwargs["max_num_batched_tokens"] == 2048
         assert "max_model_len" not in llm_kwargs["hf_overrides"]
-        sampling_kwargs = fake_sampling.call_args.kwargs
-        assert sampling_kwargs["max_tokens"] == 128
-        assert sampling_kwargs["temperature"] == 0.2
 
     def test_process_batches_fail_fast_by_default(self, tmp_path: Path) -> None:
         runner = _runner(tmp_path, batch_size=1, fail_fast=True)

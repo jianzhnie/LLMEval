@@ -29,7 +29,7 @@ __all__ = [
     "iter_resume_records",
     "load_jsonl",
     "load_resume_state",
-    "missing_sample_indices",
+    "missing_sample_indexes",
     "process_batches_with_policy",
     "redact_config_for_logging",
     "require_document_id",
@@ -96,17 +96,15 @@ def process_batches_with_policy(
 
 @dataclass
 class ResumeState:
-    """Completed stable sample indices and legacy prompt counts from one output."""
+    """Completed sample indices and recorded prompts keyed by document ID."""
 
-    completed_indices: dict[tuple[str, str], set[int]] = field(default_factory=dict)
-    legacy_counts: dict[str, int] = field(default_factory=dict)
+    completed_indices: dict[str, set[int]] = field(default_factory=dict)
+    prompts: dict[str, str] = field(default_factory=dict)
 
     @property
     def completed_count(self) -> int:
         """Return the total number of completed samples represented by the state."""
-        return sum(len(indices) for indices in self.completed_indices.values()) + sum(
-            self.legacy_counts.values()
-        )
+        return sum(len(indices) for indices in self.completed_indices.values())
 
 
 def is_local_endpoint(base_url: str) -> bool:
@@ -159,15 +157,13 @@ def sample_seed_for_item(base_seed: int, item: dict[str, Any]) -> int:
     for the same prompt do not accidentally reuse one deterministic sequence,
     while resume runs still reproduce the same sample.
     """
-    if base_seed < 0:
+    if type(base_seed) is not int or base_seed < 0:
         raise ValueError(f"base_seed must be non-negative, got {base_seed}")
     document_id = str(item.get("doc_id") or "")
     prompt = str(item.get("prompt") or item.get("question") or "")
     sample_index = item.get("sample_index", 0)
-    try:
-        sample_index = int(sample_index)
-    except (TypeError, ValueError):
-        sample_index = 0
+    if type(sample_index) is not int or sample_index < 0:
+        raise ValueError(f"sample_index must be a non-negative int, got {sample_index!r}")
     payload = f"{base_seed}\0{document_id}\0{prompt}\0{sample_index}".encode(
         "utf-8", errors="replace"
     )
@@ -216,7 +212,7 @@ def load_resume_state(
     *,
     repair_truncated_last_line: bool = False,
 ) -> ResumeState:
-    """Load stable and legacy resume data in one pass over an output JSONL file."""
+    """Load strict ``doc_id``/``sample_index`` resume state from output JSONL."""
     state = ResumeState()
     output_path = Path(output_file)
     if not output_path.exists() or output_path.stat().st_size == 0:
@@ -227,27 +223,6 @@ def load_resume_state(
             output_path,
             repair_truncated_last_line=repair_truncated_last_line,
         ):
-            prompt = item.get(input_key) or item.get("prompt")
-            response = item.get(response_key)
-            if response is None:
-                response = item.get("gen")
-            if isinstance(response, list):
-                count = len(response)
-            elif (
-                item.get("logprobs") is not None
-                or item.get("Verifier_response")
-                or item.get("Verifier_judgment")
-            ):
-                count = 1
-            else:
-                count = 0
-            if count <= 0:
-                continue
-            if prompt is None or not str(prompt).strip():
-                raise ValueError(
-                    f"Resume file {output_path} line {line_num} has a completed "
-                    "response but no non-empty prompt"
-                )
             internal_fields = [key for key in item if key.startswith("_llmeval_")]
             if internal_fields:
                 raise ValueError(
@@ -255,68 +230,77 @@ def load_resume_state(
                     f"internal fields: {internal_fields}"
                 )
 
-            document_id = item.get("doc_id")
-            if not document_id:
-                prompt_key = str(prompt)
-                state.legacy_counts[prompt_key] = (
-                    state.legacy_counts.get(prompt_key, 0) + count
-                )
+            if not _is_completed_resume_record(
+                item, response_key, output_path, line_num
+            ):
                 continue
 
-            identity = (str(document_id), str(prompt))
-            completed = state.completed_indices.setdefault(identity, set())
-            index_fields = [
-                key
-                for key in ("sample_indices",)
-                if key in item
-            ]
-            if len(index_fields) > 1:
+            document_id = item.get("doc_id")
+            if document_id is None or not str(document_id).strip():
                 raise ValueError(
-                    f"Resume file {output_path} line {line_num} has ambiguous "
-                    f"sample index fields: {index_fields}"
+                    f"Resume file {output_path} line {line_num} is missing required "
+                    "'doc_id'; migrate legacy resume output before continuing"
                 )
-            index_field = index_fields[0] if index_fields else None
-            if count == 1 and index_field is not None and "sample_index" in item:
+            sample_index = item.get("sample_index")
+            if type(sample_index) is not int or sample_index < 0:
                 raise ValueError(
-                    f"Resume file {output_path} line {line_num} has both "
-                    "sample_index and sample_indices; provide exactly one"
+                    f"Resume file {output_path} line {line_num} sample_index must "
+                    f"be a non-negative int, got {sample_index!r}"
                 )
-            if index_field is not None:
-                raw_indices = item[index_field]
-                valid_indices = (
-                    isinstance(raw_indices, list)
-                    and len(raw_indices) == count
-                    and all(type(index) is int and index >= 0 for index in raw_indices)
-                    and len(set(raw_indices)) == len(raw_indices)
+
+            document_key = str(document_id)
+            completed = state.completed_indices.setdefault(document_key, set())
+            if sample_index in completed:
+                raise ValueError(
+                    f"Resume file {output_path} line {line_num} duplicates "
+                    f"doc_id={document_key!r}, sample_index={sample_index}"
                 )
-                if not valid_indices:
+            completed.add(sample_index)
+
+            prompt = item.get(input_key) or item.get("prompt")
+            if prompt is not None and str(prompt).strip():
+                prompt_text = str(prompt)
+                previous_prompt = state.prompts.setdefault(document_key, prompt_text)
+                if previous_prompt != prompt_text:
                     raise ValueError(
-                        f"Resume file {output_path} line {line_num} has invalid "
-                        f"{index_field}: expected {count} unique non-negative ints"
+                        f"Resume file {output_path} line {line_num} has conflicting "
+                        f"prompts for doc_id={document_key!r}"
                     )
-                indices = raw_indices
-            elif count == 1 and "sample_index" in item:
-                raw_sample_index = item["sample_index"]
-                if type(raw_sample_index) is not int or raw_sample_index < 0:
-                    raise ValueError(
-                        f"Resume file {output_path} line {line_num} sample_index "
-                        f"must be a non-negative int, got {raw_sample_index!r}"
-                    )
-                indices = [raw_sample_index]
-            else:
-                indices = []
-                next_index = 0
-                for _ in range(count):
-                    while next_index in completed:
-                        next_index += 1
-                    indices.append(next_index)
-                    next_index += 1
-            completed.update(indices)
     except OSError as exc:
         # Continuing with a partially-read state would re-generate completed
         # samples and append duplicate rows — fail loudly instead.
         raise OSError(f"Failed to read resume state from {output_file}: {exc}") from exc
     return state
+
+
+def _is_completed_resume_record(
+    item: dict[str, Any], response_key: str, output_path: Path, line_num: int
+) -> bool:
+    """Validate the one-result-per-row protocol and report completion."""
+    verifier_response = item.get("Verifier_response")
+    if isinstance(verifier_response, str) and verifier_response.strip():
+        return True
+    if item.get("logprobs") is not None:
+        return True
+
+    response = item.get(response_key)
+    if response is None and response_key != "gen":
+        response = item.get("gen")
+    if response is None:
+        return False
+    if isinstance(response, list):
+        if len(response) != 1:
+            raise ValueError(
+                f"Resume file {output_path} line {line_num} must contain exactly "
+                "one generation; migrate grouped output to one row per sample"
+            )
+        response = response[0]
+    if not isinstance(response, str) or not response.strip():
+        raise ValueError(
+            f"Resume file {output_path} line {line_num} has an empty or invalid "
+            f"{response_key!r} result"
+        )
+    return True
 
 
 def iter_resume_records(
@@ -377,7 +361,7 @@ def _parse_resume_record(
     return line_num, item
 
 
-def missing_sample_indices(target_samples: int, completed: set[int]) -> list[int]:
+def missing_sample_indexes(target_samples: int, completed: set[int]) -> list[int]:
     """Return the exact non-contiguous sample indices still required."""
     if target_samples <= 0:
         raise ValueError(f"target_samples must be positive, got {target_samples}")
@@ -386,8 +370,7 @@ def missing_sample_indices(target_samples: int, completed: set[int]) -> list[int
 
 def expand_data_with_resume(
     raw_data: list[dict[str, Any]],
-    completed_indices: dict[tuple[str, str], set[int]],
-    legacy_counts: dict[str, int],
+    resume_state: ResumeState,
     input_key: str,
     n_samples: int,
     *,
@@ -417,11 +400,15 @@ def expand_data_with_resume(
                 f"{input_key!r} or 'prompt'"
             )
 
-        identity = (str(source["doc_id"]), prompt)
-        completed = set(completed_indices.get(identity, set()))
-        if not completed:
-            completed.update(range(max(legacy_counts.get(prompt, 0), 0)))
-        for sample_index in missing_sample_indices(n_samples, completed):
+        document_id = str(source["doc_id"])
+        recorded_prompt = resume_state.prompts.get(document_id)
+        if recorded_prompt is not None and recorded_prompt != prompt:
+            raise ValueError(
+                f"Input record at index {index} changed prompt for doc_id="
+                f"{document_id!r}; use a new output file"
+            )
+        completed = resume_state.completed_indices.get(document_id, set())
+        for sample_index in missing_sample_indexes(n_samples, completed):
             item = copy.deepcopy(source)
             item["sample_index"] = sample_index
             item["expected_samples"] = n_samples
@@ -544,7 +531,6 @@ def _failure_id(entry: dict[str, Any]) -> str:
     identity = {
         "doc_id": source.get("doc_id"),
         "sample_index": source.get("sample_index"),
-        "sample_indices": source.get("sample_indices"),
         "error_category": entry.get("error_category")
         or entry.get("error_type")
         or "unknown",

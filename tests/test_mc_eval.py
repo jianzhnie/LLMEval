@@ -189,8 +189,8 @@ class TestScoreGenerate:
         from llmeval.tasks.mc_eval.mc_score import score_generate
 
         items = [
-            {"answer": "B", "gen": ["Some text\nAnswer: B"]},
-            {"answer": "A", "gen": ["The answer is A."]},
+            {"answer": "B", "gen": ["Some text\nAnswer: B"], "sample_index": 0},
+            {"answer": "A", "gen": ["The answer is A."], "sample_index": 0},
         ]
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             cache = f.name
@@ -205,8 +205,8 @@ class TestScoreGenerate:
         from llmeval.tasks.mc_eval.mc_score import score_generate
 
         items = [
-            {"answer": "C", "gen": ["Answer: B"]},  # wrong
-            {"answer": "D", "gen": ["Answer: D"]},  # correct
+            {"answer": "C", "gen": ["Answer: B"], "sample_index": 0},
+            {"answer": "D", "gen": ["Answer: D"], "sample_index": 0},
         ]
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             cache = f.name
@@ -227,7 +227,17 @@ class TestScoreGenerate:
         from llmeval.tasks.mc_eval.mc_score import score_generate
 
         cache = tmp_path / f"{aggregation}.jsonl"
-        items = [{"answer": "B", "gen": ["Answer: A", "Answer: B", "Answer: B"]}]
+        items = [
+            {
+                "doc_id": "q0",
+                "answer": "B",
+                "gen": [generation],
+                "sample_index": sample_index,
+            }
+            for sample_index, generation in enumerate(
+                ["Answer: A", "Answer: B", "Answer: B"]
+            )
+        ]
         assert (
             score_generate(items, "answer", "gen", cache, aggregation=aggregation)
             == expected
@@ -239,7 +249,15 @@ class TestScoreGenerate:
         from llmeval.tasks.mc_eval.mc_score import score_generate
 
         cache = tmp_path / "per_sample.jsonl"
-        items = [{"answer": "B", "gen": ["Answer: A", "Answer: B"]}]
+        items = [
+            {
+                "doc_id": "q0",
+                "answer": "B",
+                "gen": [generation],
+                "sample_index": sample_index,
+            }
+            for sample_index, generation in enumerate(["Answer: A", "Answer: B"])
+        ]
         assert (
             score_generate(items, "answer", "gen", cache, aggregation="per_sample")
             == 0.5
@@ -749,8 +767,8 @@ class TestMCScoreEdgeCases:
         from llmeval.tasks.mc_eval.mc_score import score_generate
 
         items = [
-            {"answer": "", "gen": ["no letter here"]},  # both empty → was 判对
-            {"answer": "B", "gen": ["Answer: B"]},
+            {"answer": "", "gen": ["no letter here"], "sample_index": 0},
+            {"answer": "B", "gen": ["Answer: B"], "sample_index": 0},
         ]
         acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
         assert acc == 1.0  # invalid-gold items are skipped from the denominator
@@ -821,7 +839,7 @@ class TestMCScoreEdgeCases:
         """A plain-string gen field (schema expects list) is scored as text."""
         from llmeval.tasks.mc_eval.mc_score import score_generate
 
-        items = [{"answer": "B", "gen": "Answer: B"}]
+        items = [{"answer": "B", "gen": "Answer: B", "sample_index": 0}]
         acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
         assert acc == 1.0
 
@@ -831,7 +849,13 @@ def test_generate_filter_trace_preserves_raw_response(tmp_path: Path) -> None:
 
     cache = tmp_path / "mc.jsonl"
     score_generate(
-        [{"answer": "B", "gen": ["<think>x</think><answer>B</answer>"]}],
+        [
+            {
+                "answer": "B",
+                "gen": ["<think>x</think><answer>B</answer>"],
+                "sample_index": 0,
+            }
+        ],
         "answer",
         "gen",
         cache,
@@ -855,15 +879,22 @@ def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None
             "doc_id": "mmlu:0",
             "prompt": "q",
             "answer": "B",
-            "gen": ["Answer: A", "Answer: B"],
-            "sample_indices": [0, 2],
+            "gen": ["Answer: A"],
+            "sample_index": 0,
         },
         {
             "doc_id": "mmlu:0",
             "prompt": "q",
             "answer": "B",
             "gen": ["Answer: B"],
-            "sample_indices": [1],
+            "sample_index": 2,
+        },
+        {
+            "doc_id": "mmlu:0",
+            "prompt": "q",
+            "answer": "B",
+            "gen": ["Answer: B"],
+            "sample_index": 1,
         },
     ]
     cache = tmp_path / "resumed.jsonl"
@@ -887,7 +918,7 @@ def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None
 
 
 class TestMCSampleIndexProtocol:
-    """merge_generate_records follows the shared sample-index protocol."""
+    """MC generation scoring follows the one-sample-per-row protocol."""
 
     def _row(self, gens: list[str], **extra) -> dict:
         return {
@@ -911,20 +942,18 @@ class TestMCSampleIndexProtocol:
             "gen",
         )
         assert len(merged) == 1
-        assert merged[0]["sample_indices"] == [0, 2]
-        assert "sample_index" not in merged[0]  # no stale scalar survives
+        assert "sample_index" not in merged[0]
         assert merged[0]["gen"] == ["Answer: A", "Answer: B"]
 
-    def test_multi_sample_row_keeps_explicit_indices(self) -> None:
+    def test_multi_generation_row_is_rejected(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import merge_generate_records
 
-        merged = merge_generate_records(
-            [self._row(["Answer: A", "Answer: B"], sample_indices=[1, 3])],
-            "answer",
-            "gen",
-        )
-        assert merged[0]["sample_indices"] == [1, 3]
-        assert "sample_index" not in merged[0]
+        with pytest.raises(ValueError, match="one generation per row"):
+            merge_generate_records(
+                [self._row(["Answer: A", "Answer: B"], sample_index=0)],
+                "answer",
+                "gen",
+            )
 
     def test_single_sample_row_keeps_scalar_field(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import merge_generate_records
@@ -933,44 +962,13 @@ class TestMCSampleIndexProtocol:
             [self._row(["Answer: B"], sample_index=2)], "answer", "gen"
         )
         assert merged[0]["sample_index"] == 2
-        assert "sample_indices" not in merged[0]
 
-    def test_stale_scalar_dropped_after_multi_sample_merge(self) -> None:
-        """A row carrying both fields must not leak the stale scalar form."""
+    def test_missing_sample_index_raises(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import merge_generate_records
 
-        merged = merge_generate_records(
-            [
-                self._row(
-                    ["Answer: A", "Answer: B"],
-                    sample_index=0,
-                    sample_indices=[0, 2],
-                )
-            ],
-            "answer",
-            "gen",
-        )
-        assert merged[0]["sample_indices"] == [0, 2]
-        assert "sample_index" not in merged[0]
-
-    @pytest.mark.parametrize(
-        "bad_fields",
-        [
-            {"sample_indices": [0, -1]},  # negative index
-            {"sample_indices": [0]},  # length mismatch (2 generations)
-            {"sample_indices": ["0", "1"]},  # wrong element type
-            {"sample_indices": [0, 0]},  # duplicate index
-        ],
-        ids=["negative", "length-mismatch", "wrong-type", "duplicate"],
-    )
-    def test_invalid_sample_indices_raise(self, bad_fields: dict) -> None:
-        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
-
-        with pytest.raises(ValueError, match="sample_indices"):
+        with pytest.raises(ValueError, match="sample_index"):
             merge_generate_records(
-                [self._row(["Answer: A", "Answer: B"], **bad_fields)],
-                "answer",
-                "gen",
+                [self._row(["Answer: B"])], "answer", "gen"
             )
 
     def test_invalid_scalar_sample_index_raises(self) -> None:
@@ -979,20 +977,6 @@ class TestMCSampleIndexProtocol:
         with pytest.raises(ValueError, match="sample_index"):
             merge_generate_records(
                 [self._row(["Answer: B"], sample_index=-1)], "answer", "gen"
-            )
-
-    def test_conflicting_single_sample_index_fields_raise(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
-
-        with pytest.raises(ValueError, match="exactly one"):
-            merge_generate_records(
-                [
-                    self._row(
-                        ["Answer: B"], sample_index=0, sample_indices=[1]
-                    )
-                ],
-                "answer",
-                "gen",
             )
 
     def test_idempotent_duplicate_merges(self) -> None:

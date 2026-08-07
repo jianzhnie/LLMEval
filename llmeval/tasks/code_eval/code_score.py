@@ -10,7 +10,6 @@ Architecture matches ``mc_score.py``:
 from __future__ import annotations
 
 import ast
-import hashlib
 import os
 import re
 from dataclasses import dataclass, field
@@ -28,7 +27,11 @@ from llmeval.tasks.postprocess import (
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.results import ScorerResult
-from llmeval.tasks.sample_index import duplicate_sample_error, resolve_sample_indices
+from llmeval.tasks.sample_index import (
+    duplicate_sample_error,
+    resolve_sample_index,
+    resolve_single_generation,
+)
 from llmeval.utils.log import init_logger
 
 logger = init_logger("code_score")
@@ -238,7 +241,6 @@ def _failure_record(
     task_id: str,
     result: str,
     *,
-    group_id: str | None = None,
     sample_index: int = 0,
     evaluation_status: str = "completed",
 ) -> dict[str, Any]:
@@ -250,7 +252,6 @@ def _failure_record(
     """
     return {
         "task_id": task_id,
-        "group_id": group_id or task_id,
         "sample_index": sample_index,
         "passed": False,
         "result": result,
@@ -262,14 +263,12 @@ def _failure_record(
 def _failure(
     task_id: str,
     reason: str,
-    group_id: str | None = None,
     sample_index: int = 0,
 ) -> dict[str, Any]:
     """Return a failure record where the generated answer caused the failure."""
     return _failure_record(
         task_id,
         reason,
-        group_id=group_id,
         sample_index=sample_index,
         evaluation_status="completed",
     )
@@ -281,7 +280,6 @@ def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
     return _failure_record(
         task_id,
         "scoring error",
-        group_id=task_id,
         sample_index=item.get("sample_index", 0),
         evaluation_status="failed",
     )
@@ -375,9 +373,8 @@ def _process_code_item(
     idx, item, label_key, response_key, exec_timeout, allow_unsafe_code = args
 
     # -- resolve identifiers ----------------------------------------------------
-    group_id: str = str(item.get("task_id", f"task_{idx}"))
     sample_index: int = int(item.get("sample_index", 0))
-    task_id: str = str(item.get("task_id") or group_id)
+    task_id: str = str(item["task_id"])
     prompt: str = str(item.get("prompt", ""))
     test_code: str = str(item.get(label_key, ""))
     prompt_mode: str = _resolve_prompt_mode(item)
@@ -405,7 +402,6 @@ def _process_code_item(
     if not test_code.strip():
         record = {
             "task_id": task_id,
-            "group_id": group_id,
             "sample_index": sample_index,
             "passed": False,
             "result": f"skipped: empty test harness in label field {label_key!r}",
@@ -416,12 +412,12 @@ def _process_code_item(
         return idx, record
 
     if not gen_str.strip():
-        record = _failure(task_id, "failed: empty generation", group_id, sample_index)
+        record = _failure(task_id, "failed: empty generation", sample_index)
         record.update(filter_artifacts)
         return idx, record
 
     if not code.strip():
-        record = _failure(task_id, "failed: no code extracted", group_id, sample_index)
+        record = _failure(task_id, "failed: no code extracted", sample_index)
         record.update(filter_artifacts)
         return idx, record
 
@@ -441,13 +437,10 @@ def _process_code_item(
         if exec_result.get("passed"):
             break
     if exec_result is None:
-        record = _failure(
-            task_id, "failed: no executable candidate", group_id, sample_index
-        )
+        record = _failure(task_id, "failed: no executable candidate", sample_index)
         record.update(filter_artifacts)
         return idx, record
     exec_result.setdefault("task_id", task_id)
-    exec_result.setdefault("group_id", group_id)
     exec_result.setdefault("sample_index", sample_index)
     exec_result["evaluation_status"] = _code_record_status(exec_result)
     exec_result.update(filter_artifacts)
@@ -553,74 +546,32 @@ def _score_items(
     ]
 
 
-def _stable_problem_id(item: dict[str, Any], index: int) -> str:
-    """Build a stable grouping id for pass@k aggregation."""
-    if item.get("task_id") is not None:
-        return str(item["task_id"])
-    if item.get("prompt") is not None:
-        digest = hashlib.sha1(
-            str(item["prompt"]).encode("utf-8", errors="replace")
-        ).hexdigest()[:16]
-        return f"prompt:{digest}"
-    return f"task_{index}"
-
-
 def _expand_code_samples(
     eval_dataset: list[dict[str, Any]], response_key: str
 ) -> list[dict[str, Any]]:
-    """Expand each record into one scoring job per generated sample.
-
-    Explicit ``sample_index``/``sample_indices`` fields are preserved per the
-    shared protocol (invalid fields raise); only rows with no index fields at
-    all receive the next unused per-problem indices.  Duplicate
-    ``(problem, sample_index)`` pairs merge idempotently when the generation
-    content matches and raise when it conflicts.
-    """
+    """Validate, deduplicate, and normalize one code sample per input row."""
     expanded: list[dict[str, Any]] = []
-    used_by_problem: dict[str, set[int]] = {}
-    seen_samples: dict[tuple[str, int], Any] = {}
+    seen_samples: dict[tuple[str, int], str | None] = {}
     for item_idx, item in enumerate(eval_dataset):
-        group_id = _stable_problem_id(item, item_idx)
-        gen_raw = item.get(response_key)
-        if isinstance(gen_raw, list):
-            samples = gen_raw if gen_raw else [""]
-        elif isinstance(gen_raw, str):
-            samples = [gen_raw]
-        else:
-            samples = [""]
-
-        used = used_by_problem.setdefault(group_id, set())
-        if (
-            isinstance(gen_raw, list)
-            and not gen_raw
-            and item.get("sample_indices") == []
-            and "sample_index" not in item
-        ):
-            # Preserve an explicit zero-generation row as one unindexed
-            # failure observation. The scorer can then report the inference
-            # failure instead of aborting on a synthetic length mismatch.
-            sample_item = item.copy()
-            sample_item.pop("sample_indices", None)
-            sample_item[response_key] = []
-            sample_item.pop("sample_index", None)
-            expanded.append(sample_item)
+        task_id = item.get("task_id")
+        if task_id is None or not str(task_id).strip():
+            raise ValueError(
+                f"Code evaluation record at index {item_idx} is missing required "
+                "non-empty 'task_id'"
+            )
+        task_id = str(task_id)
+        sample_index = resolve_sample_index(item, problem_id=task_id)
+        sample = resolve_single_generation(item, response_key, problem_id=task_id)
+        seen_key = (task_id, sample_index)
+        if seen_key in seen_samples:
+            if seen_samples[seen_key] != sample:
+                raise duplicate_sample_error(task_id, sample_index)
             continue
-        sample_indices = resolve_sample_indices(
-            item, len(samples), problem_id=group_id, used_indices=used
-        )
-        used.update(sample_indices)
-        for sample_index, sample in zip(sample_indices, samples, strict=True):
-            seen_key = (group_id, sample_index)
-            if seen_key in seen_samples:
-                if seen_samples[seen_key] != sample:
-                    raise duplicate_sample_error(group_id, sample_index)
-                continue  # idempotent duplicate — already scheduled
-            seen_samples[seen_key] = sample
-            sample_item = item.copy()
-            sample_item.pop("sample_indices", None)
-            sample_item[response_key] = [sample]
-            sample_item["sample_index"] = sample_index
-            expanded.append(sample_item)
+        seen_samples[seen_key] = sample
+        sample_item = item.copy()
+        sample_item[response_key] = [sample] if sample is not None else []
+        sample_item["sample_index"] = sample_index
+        expanded.append(sample_item)
     return expanded
 
 
@@ -658,8 +609,8 @@ def _completed_code_groups(
     for record in records:
         if record.get("evaluation_status", "completed") != "completed":
             continue
-        group_id = str(record.get("group_id") or record.get("task_id") or "")
-        grouped.setdefault(group_id, []).append(record)
+        task_id = str(record["task_id"])
+        grouped.setdefault(task_id, []).append(record)
     return grouped
 
 

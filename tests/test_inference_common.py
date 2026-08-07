@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from llmeval.inference.common import (
+    ResumeState,
     expand_data_with_resume,
     is_explicit_tool_choice,
     load_jsonl,
@@ -21,6 +22,18 @@ from llmeval.inference.common import (
     sample_seed_for_item,
     save_failed_items,
 )
+
+
+def _resume(
+    *,
+    completed_indices: dict[str, set[int]] | None = None,
+    prompts: dict[str, str] | None = None,
+) -> ResumeState:
+    """Build a ResumeState from doc_id-keyed completed indices."""
+    return ResumeState(
+        completed_indices=completed_indices or {},
+        prompts=prompts or {},
+    )
 
 
 class TestLoadJsonl:
@@ -58,40 +71,110 @@ class TestCountCompletedSamples:
         f.write_text("")
         assert load_resume_state(f, "prompt", "gen").completed_count == 0
 
-    def test_counts_gen_list_lengths(self, tmp_path: Path) -> None:
+    def test_counts_one_row_per_sample(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
         with open(f, "w") as fh:
-            fh.write(json.dumps({"prompt": "q1", "gen": ["a", "b"]}) + "\n")
-            fh.write(json.dumps({"prompt": "q1", "gen": ["c"]}) + "\n")
-            fh.write(json.dumps({"prompt": "q2", "gen": ["d"]}) + "\n")
-        counts = load_resume_state(f, "prompt", "gen").legacy_counts
-        assert counts["q1"] == 3
-        assert counts["q2"] == 1
+            fh.write(
+                json.dumps(
+                    {"doc_id": "q1", "prompt": "p", "gen": ["a"], "sample_index": 0}
+                )
+                + "\n"
+            )
+            fh.write(
+                json.dumps(
+                    {"doc_id": "q1", "prompt": "p", "gen": ["b"], "sample_index": 1}
+                )
+                + "\n"
+            )
+            fh.write(
+                json.dumps(
+                    {"doc_id": "q2", "prompt": "p", "gen": ["c"], "sample_index": 0}
+                )
+                + "\n"
+            )
+        state = load_resume_state(f, "prompt", "gen")
+        assert state.completed_indices == {"q1": {0, 1}, "q2": {0}}
+        assert state.completed_count == 3
 
-    def test_null_gen_tolerated(self, tmp_path: Path) -> None:
-        """Regression: a partially-written line with gen:null must not crash."""
+    def test_incomplete_row_not_counted(self, tmp_path: Path) -> None:
+        """A completed-looking row without sample_index is a protocol error."""
+        f = tmp_path / "out.jsonl"
+        f.write_text(json.dumps({"doc_id": "q1", "prompt": "p", "gen": ["a"]}) + "\n")
+
+        with pytest.raises(ValueError, match="sample_index must be"):
+            load_resume_state(f, "prompt", "gen")
+
+    def test_row_without_gen_ignored(self, tmp_path: Path) -> None:
+        f = tmp_path / "out.jsonl"
+        f.write_text(
+            json.dumps({"doc_id": "q1", "prompt": "p", "sample_index": 0}) + "\n"
+        )
+        assert load_resume_state(f, "prompt", "gen").completed_count == 0
+
+    def test_null_gen_ignored(self, tmp_path: Path) -> None:
+        """Regression: a partially-written line with gen:null is not completed."""
         f = tmp_path / "out.jsonl"
         with open(f, "w") as fh:
-            fh.write(json.dumps({"prompt": "q1", "gen": None}) + "\n")
-            fh.write(json.dumps({"prompt": "q1", "gen": ["a"]}) + "\n")
-        assert load_resume_state(f, "prompt", "gen").legacy_counts["q1"] == 1
+            fh.write(
+                json.dumps(
+                    {"doc_id": "q1", "prompt": "p", "gen": None, "sample_index": 0}
+                )
+                + "\n"
+            )
+        assert load_resume_state(f, "prompt", "gen").completed_count == 0
 
-    def test_non_list_gen_tolerated(self, tmp_path: Path) -> None:
+    def test_verifier_response_counts_completed(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
-        f.write_text(json.dumps({"prompt": "q1", "gen": "bare string"}) + "\n")
-        assert load_resume_state(f, "prompt", "gen").legacy_counts == {}
+        f.write_text(
+            json.dumps(
+                {
+                    "doc_id": "d1",
+                    "prompt": "p",
+                    "Verifier_response": "yes",
+                    "sample_index": 0,
+                }
+            )
+            + "\n"
+        )
+        assert load_resume_state(f, "prompt", "gen").completed_count == 1
+
+    def test_logprobs_row_counts_completed(self, tmp_path: Path) -> None:
+        f = tmp_path / "out.jsonl"
+        f.write_text(
+            json.dumps(
+                {
+                    "doc_id": "d1",
+                    "prompt": "p",
+                    "logprobs": [1.0, 0.0],
+                    "sample_index": 0,
+                }
+            )
+            + "\n"
+        )
+        assert load_resume_state(f, "prompt", "gen").completed_count == 1
 
     def test_malformed_line_fails_with_path_and_line(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
         with open(f, "w") as fh:
             fh.write("bad json\n")
-            fh.write(json.dumps({"prompt": "q1", "gen": ["a"]}) + "\n")
+            fh.write(
+                json.dumps(
+                    {"doc_id": "q1", "prompt": "p", "gen": ["a"], "sample_index": 0}
+                )
+                + "\n"
+            )
         with pytest.raises(ValueError, match=r"out\.jsonl at line 1"):
             load_resume_state(f, "prompt", "gen")
 
     def test_non_object_line_fails_with_path_and_line(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
-        f.write_text("[1, 2]\n" + json.dumps({"prompt": "q1", "gen": ["a"]}) + "\n")
+        f.write_text(
+            "[1, 2]\n"
+            + json.dumps(
+                {"doc_id": "q1", "prompt": "p", "gen": ["a"], "sample_index": 0}
+            )
+            + "\n"
+        )
         with pytest.raises(
             ValueError, match=r"out\.jsonl line 1 must contain an object"
         ):
@@ -99,7 +182,10 @@ class TestCountCompletedSamples:
 
     def test_repair_ignores_only_unterminated_final_json(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
-        f.write_text(json.dumps({"prompt": "q1", "gen": ["a"]}) + "\n{")
+        f.write_text(
+            json.dumps({"doc_id": "q1", "prompt": "p", "gen": ["a"], "sample_index": 0})
+            + "\n{"
+        )
 
         state = load_resume_state(
             f,
@@ -108,14 +194,16 @@ class TestCountCompletedSamples:
             repair_truncated_last_line=True,
         )
 
-        assert state.legacy_counts == {"q1": 1}
+        assert state.completed_indices == {"q1": {0}}
 
     def test_repair_does_not_ignore_malformed_middle_line(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
         f.write_text(
-            json.dumps({"prompt": "q1", "gen": ["a"]})
+            json.dumps({"doc_id": "q1", "prompt": "p", "gen": ["a"], "sample_index": 0})
             + "\n{\n"
-            + json.dumps({"prompt": "q2", "gen": ["b"]})
+            + json.dumps(
+                {"doc_id": "q2", "prompt": "p", "gen": ["b"], "sample_index": 0}
+            )
         )
 
         with pytest.raises(ValueError, match="at line 2"):
@@ -126,76 +214,136 @@ class TestCountCompletedSamples:
                 repair_truncated_last_line=True,
             )
 
-    def test_custom_keys_with_fallback(self, tmp_path: Path) -> None:
+    def test_custom_response_key_with_gen_fallback(self, tmp_path: Path) -> None:
         f = tmp_path / "out.jsonl"
         with open(f, "w") as fh:
-            fh.write(json.dumps({"question": "q1", "response": ["a"]}) + "\n")
-            fh.write(json.dumps({"prompt": "q2", "gen": ["b"]}) + "\n")
-        counts = load_resume_state(f, "question", "response").legacy_counts
-        assert counts["q1"] == 1
-        assert counts["q2"] == 1  # fell back to prompt/gen
+            fh.write(
+                json.dumps(
+                    {
+                        "doc_id": "q1",
+                        "question": "p",
+                        "response": ["a"],
+                        "sample_index": 0,
+                    }
+                )
+                + "\n"
+            )
+            fh.write(
+                json.dumps(
+                    {"doc_id": "q2", "question": "p", "gen": ["b"], "sample_index": 0}
+                )
+                + "\n"
+            )
+        state = load_resume_state(f, "question", "response")
+        assert state.completed_indices == {"q1": {0}, "q2": {0}}
 
-    def test_legacy_only_ignores_stable_id_records(self, tmp_path: Path) -> None:
+    def test_row_without_doc_id_rejected(self, tmp_path: Path) -> None:
         output = tmp_path / "out.jsonl"
         output.write_text(
-            json.dumps({"prompt": "stable", "gen": ["a"], "doc_id": "d"})
-            + "\n"
-            + json.dumps({"prompt": "legacy", "gen": ["b"]})
+            json.dumps({"prompt": "legacy", "gen": ["b"], "sample_index": 0}) + "\n"
+        )
+
+        with pytest.raises(ValueError, match="missing required 'doc_id'"):
+            load_resume_state(output, "prompt", "gen")
+
+    def test_multigen_row_rejected(self, tmp_path: Path) -> None:
+        output = tmp_path / "out.jsonl"
+        output.write_text(
+            json.dumps(
+                {"doc_id": "q1", "prompt": "p", "gen": ["a", "b"], "sample_index": 0}
+            )
             + "\n"
         )
 
-        state = load_resume_state(output, "prompt", "gen")
-        assert state.legacy_counts == {"legacy": 1}
-        assert state.completed_indices == {("d", "stable"): {0}}
+        with pytest.raises(ValueError, match="exactly one generation"):
+            load_resume_state(output, "prompt", "gen")
+
+    def test_duplicate_sample_index_rejected(self, tmp_path: Path) -> None:
+        output = tmp_path / "out.jsonl"
+        output.write_text(
+            json.dumps({"doc_id": "q1", "prompt": "p", "gen": ["a"], "sample_index": 0})
+            + "\n"
+            + json.dumps(
+                {"doc_id": "q1", "prompt": "p", "gen": ["b"], "sample_index": 0}
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="duplicates"):
+            load_resume_state(output, "prompt", "gen")
+
+    def test_conflicting_prompts_for_doc_id_rejected(self, tmp_path: Path) -> None:
+        output = tmp_path / "out.jsonl"
+        output.write_text(
+            json.dumps(
+                {"doc_id": "q1", "prompt": "old", "gen": ["a"], "sample_index": 0}
+            )
+            + "\n"
+            + json.dumps(
+                {"doc_id": "q1", "prompt": "new", "gen": ["b"], "sample_index": 1}
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="conflicting prompts"):
+            load_resume_state(output, "prompt", "gen")
 
 
 class TestExpandDataWithResume:
     def test_expands_all_samples(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        expanded = expand_data_with_resume(raw, {}, {}, "prompt", 3)
+        expanded = expand_data_with_resume(raw, _resume(), "prompt", 3)
         assert [item["sample_index"] for item in expanded] == [0, 1, 2]
 
     def test_regenerates_only_missing_indices(self) -> None:
         """A mid-run failure must be retried, not the highest contiguous count."""
         raw = [{"doc_id": "q1", "prompt": "p"}]
         expanded = expand_data_with_resume(
-            raw, {("q1", "p"): {0, 2}}, {}, "prompt", 4
+            raw, _resume(completed_indices={"q1": {0, 2}}), "prompt", 4
         )
         assert [item["sample_index"] for item in expanded] == [1, 3]
 
     def test_all_completed_yields_nothing(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        assert expand_data_with_resume(
-            raw, {("q1", "p"): {0, 1}}, {}, "prompt", 2
-        ) == []
-
-    def test_falls_back_to_legacy_counts(self) -> None:
-        raw = [{"doc_id": "q1", "prompt": "legacy"}]
-        expanded = expand_data_with_resume(raw, {}, {"legacy": 1}, "prompt", 2)
-        assert [item["sample_index"] for item in expanded] == [1]
+        assert (
+            expand_data_with_resume(
+                raw, _resume(completed_indices={"q1": {0, 1}}), "prompt", 2
+            )
+            == []
+        )
 
     def test_rejects_non_positive_sample_count(self) -> None:
         with pytest.raises(ValueError, match="n_samples must be positive"):
-            expand_data_with_resume([{"doc_id": "q1", "prompt": "q"}], {}, {}, "prompt", 0)
+            expand_data_with_resume(
+                [{"doc_id": "q1", "prompt": "q"}], _resume(), "prompt", 0
+            )
 
     def test_requires_document_id(self) -> None:
         with pytest.raises(ValueError, match="missing required 'doc_id'"):
-            expand_data_with_resume([{"prompt": "p"}], {}, {}, "prompt", 1)
+            expand_data_with_resume([{"prompt": "p"}], _resume(), "prompt", 1)
 
     def test_missing_prompt_is_schema_error(self) -> None:
         with pytest.raises(ValueError, match="no non-empty prompt"):
-            expand_data_with_resume([{"doc_id": "q1"}], {}, {}, "prompt", 1)
+            expand_data_with_resume([{"doc_id": "q1"}], _resume(), "prompt", 1)
+
+    def test_changed_prompt_for_doc_id_is_rejected(self) -> None:
+        """A resumed doc_id whose prompt changed must fail loudly."""
+        raw = [{"doc_id": "q1", "prompt": "new"}]
+        state = _resume(completed_indices={"q1": {0}}, prompts={"q1": "old"})
+        with pytest.raises(ValueError, match="changed prompt"):
+            expand_data_with_resume(raw, state, "prompt", 2)
 
 
 class TestExpandedSamples:
     def test_offline_adapter_keeps_independent_sample_copies(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p", "gen": ["existing"]}]
-        expanded = expand_data_with_resume(raw, {}, {}, "prompt", 2)
+        expanded = expand_data_with_resume(raw, _resume(), "prompt", 2)
 
         expanded[0]["gen"].append("new")
         assert [item["sample_index"] for item in expanded] == [0, 1]
         assert expanded[1]["gen"] == ["existing"]
         assert raw[0]["gen"] == ["existing"]
+
 
 class TestLoggingRedaction:
     def test_redacts_nested_credentials_without_mutating_input(self) -> None:
@@ -237,58 +385,16 @@ class TestSampleSeed:
 
 
 class TestStableResumeCounts:
-    def test_identity_count_detects_prompt_changes(self, tmp_path: Path) -> None:
-        output = tmp_path / "output.jsonl"
-        output.write_text(
-            json.dumps({"doc_id": "q1", "prompt": "old", "gen": ["a"]}) + "\n"
-        )
-
-        indices = load_resume_state(output, "prompt", "gen").completed_indices
-        remaining = expand_data_with_resume(
-            [{"doc_id": "q1", "prompt": "new"}],
-            indices,
-            {},
-            "prompt",
-            1,
-        )
-
-        assert indices == {("q1", "old"): {0}}
-        assert len(remaining) == 1
-
-    def test_identity_indices_deduplicate_resumed_rows(self, tmp_path: Path) -> None:
-        output = tmp_path / "output.jsonl"
-        rows = [
-            {
-                "doc_id": "q1",
-                "prompt": "q",
-                "gen": ["a", "c"],
-                "sample_indices": [0, 2],
-            },
-            {
-                "doc_id": "q1",
-                "prompt": "q",
-                "gen": ["c"],
-                "sample_indices": [2],
-            },
-        ]
-        output.write_text("".join(json.dumps(row) + "\n" for row in rows))
-
-        assert load_resume_state(output, "prompt", "gen").completed_indices == {
-            ("q1", "q"): {0, 2}
-        }
-
-    def test_scalar_sample_index_honored_for_single_generation(
-        self, tmp_path: Path
-    ) -> None:
+    def test_single_row_honors_scalar_sample_index(self, tmp_path: Path) -> None:
         output = tmp_path / "output.jsonl"
         output.write_text(
             json.dumps({"doc_id": "q1", "prompt": "q", "gen": ["a"], "sample_index": 2})
             + "\n"
         )
 
-        assert load_resume_state(output, "prompt", "gen").completed_indices == {
-            ("q1", "q"): {2}
-        }
+        state = load_resume_state(output, "prompt", "gen")
+        assert state.completed_indices == {"q1": {2}}
+        assert state.prompts == {"q1": "q"}
 
     def test_internal_resume_fields_are_rejected(self, tmp_path: Path) -> None:
         output = tmp_path / "output.jsonl"
@@ -297,7 +403,8 @@ class TestStableResumeCounts:
                 {
                     "doc_id": "q1",
                     "prompt": "q",
-                    "gen": ["a", "b"],
+                    "gen": ["a"],
+                    "sample_index": 0,
                     "_llmeval_legacy": [1, 3],
                 }
             )
@@ -307,51 +414,8 @@ class TestStableResumeCounts:
         with pytest.raises(ValueError, match="unsupported internal fields"):
             load_resume_state(output, "prompt", "gen")
 
-    def test_duplicate_explicit_indices_are_rejected(self, tmp_path: Path) -> None:
-        output = tmp_path / "output.jsonl"
-        output.write_text(
-            json.dumps(
-                {
-                    "doc_id": "q1",
-                    "prompt": "q",
-                    "gen": ["a", "b"],
-                    "sample_indices": [0, 0],
-                }
-            )
-            + "\n"
-        )
-
-        with pytest.raises(ValueError, match="unique non-negative ints"):
-            load_resume_state(output, "prompt", "gen")
-
-    def test_conflicting_single_sample_index_fields_are_rejected(
-        self, tmp_path: Path
-    ) -> None:
-        output = tmp_path / "output.jsonl"
-        output.write_text(
-            json.dumps(
-                {
-                    "doc_id": "q1",
-                    "prompt": "q",
-                    "gen": ["a"],
-                    "sample_index": 0,
-                    "sample_indices": [1],
-                }
-            )
-            + "\n"
-        )
-
-        with pytest.raises(ValueError, match="provide exactly one"):
-            load_resume_state(output, "prompt", "gen")
-
-    def test_scalar_sample_index_ignored_for_multiple_generations(
-        self, tmp_path: Path
-    ) -> None:
-        """A multi-generation row with only a scalar index is inconsistent.
-
-        It must fall back to free-slot allocation instead of pinning a single
-        index (which would re-generate already-completed samples on resume).
-        """
+    def test_multi_generation_row_is_rejected(self, tmp_path: Path) -> None:
+        """Grouped rows must be migrated to one row per sample."""
         output = tmp_path / "output.jsonl"
         output.write_text(
             json.dumps(
@@ -360,9 +424,8 @@ class TestStableResumeCounts:
             + "\n"
         )
 
-        assert load_resume_state(output, "prompt", "gen").completed_indices == {
-            ("q1", "q"): {0, 1}
-        }
+        with pytest.raises(ValueError, match="exactly one generation"):
+            load_resume_state(output, "prompt", "gen")
 
     def test_negative_scalar_sample_index_rejected(self, tmp_path: Path) -> None:
         output = tmp_path / "output.jsonl"
@@ -388,11 +451,12 @@ class TestStableResumeCounts:
         with pytest.raises(ValueError, match="non-negative int"):
             load_resume_state(output, "prompt", "gen")
 
-    def test_completed_record_without_prompt_is_rejected(self, tmp_path: Path) -> None:
+    def test_row_without_doc_id_rejected(self, tmp_path: Path) -> None:
+        """Legacy rows without doc_id fail loudly and tell the user to migrate."""
         output = tmp_path / "output.jsonl"
-        output.write_text(json.dumps({"doc_id": "q1", "gen": ["a"]}) + "\n")
+        output.write_text(json.dumps({"prompt": "q", "gen": ["a"]}) + "\n")
 
-        with pytest.raises(ValueError, match="no non-empty prompt"):
+        with pytest.raises(ValueError, match="missing required 'doc_id'"):
             load_resume_state(output, "prompt", "gen")
 
 

@@ -31,7 +31,8 @@ from llmeval.tasks.postprocess import (
 from llmeval.tasks.results import ScorerResult
 from llmeval.tasks.sample_index import (
     duplicate_sample_error,
-    resolve_sample_indices,
+    resolve_sample_index,
+    resolve_single_generation,
 )
 from llmeval.utils.log import init_logger
 
@@ -809,52 +810,18 @@ compute_score_result = score_math_result
 def _expand_math_samples(
     eval_dataset: list[dict[str, Any]], response_key: str
 ) -> list[dict[str, Any]]:
-    """Expand grouped generation rows into one scoring record per sample.
-
-    ``sample_indices`` is an inference-only compatibility field.  It
-    is consumed here and replaced with the public ``sample_index`` field so
-    scoring output has a stable, uniform schema.  Explicit index fields are
-    validated by the shared protocol (invalid fields raise); only rows with
-    no index fields at all receive the next unused per-problem indices.
-    """
+    """Validate and normalize one math generation per input row."""
     expanded: list[dict[str, Any]] = []
-    used_by_problem: dict[str, set[int]] = {}
     for row_index, item in enumerate(eval_dataset):
-        responses = item.get(response_key)
-        if not isinstance(responses, list):
-            responses = [responses] if responses is not None else []
         problem_id = _problem_identity(item, row_index)
-        used = used_by_problem.setdefault(problem_id, set())
-        if not responses:
-            # Preserve a missing-generation record so it is counted as skipped.
-            record = dict(item)
-            record.pop("sample_indices", None)
-            record[response_key] = []
-            if item.get("sample_indices") == [] and "sample_index" not in item:
-                # An explicit empty list describes zero generated samples. Keep
-                # one unindexed failure record so the missing inference remains
-                # visible in scorer counts and problem completeness checks.
-                record.pop("sample_index", None)
-            else:
-                sample_index = resolve_sample_indices(
-                    item, 1, problem_id=problem_id, used_indices=used
-                )[0]
-                used.add(sample_index)
-                record["sample_index"] = sample_index
-            record["_math_problem_index"] = row_index
-            expanded.append(record)
-            continue
-        sample_indices = resolve_sample_indices(
-            item, len(responses), problem_id=problem_id, used_indices=used
+        sample_index = resolve_sample_index(item, problem_id=problem_id)
+        response = resolve_single_generation(
+            item, response_key, problem_id=problem_id
         )
-        used.update(sample_indices)
-        for sample_index, response in zip(sample_indices, responses, strict=True):
-            record = dict(item)
-            record.pop("sample_indices", None)
-            record[response_key] = [response]
-            record["sample_index"] = sample_index
-            record["_math_problem_index"] = row_index
-            expanded.append(record)
+        record = dict(item)
+        record[response_key] = [response] if response is not None else []
+        record["sample_index"] = sample_index
+        expanded.append(record)
     return expanded
 
 
@@ -863,8 +830,6 @@ def _problem_identity(item: dict[str, Any], row_index: int) -> str:
     document_id = item.get("doc_id")
     if document_id is not None and str(document_id).strip():
         return f"doc:{document_id}"
-    if isinstance(item.get("_math_problem_index"), int):
-        return f"row:{item['_math_problem_index']}"
     return f"row:{row_index}"
 
 
@@ -913,8 +878,20 @@ def _build_problem_level_metrics(
     grouped: dict[str, list[dict[str, Any]]] = {}
     seen_samples: dict[str, dict[int, dict[str, Any]]] = {}
     for row_index, item in enumerate(scored_dataset):
+        document_id = item.get("doc_id")
+        item_expected = item.get("expected_samples")
+        if (
+            (document_id is None or not str(document_id).strip())
+            and (
+                (expected_samples is not None and expected_samples > 1)
+                or (isinstance(item_expected, int) and item_expected > 1)
+            )
+        ):
+            raise ValueError(
+                "Math problem-level metrics require a non-empty 'doc_id' for "
+                "multi-sample records"
+            )
         problem_id = _problem_identity(item, row_index)
-        item.pop("_math_problem_index", None)
         sample_index = item.get("sample_index")
         if isinstance(sample_index, int) and sample_index >= 0:
             existing = seen_samples.setdefault(problem_id, {}).get(sample_index)

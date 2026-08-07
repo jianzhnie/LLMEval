@@ -556,8 +556,7 @@ class MCRunner:
         target_samples = self.config.n_samples if self.config.mode == "generate" else 1
         remaining = expand_data_with_resume(
             raw_data,
-            resume_state.completed_indices,
-            resume_state.legacy_counts,
+            resume_state,
             self.config.input_key,
             target_samples,
             prompt_resolver=self.build_prompt,
@@ -651,10 +650,7 @@ class MCRunner:
                 output_path = Path(self.config.output_file)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(output_path, "a", encoding="utf-8") as f:
-                    f.write(
-                        json.dumps(result, ensure_ascii=False)
-                        + "\n"
-                    )
+                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
                     f.flush()  # Ensure data is immediately written
             except Exception as e:
                 raise OSError(f"Failed to write batch results: {e}") from e

@@ -8,15 +8,12 @@ functionality, and robust error handling.
 
 from __future__ import annotations
 
-import collections
-import copy
 import json
 import logging
-import os
 import re
 import sys
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
@@ -28,15 +25,14 @@ from vllm.outputs import RequestOutput
 
 from llmeval.inference.common import (
     build_vllm_llm_kwargs,
-    iter_resume_records,
+    expand_data_with_resume,
     load_jsonl,
-    missing_sample_indices,
+    load_resume_state,
     process_batches_with_policy,
     redact_config_for_logging,
     require_document_id,
     sample_seed_for_item,
     save_failed_items,
-    validate_document_ids,
 )
 from llmeval.utils.config import VerifierInferArguments
 from llmeval.utils.log import init_logger
@@ -44,6 +40,18 @@ from llmeval.utils.verifier_prompts import VERIFY_PROMPT_FACTORY
 
 # Initialize logger
 logger = init_logger("compass_verifier_infer", logging.INFO)
+
+
+def _sample_failure(
+    item: dict[str, Any], category: str, error: object
+) -> dict[str, Any]:
+    """Build a compact failed-sample audit record."""
+    return {
+        "item": {key: item[key] for key in ("doc_id", "sample_index") if key in item},
+        "error_category": category,
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }
 
 
 # Precompiled extraction patterns (compiled once at import, not per call).
@@ -57,6 +65,8 @@ _PAREN_LETTER_RE: re.Pattern[str] = re.compile(r"\(([A-D])\)", re.IGNORECASE)
 _STANDALONE_LETTER_RE: re.Pattern[str] = re.compile(
     r"(?<![A-Za-z])([A-D])(?![A-Za-z])", re.IGNORECASE
 )
+
+
 def _last_n_strs(text: str, n: int) -> str:
     """Return the last n whitespace-separated tokens as a string."""
     tokens = text.split()
@@ -105,11 +115,6 @@ def extract_tagged_answer(response_string: str, fallback_tokens: int = 200) -> s
     # Fallback 2: last N tokens
     last_n_str = _last_n_strs(response_string, fallback_tokens).strip()
     return last_n_str if last_n_str else ""
-
-
-def process_judgment(judgment_str: str) -> str:
-    """Extract judgment letter — delegates to :func:`process_judgment_cursor`."""
-    return process_judgment_cursor(judgment_str)
 
 
 def process_judgment_cursor(judgment_str: str) -> str:
@@ -170,6 +175,10 @@ def process_judgment_cursor(judgment_str: str) -> str:
     return ""
 
 
+# Compatibility alias for callers using the original public name.
+process_judgment = process_judgment_cursor
+
+
 # Map verifier prompt types to their judgment extraction functions.
 # When adding a new prompt type to VERIFY_PROMPT_FACTORY, add its entry here too.
 JUDGMENT_EXTRACTOR: dict[str, Callable[[str], str]] = {
@@ -203,7 +212,6 @@ class VerifierOfflineInferenceRunner:
         _file_lock: Thread lock for safe file writing operations.
         llm: vLLM engine instance for model inference.
         tokenizer: HuggingFace tokenizer instance for text processing.
-        sampling_params: Sampling parameters for generation control.
         verifier_prompt: String template used to format verifier prompts.
     """
 
@@ -221,28 +229,12 @@ class VerifierOfflineInferenceRunner:
         self._file_lock: threading.Lock = threading.Lock()
         self.llm: LLM | None = None
         self.tokenizer: AutoTokenizer | None = None
-        self.sampling_params: SamplingParams | None = None
         self.verifier_prompt: str | None = VERIFY_PROMPT_FACTORY.get(
             args.verifier_prompt_type
         )
 
-    def setup_vllm_engine(self) -> tuple[LLM, AutoTokenizer, SamplingParams]:
-        """
-        Initialize the vLLM engine, tokenizer, and sampling parameters.
-
-        This method sets up the complete inference pipeline including model loading,
-        tokenizer initialization, and sampling parameter configuration.
-
-        Returns:
-            A tuple containing:
-                - LLM instance for inference
-                - AutoTokenizer for text processing
-                - SamplingParams for generation control
-
-        Raises:
-            RuntimeError: If engine initialization fails.
-            ImportError: If required dependencies are missing.
-        """
+    def setup_vllm_engine(self) -> tuple[LLM, AutoTokenizer]:
+        """Initialize and return the verifier's vLLM engine and tokenizer."""
         logger.info("=" * 60)
         logger.info("🚀 Initializing Verifier vLLM Engine")
         logger.info(f"Model: {self.args.model_name_or_path}")
@@ -273,11 +265,8 @@ class VerifierOfflineInferenceRunner:
         llm = LLM(**llm_kwargs)
         logger.info("✅ vLLM engine loaded successfully")
 
-        # Configure sampling parameters
-        sampling_params = self._build_sampling_params(self.args.seed)
-
         logger.info("✅ Verifier vLLM engine initialization completed")
-        return llm, tokenizer, sampling_params
+        return llm, tokenizer
 
     def _build_sampling_params(self, seed: int) -> SamplingParams:
         """Build generation parameters for one deterministic verifier sample."""
@@ -430,25 +419,27 @@ class VerifierOfflineInferenceRunner:
         """Write generated responses after current judgment extraction."""
         if len(original_items) != len(responses):
             raise ValueError("original_items and responses must have equal length")
+        valid_pairs: list[tuple[dict[str, Any], str]] = []
+        failures: list[dict[str, Any]] = []
+        for item, response in zip(original_items, responses, strict=True):
+            if response and response.strip():
+                valid_pairs.append((item, response))
+            else:
+                failures.append(
+                    _sample_failure(item, "inference", "empty verifier response")
+                )
+        self._handle_sample_failures(failures)
+        if not valid_pairs:
+            return
         with self._file_lock:
             try:
                 with open(self.args.output_file, "a", encoding="utf-8") as f:
-                    for idx, (original_item, model_response) in enumerate(
-                        zip(original_items, responses, strict=True)
-                    ):
-                        if model_response and model_response.strip():
-                            result = self._prepare_result_item(
-                                original_item, model_response
-                            )
-                            f.write(
-                                    json.dumps(result, ensure_ascii=False)
-                                + "\n"
-                            )
-                            f.flush()
-                        else:
-                            logger.warning(
-                                "Empty response for item %d, skipping write", idx
-                            )
+                    for original_item, model_response in valid_pairs:
+                        result = self._prepare_result_item(
+                            original_item, model_response
+                        )
+                        f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    f.flush()
             except Exception as e:
                 raise OSError(f"Failed to write batch results: {e}") from e
 
@@ -511,50 +502,6 @@ class VerifierOfflineInferenceRunner:
 
         return result
 
-    def get_completed_sample_indices(self) -> dict[str, set[int]]:
-        """
-        Count completed samples for resume functionality.
-
-        This method scans the output file to determine how many samples have
-        already been processed for each unique question, enabling resume
-        functionality for interrupted runs.
-
-        Returns:
-            Mapping of verifier identity to completed sample indices.
-        """
-        completed_indices: dict[str, set[int]] = collections.defaultdict(set)
-
-        if not os.path.exists(self.args.output_file):
-            return {}
-
-        if os.path.getsize(self.args.output_file) == 0:
-            return {}
-
-        for _, item in iter_resume_records(
-            self.args.output_file,
-            repair_truncated_last_line=getattr(self.args, "repair_resume", False),
-        ):
-            # Inference completion is independent from whether the judgment
-            # parser could classify the model response.
-            if item.get("Verifier_response"):
-                document_id = item.get("doc_id")
-                if document_id is None or not str(document_id).strip():
-                    raise ValueError(
-                        f"Verifier resume file {self.args.output_file} contains a "
-                        "completed row without required 'doc_id'"
-                    )
-                key = str(document_id)
-                raw_index = item.get("sample_index")
-                if type(raw_index) is int and raw_index >= 0:
-                    sample_index = raw_index
-                else:
-                    sample_index = 0
-                    while sample_index in completed_indices[key]:
-                        sample_index += 1
-                completed_indices[key].add(sample_index)
-
-        return completed_indices
-
     def load_data(self) -> list[dict[str, Any]]:
         """
         Load and prepare dataset with resume functionality.
@@ -578,25 +525,24 @@ class VerifierOfflineInferenceRunner:
         raw_data = load_jsonl(self.args.input_file)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
-        # Check for completed samples
-        validate_document_ids(raw_data)
-        completed_indices = self.get_completed_sample_indices()
-        total_completed = sum(len(indices) for indices in completed_indices.values())
+        resume_state = load_resume_state(
+            self.args.output_file,
+            self.args.input_key,
+            self.args.response_key,
+            repair_truncated_last_line=getattr(self.args, "repair_resume", False),
+        )
+        if resume_state.completed_count > 0:
+            logger.info(
+                "Found %d completed samples from previous run",
+                resume_state.completed_count,
+            )
 
-        if total_completed > 0:
-            logger.info(f"Found {total_completed} completed samples from previous run")
-
-        expanded_data: list[dict[str, Any]] = []
-        for index, item in enumerate(raw_data):
-            resume_id = require_document_id(item, index)
-            used_indices = completed_indices.get(resume_id, set())
-            for sample_index in missing_sample_indices(
-                self.args.n_samples, used_indices
-            ):
-                expanded_item = copy.deepcopy(item)
-                expanded_item["sample_index"] = sample_index
-                expanded_item["expected_samples"] = self.args.n_samples
-                expanded_data.append(expanded_item)
+        expanded_data = expand_data_with_resume(
+            raw_data,
+            resume_state,
+            self.args.input_key,
+            self.args.n_samples,
+        )
         if not expanded_data:
             logger.warning("No data to process after expansion")
 
@@ -620,27 +566,28 @@ class VerifierOfflineInferenceRunner:
             logger.warning("Empty batch data provided")
             return
 
-        if self.llm is None or self.tokenizer is None or self.sampling_params is None:
+        if self.llm is None or self.tokenizer is None:
             raise RuntimeError(
                 "Engine is not initialized. Call setup_vllm_engine() before processing."
             )
 
-        original_items = batch_data
-        batch_prompts: list[str | None] = []
-
-        # Convert data format and filter invalid items
+        valid_prompts: list[str] = []
+        valid_original_items: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
         for item in batch_data:
-            prompt = self.convert_to_compass_verifier_format(item)
-            if prompt is not None:
-                batch_prompts.append(prompt)
-            else:
-                logger.warning("Failed to convert item to Verifier format")
-                batch_prompts.append("")
-
-        # Filter out empty prompts and corresponding original items
-        valid_prompts, valid_original_items = self._filter_valid_prompts(
-            batch_prompts, original_items
-        )
+            try:
+                prompt = self.convert_to_compass_verifier_format(item)
+            except Exception as exc:
+                failures.append(_sample_failure(item, "input_validation", exc))
+                continue
+            if prompt is None:
+                failures.append(
+                    _sample_failure(item, "input_validation", "invalid verifier prompt")
+                )
+                continue
+            valid_prompts.append(prompt)
+            valid_original_items.append(item)
+        self._handle_sample_failures(failures)
 
         if not valid_prompts:
             logger.warning("No valid prompts in this batch, skipping")
@@ -668,28 +615,17 @@ class VerifierOfflineInferenceRunner:
             f"Successfully processed batch of {len(valid_original_items)} items"
         )
 
-    def _filter_valid_prompts(
-        self, batch_prompts: Iterable[str | None], original_items: list[dict[str, Any]]
-    ) -> tuple[list[str], list[dict[str, Any]]]:
-        """
-        Filter out empty prompts and corresponding original items.
-
-        Args:
-            batch_prompts: Iterable of prompt strings (some may be None/empty).
-            original_items: List of original data items.
-
-        Returns:
-            Tuple of (valid_prompts, valid_original_items).
-        """
-        valid_prompts: list[str] = []
-        valid_original_items: list[dict[str, Any]] = []
-
-        for i, prompt in enumerate(batch_prompts):
-            if prompt:  # Only include non-empty prompts
-                valid_prompts.append(prompt)
-                valid_original_items.append(original_items[i])
-
-        return valid_prompts, valid_original_items
+    def _handle_sample_failures(self, failures: list[dict[str, Any]]) -> None:
+        """Apply the configured strict or auditing policy to sample failures."""
+        if not failures:
+            return
+        if self.args.fail_fast:
+            first = failures[0]
+            raise ValueError(
+                f"Sample {first['item']} failed {first['error_category']}: "
+                f"{first['error']}"
+            )
+        save_failed_items(self.args.output_file, failures)
 
     def run(self) -> None:
         """
@@ -722,7 +658,7 @@ class VerifierOfflineInferenceRunner:
         logger.info(f"⏳ Starting to process {len(eval_dataset)} entries")
 
         # Initialize vLLM engine
-        self.llm, self.tokenizer, self.sampling_params = self.setup_vllm_engine()
+        self.llm, self.tokenizer = self.setup_vllm_engine()
 
         # Process data in batches
         self._process_batches(eval_dataset)

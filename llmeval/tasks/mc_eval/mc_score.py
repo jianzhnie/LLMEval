@@ -54,7 +54,11 @@ from llmeval.tasks.postprocess import (
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.results import ScorerResult
-from llmeval.tasks.sample_index import duplicate_sample_error, resolve_sample_indices
+from llmeval.tasks.sample_index import (
+    duplicate_sample_error,
+    resolve_sample_index,
+    resolve_single_generation,
+)
 from llmeval.utils.log import init_logger
 
 __all__ = [
@@ -206,29 +210,26 @@ def score_loglikelihood(
 def merge_generate_records(
     eval_dataset: list[dict[str, Any]], label_key: str, response_key: str
 ) -> list[dict[str, Any]]:
-    """Merge resumed rows for the same stable MC question.
+    """Validate sample rows and group them by stable MC question identity.
 
-    New inference output records sample indices explicitly. Older stable-ID
-    rows without indices are assigned the next unused positions in file order.
-    Legacy rows without ``doc_id`` remain independent because prompt text is
-    not a safe dataset identity.
+    Input remains strictly one sample per row. Grouping is an internal scoring
+    detail used by question-level aggregation modes.
     """
     merged: list[dict[str, Any]] = []
-    positions: dict[tuple[str, str], int] = {}
-    samples_by_position: list[dict[int, str] | None] = []
+    positions: dict[str, int] = {}
+    samples_by_position: list[dict[int, str | None]] = []
 
-    for source in eval_dataset:
+    for row_index, source in enumerate(eval_dataset):
         item = source.copy()
         document_id = item.get("doc_id")
-        prompt = item.get("prompt", item.get("query", ""))
         if document_id is None or (
             isinstance(document_id, str) and not document_id.strip()
         ):
-            merged.append(item)
-            samples_by_position.append(None)
-            continue
-
-        identity = (str(document_id), str(prompt))
+            identity = f"row:{row_index}"
+            problem_id = identity
+        else:
+            identity = f"doc:{document_id}"
+            problem_id = str(document_id)
         position = positions.get(identity)
         if position is None:
             position = len(merged)
@@ -237,50 +238,41 @@ def merge_generate_records(
             samples_by_position.append({})
         else:
             target = merged[position]
-            for key in (label_key, "gold", "choices", "choice_tokens"):
+            for key in (
+                label_key,
+                "gold",
+                "prompt",
+                "query",
+                "choices",
+                "choice_tokens",
+            ):
                 if key in item and key in target and item[key] != target[key]:
                     raise ValueError(
                         f"Conflicting {key!r} for resumed MC document {document_id!r}"
                     )
                 if key in item and key not in target:
                     target[key] = item[key]
-
         target_samples = samples_by_position[position]
-        assert target_samples is not None
-        raw_generations = item.get(response_key, [])
-        if isinstance(raw_generations, str):
-            generations = [raw_generations]
-        elif isinstance(raw_generations, list):
-            generations = [str(value) for value in raw_generations]
-        else:
-            generations = []
-
-        sample_indices = resolve_sample_indices(
-            item,
-            len(generations),
-            problem_id=str(document_id),
-            used_indices=target_samples,
+        sample_index = resolve_sample_index(item, problem_id=problem_id)
+        generation = resolve_single_generation(
+            item, response_key, problem_id=problem_id
         )
-
-        for sample_index, generation in zip(sample_indices, generations, strict=True):
-            existing = target_samples.get(sample_index)
-            if existing is not None and existing != generation:
-                raise duplicate_sample_error(str(document_id), sample_index)
-            target_samples[sample_index] = generation
+        if sample_index in target_samples:
+            if target_samples[sample_index] != generation:
+                raise duplicate_sample_error(problem_id, sample_index)
+            continue
+        target_samples[sample_index] = generation
 
     for item, samples in zip(merged, samples_by_position, strict=True):
-        if samples is None:
-            continue
         ordered_indices = sorted(samples)
-        item[response_key] = [samples[index] for index in ordered_indices]
-        # Keep exactly the field matching the output shape — a stale scalar
-        # ``sample_index`` must not survive a multi-sample merge.
-        item.pop("sample_index", None)
-        item.pop("sample_indices", None)
+        item[response_key] = [
+            samples[index] if samples[index] is not None else ""
+            for index in ordered_indices
+        ]
         if len(ordered_indices) == 1:
             item["sample_index"] = ordered_indices[0]
         else:
-            item["sample_indices"] = ordered_indices
+            item.pop("sample_index", None)
     return merged
 
 
@@ -790,7 +782,7 @@ def score_generate_item(
 
     if not gold:
         status = "skipped"
-    elif not generation_texts:
+    elif not generation_texts or all(not text.strip() for text in generation_texts):
         status = "failed"
     else:
         status = "completed"

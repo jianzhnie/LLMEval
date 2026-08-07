@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from io import TextIOBase
 from pathlib import Path
@@ -13,7 +13,7 @@ from typing import Any
 
 
 @contextmanager
-def _atomic_text_writer(path: str | Path) -> Iterator[TextIOBase]:
+def _atomic_text_writer(path: str | Path) -> Generator[TextIOBase, None, None]:
     """Yield a sibling temporary file and atomically publish it on success."""
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -27,8 +27,16 @@ def _atomic_text_writer(path: str | Path) -> Iterator[TextIOBase]:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, destination)
-    except BaseException:
+    except Exception:
+        # A failed write must never leave a partial file behind: the
+        # destination keeps its previous (complete) content, and the
+        # sibling temporary is removed so a later run starts clean.
         temporary.unlink(missing_ok=True)
+        raise
+    except BaseException:
+        # KeyboardInterrupt / SystemExit mid-write: the temp may hold a
+        # complete payload the user still wants. Keep it (named uniquely)
+        # so it survives the interrupt instead of being silently deleted.
         raise
 
 
