@@ -20,13 +20,12 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.code_eval.execute import check_correctness
-from llmeval.tasks.persistence import persist_results
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
     build_filter_artifacts,
-    dedupe_repeated_samples,
-    expand_single_generation_samples,
+    normalize_single_generation_samples,
+    persist_results,
     resolve_max_workers,
     strip_reasoning_wrappers,
 )
@@ -339,7 +338,7 @@ def _resolve_prompt_mode(item: dict[str, Any]) -> str:
 # ===========================================================================
 
 
-def _process_code_item(
+def _process_code_item_impl(
     args: tuple[int, dict[str, Any], str, str, float, bool],
 ) -> tuple[int, dict[str, Any]]:
     """Score a single code-generation item.
@@ -430,6 +429,18 @@ def _process_code_item(
     exec_result["evaluation_status"] = _code_record_status(exec_result)
     exec_result.update(filter_artifacts)
     return idx, exec_result
+
+
+def _process_code_item(
+    args: tuple[int, dict[str, Any], str, str, float, bool],
+) -> tuple[int, dict[str, Any]]:
+    """Convert every worker exception into an indexed infrastructure failure."""
+    idx, item, *_ = args
+    try:
+        return _process_code_item_impl(args)
+    except Exception as exc:
+        logger.warning("Code scoring worker failed for item %d: %s", idx, exc)
+        return idx, _failure_code_record(item)
 
 
 # ===========================================================================
@@ -552,19 +563,16 @@ def _normalize_code_samples(
 ) -> list[dict[str, Any]]:
     """Validate and normalize one code generation per input row.
 
-    Exact duplicate rows (a resumed run re-appending an identical record)
-    are skipped idempotently; rows that repeat a ``task_id`` with a
-    conflicting prompt or test harness raise ``ValueError``.
+    Repeated rows remain independent samples, including rows with identical
+    responses. Rows that repeat a ``task_id`` with a conflicting prompt or
+    test harness raise ``ValueError``.
     """
-    deduped = dedupe_repeated_samples(
+    return normalize_single_generation_samples(
         eval_dataset,
         response_key,
         problem_identity=_code_identity,
         conflict_keys=(label_key, "prompt"),
         record_kind="code task",
-    )
-    return expand_single_generation_samples(
-        deduped, response_key, problem_identity=_code_identity
     )
 
 

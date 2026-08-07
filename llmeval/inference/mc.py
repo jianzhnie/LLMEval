@@ -253,7 +253,9 @@ class MCLoglikelihoodClient:
             f"Max Retries: {self.max_retries}, base_url: {base_url}"
         )
 
-    def get_choices_logprobs(self, prompt: str, choice_texts: list[str]) -> list[float]:
+    def get_choices_logprobs(
+        self, prompt: str, choice_texts: list[str]
+    ) -> list[float] | None:
         """Compute per-answer-token log-probabilities from first-token top_logprobs.
 
         Uses echo=False + max_tokens=1 + logprobs=20 to obtain the model's top
@@ -271,8 +273,8 @@ class MCLoglikelihoodClient:
 
         Returns:
             One logprob per choice, aligned with choice_texts. Choices not found
-            among the top predictions get float("-inf"). All -inf when the
-            request fails after all retries.
+            among the top predictions get float("-inf"). ``None`` means the
+            prompt exceeded the model context and must not be retried.
         """
 
         def do_request() -> list[float]:
@@ -310,9 +312,7 @@ class MCLoglikelihoodClient:
 
         choice_logprobs = call_with_retry(do_request, self.max_retries)
         if choice_logprobs is None:
-            # Request failed (4xx / exhausted retries / context length): the
-            # all-"-inf" result marks the item failed downstream, never scored.
-            return [float("-inf")] * len(choice_texts)
+            return None
         return choice_logprobs
 
     def score_continuations(self, request: LoglikelihoodRequest) -> LoglikelihoodResult:
@@ -437,13 +437,20 @@ class MCLoglikelihoodClient:
                 self.max_retries,
                 fail_fast_exceptions=(ContinuationAlignmentError,),
             )
-        except ValueError as exc:
+        except ContinuationAlignmentError as exc:
             logger.debug("Continuation scoring fallback: %s", exc)
             return LoglikelihoodResult.failure(request, str(exc))
         except ClientError as exc:
             logger.warning("Continuation logprob request failed: %s", exc)
             return LoglikelihoodResult.failure(request, str(exc))
+        except ValueError:
+            # Schema/invariant errors are programming defects, not alignment
+            # fallback signals. Let the per-item runner audit them explicitly.
+            raise
         except Exception as exc:
+            # Continuation scoring issues several completions for one item.
+            # Keep an unexpected backend failure local to that item; the
+            # first-token path remains fail-fast for programming errors.
             logger.warning("Continuation logprob request failed: %s", exc)
             return LoglikelihoodResult.failure(request, str(exc))
         if result is None:
@@ -634,9 +641,12 @@ class MCRunner:
                         else:
                             self._write_result(result)
                             with self._stats_lock:
-                                self._stats["processed"] += 1
-                                if result.get("correct"):
-                                    self._stats["correct"] += 1
+                                if result.get("error") == CONTEXT_LENGTH_ERROR:
+                                    self._stats["failed"] += 1
+                                else:
+                                    self._stats["processed"] += 1
+                                    if result.get("correct"):
+                                        self._stats["correct"] += 1
                     pbar.update(1)
 
         if failed_items:
@@ -675,8 +685,8 @@ class MCRunner:
             Result dict with choices, per-choice logprobs, prediction, and
             correctness; None when the item has no choices (counted as skipped).
             A context-length rejection returns a permanent-failure row
-            (empty logprobs, "error" marker) that scores as incorrect and is
-            treated as completed by resume.
+            (empty logprobs, "error" marker) that is excluded as an inference
+            failure and treated as completed by resume.
 
         Raises:
             RuntimeError: When every choice scored -inf, i.e. the batched
@@ -699,6 +709,20 @@ class MCRunner:
         choice_logprobs: list[list[float]] = []
         choice_scored_tokens: list[list[str]] = []
         choice_token_ids: list[list[int] | None] | None = None
+
+        def context_length_result() -> dict[str, Any]:
+            return {
+                self.config.input_key: prompt,
+                "doc_id": item["doc_id"],
+                "choices": choices,
+                "choice_tokens": choice_tokens,
+                "gold": gold,
+                "logprobs": [],
+                "pred": -1,
+                "correct": False,
+                "error": CONTEXT_LENGTH_ERROR,
+            }
+
         if scoring_mode == "continuation":
             continuation_result = self.client.score_continuations(
                 LoglikelihoodRequest(prompt, tuple(choice_tokens))
@@ -706,19 +730,7 @@ class MCRunner:
             if not continuation_result.exact:
                 reason = continuation_result.error or "unknown reason"
                 if reason == CONTEXT_LENGTH_ERROR:
-                    # The prompt can never fit: write a permanent-failure row
-                    # (empty logprobs score as incorrect) so resume skips it.
-                    return {
-                        self.config.input_key: prompt,
-                        "doc_id": item["doc_id"],
-                        "choices": choices,
-                        "choice_tokens": choice_tokens,
-                        "gold": gold,
-                        "logprobs": [],
-                        "pred": -1,
-                        "correct": False,
-                        "error": CONTEXT_LENGTH_ERROR,
-                    }
+                    return context_length_result()
                 raise RuntimeError(f"Continuation logprob request failed: {reason}")
             choice_logprobs = [
                 list(choice.token_logprobs) for choice in continuation_result.choices
@@ -735,6 +747,8 @@ class MCRunner:
 
         if scoring_mode == "first_token":
             logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)
+            if logprobs is None:
+                return context_length_result()
             choice_logprobs = [
                 [score] if score != float("-inf") else [] for score in logprobs
             ]
@@ -754,7 +768,11 @@ class MCRunner:
             "choices": choices,
             "choice_tokens": choice_tokens,
             "gold": gold,
-            "logprobs": logprobs,
+            # JSON has no representation for infinity. Missing top-logprob
+            # candidates are persisted as null and restored to -inf by the scorer.
+            "logprobs": [
+                None if score == float("-inf") else score for score in logprobs
+            ],
             "choice_logprobs": choice_logprobs,
             "scoring_mode": scoring_mode,
             "loglikelihood_exact": scoring_mode == "continuation",
@@ -851,8 +869,8 @@ class MCRunner:
             absent — generate mode extracts answers at scoring time; only
             loglikelihood mode computes correctness inline. A context-length
             rejection returns a permanent-failure row (empty gen plus an
-            "error" marker) that scores as a wrong answer and is treated as
-            completed by resume.
+            "error" marker) that is excluded as an inference failure and
+            treated as completed by resume.
 
         Raises:
             RuntimeError: When generation produced no usable text (retries

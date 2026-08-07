@@ -250,7 +250,7 @@ clears environment variables, but it is not a security sandbox. Run code
 benchmarks inside a locked-down container or sandbox with no network access, a
 read-only host filesystem, a non-privileged user, and external resource limits.
 
-Multi-sample math summaries include `sample_accuracy`, `problem_pass@k`,
+Multi-sample math summaries include `accuracy`, `problem_pass@k`,
 `problem_majority@k`, and per-problem `correct_samples`, `observed_samples`, and
 `expected_samples`. Pass `--expected_samples 64` when scoring legacy output that
 does not carry its target sample count.

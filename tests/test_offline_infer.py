@@ -72,6 +72,8 @@ def _args(tmp_path: Path, **overrides: object) -> SimpleNamespace:
         "top_p": 0.9,
         "top_k": 20,
         "repetition_penalty": 1.1,
+        "enable_thinking": False,
+        "repair_resume": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -126,6 +128,16 @@ class TestOfflineInferenceRunner:
 
         assert messages == [{"role": "user", "content": "2+2?"}]
 
+    def test_convert_to_messages_format_preserves_prompt_verbatim(
+        self, tmp_path: Path
+    ) -> None:
+        """Prompts are NOT stripped: the model sees exactly the recorded text."""
+        runner = _runner(tmp_path)
+
+        messages = runner.convert_to_messages_format({"prompt": "2+2?  \n"})
+
+        assert messages == [{"role": "user", "content": "2+2?  \n"}]
+
     def test_convert_to_messages_format_falls_back_to_prompt(
         self, tmp_path: Path
     ) -> None:
@@ -178,7 +190,7 @@ class TestOfflineInferenceRunner:
             json.loads(line)
             for line in Path(runner.args.output_file).read_text().splitlines()
         ]
-        assert rows == [{"prompt": "q", "answer": "a", "gen": ["answer text"]}]
+        assert rows == [{"prompt": "q", "answer": "a", "gen": "answer text"}]
 
     def test_setup_vllm_engine_passes_configured_args(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -227,3 +239,33 @@ class TestOfflineInferenceRunner:
         assert failure["error_category"] == "batch_processing"
         assert failure["batch_index"] == 0
         assert failure["items"] == [{"doc_id": "d1"}]
+
+    def test_non_fail_fast_isolates_one_bad_inference_sample(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _runner(tmp_path, fail_fast=False)
+        good_output = SimpleNamespace(outputs=[SimpleNamespace(text="ok")])
+
+        def chat(messages: list[object], *_args: object, **_kwargs: object) -> list[object]:
+            if len(messages) > 1 or messages[0][0]["content"] == "bad":
+                raise ValueError("context length exceeded")
+            return [good_output]
+
+        runner.llm = SimpleNamespace(chat=chat)
+        items = [
+            {"doc_id": "good", "prompt": "good", "_request_seed": 1},
+            {"doc_id": "bad", "prompt": "bad", "_request_seed": 2},
+        ]
+        messages = [
+            [{"role": "user", "content": "good"}],
+            [{"role": "user", "content": "bad"}],
+        ]
+
+        runner._generate_and_write(items, messages)
+
+        output = json.loads(Path(runner.args.output_file).read_text().strip())
+        assert output["doc_id"] == "good"
+        assert output["gen"] == "ok"
+        failure = json.loads((tmp_path / "output_failed.jsonl").read_text().strip())
+        assert failure["item"]["doc_id"] == "bad"
+        assert failure["error_category"] == "inference"

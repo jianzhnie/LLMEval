@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from llmeval.tasks.persistence import atomic_write_jsonl, persist_results
+from llmeval.tasks.postprocess import atomic_write_jsonl, persist_results
 
 
 def test_persist_results_writes_jsonl_and_adjacent_summary(tmp_path: Path) -> None:

@@ -47,11 +47,11 @@ from typing import Any, Literal
 from pebble import ProcessPool
 from tqdm import tqdm
 
-from llmeval.tasks.persistence import persist_results
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
     build_filter_artifacts,
+    persist_results,
     resolve_max_workers,
     resolve_single_generation,
     strip_reasoning_wrappers,
@@ -211,7 +211,9 @@ def merge_generate_records(
     """Validate sample rows and group them by stable MC question identity.
 
     Input remains strictly one sample per row. Grouping is an internal scoring
-    detail used by question-level aggregation modes.
+    detail used by question-level aggregation modes. MC additionally validates
+    choices, gold indices, and choice tokens because those fields are part of
+    the question definition; math and code tasks have no corresponding fields.
     """
     merged: list[dict[str, Any]] = []
     positions: dict[str, int] = {}
@@ -654,8 +656,9 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     """Score a single loglikelihood item.
 
     Unscorable items (missing / empty logprobs, invalid gold index, or every
-    logprob set to ``-inf`` after a failed API call) are marked as incorrect
-    with ``pred = -1`` so they never contribute false positives.
+    logprob set to ``-inf`` after a failed API call) receive ``pred = -1``.
+    Dataset errors are skipped; inference failures are excluded from accuracy
+    and exposed through structured failure counts.
     """
     try:
         gold = int(item.get("gold", -1))
@@ -664,7 +667,20 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
             f"Invalid gold index {item.get('gold')!r} — treating as -1 (always wrong)."
         )
         gold = -1
-    logprobs: list[float] = item.get("logprobs", [])
+    raw_logprobs = item.get("logprobs", [])
+    logprobs: list[float] = []
+    if isinstance(raw_logprobs, list):
+        try:
+            for value in raw_logprobs:
+                if value is None:
+                    logprobs.append(float("-inf"))
+                elif isinstance(value, int | float) and not isinstance(value, bool):
+                    logprobs.append(float(value))
+                else:
+                    raise TypeError("non-numeric logprob")
+        except (TypeError, ValueError):
+            logger.warning("Invalid aggregate logprobs; marking item failed")
+            logprobs = []
     choices = (
         item.get("choice_tokens") or item.get("choices") or item.get("choice_texts", [])
     )

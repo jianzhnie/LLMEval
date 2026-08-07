@@ -229,6 +229,18 @@ class TestCheckCorrectness:
         )
         assert result["passed"] is True
 
+    def test_os_exit_is_disabled(self) -> None:
+        """``os._exit`` must be blocked so the worker still reports a result.
+
+        Without the guard the candidate would kill the worker before it wrote
+        its result file, turning a wrong answer into an infrastructure failure.
+        """
+        program = "import os\nos._exit(0)\n"
+        result = check_correctness(program, 3.0, "t_exit", allow_unsafe_code=True)
+        assert result["passed"] is False
+        assert result["result"] == "failed: TypeError"  # os._exit is None
+        assert result["result"] != "failed: worker did not produce a result"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # multiprocessing start-method resolution (P0-2: default fork)
@@ -319,6 +331,30 @@ class TestUnsafeExecute:
         assert status == "failed: AssertionError"
         assert stderr != ""
 
+    def test_main_guard_executes(self) -> None:
+        program = 'if __name__ == "__main__":\n    assert False\n'
+        status, _ = unsafe_execute(program, 3.0)
+        assert status == "failed: AssertionError"
+
+    def test_caught_timeout_is_still_reported(self) -> None:
+        program = (
+            "import time\ntry:\n    time.sleep(1)\nexcept BaseException:\n    pass\n"
+        )
+        status, _ = unsafe_execute(program, 0.1)
+        assert status == "timed out"
+
+    @pytest.mark.parametrize(
+        "program",
+        [
+            "import os\nos.execv('/bin/true', ['true'])\n",
+            "import os\nos.posix_spawn('/bin/true', ['true'], {})\n",
+            "import os\nos.popen('true')\n",
+        ],
+    )
+    def test_process_replacement_apis_are_disabled(self, program: str) -> None:
+        status, _ = unsafe_execute(program, 3.0)
+        assert status == "failed: TypeError"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # score_code (serial path only)
@@ -326,6 +362,38 @@ class TestUnsafeExecute:
 
 
 class TestScoreCode:
+    def test_worker_exception_returns_indexed_failure(self) -> None:
+        import llmeval.tasks.code_eval.code_score as code_score
+
+        index, record = code_score._process_code_item(
+            (0, {}, "answer", "gen", 1.0, True)
+        )
+
+        assert index == 0
+        assert record["evaluation_status"] == "failed"
+
+    def test_serial_worker_exception_is_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.tasks.code_eval.code_score as code_score
+
+        monkeypatch.setattr(
+            code_score,
+            "_process_code_item",
+            MagicMock(side_effect=RuntimeError("worker failed")),
+        )
+        result = score_code_result(
+            [{"task_id": "task/0", "prompt": "def f():\n", "answer": "", "gen": [""]}],
+            "answer",
+            "gen",
+            tmp_path / "serial_failure.jsonl",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert result.failed_count == 1
+        assert result.per_item[0]["evaluation_status"] == "failed"
+
     def test_incorrect_program_is_not_infrastructure_failure(
         self, tmp_path: Path
     ) -> None:
@@ -348,6 +416,82 @@ class TestScoreCode:
         assert result.metrics["pass@1"] == 0.0
         assert result.failed_count == 0
         assert result.effective_sample_count == 1
+
+    def test_os_exit_candidate_is_completed_not_infra_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """A candidate calling ``os._exit()`` stays in the Pass@k denominator."""
+        result = score_code_result(
+            [
+                {
+                    "task_id": "task/0",
+                    "prompt": "def f():\n",
+                    "answer": "\nassert f() == 1\n",
+                    "gen": ["import os\nos._exit(0)"],
+                }
+            ],
+            "answer",
+            "gen",
+            tmp_path / "os_exit.jsonl",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        record = result.per_item[0]
+        assert record["passed"] is False
+        assert record["evaluation_status"] == "completed"
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 1
+        assert result.metrics["pass@1"] == 0.0
+
+    def test_pool_timeout_is_classified_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pool-level timeout (missing worker result) is timeout, not failed."""
+        import llmeval.tasks.code_eval.code_score as code_score
+
+        class _EmptyFuture:
+            def result(self) -> object:
+                return iter([])
+
+        class _FakePool:
+            def __init__(self, max_workers: int) -> None:
+                pass
+
+            def __enter__(self) -> _FakePool:
+                return self
+
+            def __exit__(self, *_args: object) -> bool:
+                return False
+
+            def map(self, *_args: object, **_kwargs: object) -> _EmptyFuture:
+                return _EmptyFuture()
+
+        monkeypatch.setattr(code_score, "ProcessPool", _FakePool)
+        items = [
+            {
+                "task_id": f"task/{index}",
+                "prompt": "def f():\n",
+                "answer": "\nassert f() == 1\n",
+                "gen": ["    return 1"],
+            }
+            for index in range(2)
+        ]
+        result = score_code_result(
+            items,
+            "answer",
+            "gen",
+            tmp_path / "pool_timeout.jsonl",
+            max_workers=2,
+            allow_unsafe_code=True,
+        )
+
+        assert result.sample_count == 2
+        assert result.timeout_count == 2
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 0
+        assert result.failure_counts == {"timeout": 2}
+        assert all(r["evaluation_status"] == "timeout" for r in result.per_item)
 
     def test_execution_requires_explicit_opt_in(self, tmp_path: Path) -> None:
         with pytest.raises(PermissionError, match="executes generated code"):
@@ -940,7 +1084,7 @@ class TestCodeRepeatedRows:
         assert len(records) == 1
         assert records[0]["result"] == "failed: empty generation"
 
-    def test_identical_generations_remain_distinct_samples(
+    def test_identical_responses_remain_independent_samples(
         self, tmp_path: Path
     ) -> None:
         items = [
@@ -950,6 +1094,15 @@ class TestCodeRepeatedRows:
         acc, records = self._score(items, tmp_path)
         assert acc == 1.0
         assert len(records) == 2
+
+    def test_conflicting_duplicate_rows_raise(self, tmp_path: Path) -> None:
+        """Same task_id with a different test harness signals a corrupt resume."""
+        rows = [
+            self._item([self._RIGHT]),
+            self._item([self._RIGHT], answer="\nassert add(1, 2) == 4\n"),
+        ]
+        with pytest.raises(ValueError, match="Conflicting 'answer'"):
+            self._score(rows, tmp_path)
 
     def test_different_generations_remain_distinct_samples(
         self, tmp_path: Path

@@ -34,7 +34,7 @@ class TestIsChatTemplateApplied:
             "<|im_start|>user\nHello",
             "<s>[INST] hello",
             "### Human:\nWhat?",
-            "Human: hi",
+            "Human: hi\nAssistant: hello",
         ],
     )
     def test_detects_known_markers(self, query: str) -> None:
@@ -46,6 +46,9 @@ class TestIsChatTemplateApplied:
     def test_human_word_inside_plain_text_returns_false(self) -> None:
         query = "In this passage, the label Human: appears as ordinary text."
         assert is_chat_template_applied(query) is False
+
+    def test_single_human_role_line_is_raw_dialogue(self) -> None:
+        assert is_chat_template_applied("Human: hi") is False
 
     def test_empty_string_returns_false(self) -> None:
         assert is_chat_template_applied("") is False

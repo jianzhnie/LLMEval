@@ -18,10 +18,8 @@ from llmeval.tasks.registry import (
     MetricValue,
     ScorerResult,
     TaskRegistry,
-    aggregate_metric_values,
     metric_from_samples,
-    write_per_item_results,
-    write_structured_summary,
+    persist_evaluation_result,
 )
 
 
@@ -52,7 +50,7 @@ def test_evaluation_result_default_serialization_is_compact(tmp_path: Path) -> N
     assert "per_item" not in result.to_dict()
     assert result.to_dict(include_per_item=True)["per_item"] == result.per_item
 
-    write_structured_summary(result, tmp_path / "score.jsonl")
+    persist_evaluation_result(result, tmp_path / "score.jsonl")
     summary = json.loads((tmp_path / "score.summary.json").read_text())
     assert summary["per_item"] == result.per_item
     assert summary["acc"] == 1.0
@@ -82,7 +80,7 @@ def test_per_item_output_supports_compact_and_debug_schemas(tmp_path: Path) -> N
     )
 
     compact_path = tmp_path / "compact.jsonl"
-    write_per_item_results(result, compact_path)
+    persist_evaluation_result(result, compact_path)
     compact = json.loads(compact_path.read_text())
     assert compact == {
         "doc_id": "mmlu:0",
@@ -94,11 +92,11 @@ def test_per_item_output_supports_compact_and_debug_schemas(tmp_path: Path) -> N
     }
 
     debug_path = tmp_path / "debug.jsonl"
-    write_per_item_results(result, debug_path, output_schema="debug")
+    persist_evaluation_result(result, debug_path, output_schema="debug")
     assert json.loads(debug_path.read_text()) == record
 
 
-def test_bootstrap_and_aggregation_are_deterministic() -> None:
+def test_bootstrap_is_deterministic() -> None:
     samples = [0.0, 1.0, 1.0, 0.0]
     first = metric_from_samples(samples, 7, n_resamples=100)
     second = metric_from_samples(samples, 7, n_resamples=100)
@@ -111,8 +109,6 @@ def test_bootstrap_and_aggregation_are_deterministic() -> None:
         different.ci_low,
         different.ci_high,
     )
-    assert aggregate_metric_values([first], mode="micro").value == pytest.approx(0.5)
-    assert aggregate_metric_values([first], mode="macro").value == pytest.approx(0.5)
 
 
 def test_few_shot_sampling_is_per_document_and_seeded(tmp_path: Path) -> None:

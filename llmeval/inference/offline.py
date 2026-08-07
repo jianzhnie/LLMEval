@@ -268,14 +268,51 @@ class OfflineInferenceRunner:
         if not valid_messages:
             return
 
-        outputs: list[RequestOutput] = self.llm.chat(
-            valid_messages,
-            self._sampling_params_for_items(valid_items),
-            use_tqdm=False,
-            chat_template_kwargs={"enable_thinking": self.args.enable_thinking},
-        )
-        responses = [self._extract_model_response(output) for output in outputs]
-        self._write_response_results(valid_items, responses)
+        self._generate_and_write(valid_items, valid_messages)
+
+    def _generate_and_write(
+        self,
+        items: Sequence[dict[str, Any]],
+        messages: Sequence[list[dict[str, str]]],
+    ) -> None:
+        """Generate a batch, splitting failures until the bad sample is isolated."""
+        if self.llm is None:
+            raise RuntimeError("vLLM engine is not initialized")
+        try:
+            outputs: list[RequestOutput] = self.llm.chat(
+                list(messages),
+                self._sampling_params_for_items(list(items)),
+                use_tqdm=False,
+                chat_template_kwargs={"enable_thinking": self.args.enable_thinking},
+            )
+            if len(outputs) != len(items):
+                raise RuntimeError(
+                    f"vLLM returned {len(outputs)} outputs for {len(items)} inputs"
+                )
+            responses = [self._extract_model_response(output) for output in outputs]
+        except Exception as exc:
+            if self.args.fail_fast:
+                raise
+            if len(items) == 1:
+                self._handle_sample_failures(
+                    [_sample_failure(items[0], "inference", exc)]
+                )
+                return
+            midpoint = len(items) // 2
+            logger.warning(
+                "Inference batch of %d failed; retrying as %d and %d samples: %s",
+                len(items),
+                midpoint,
+                len(items) - midpoint,
+                exc,
+            )
+            self._generate_and_write(items[:midpoint], messages[:midpoint])
+            self._generate_and_write(items[midpoint:], messages[midpoint:])
+            return
+
+        # Persistence errors must propagate to the batch policy. Retrying model
+        # generation cannot repair a filesystem failure and may append duplicates.
+        self._write_response_results(items, responses)
 
     def _handle_sample_failures(self, failures: list[dict[str, Any]]) -> None:
         """Apply the configured strict or auditing policy to sample failures."""

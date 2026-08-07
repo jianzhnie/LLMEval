@@ -91,6 +91,42 @@ class TestResumeState:
         )
         assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
 
+    @pytest.mark.parametrize(
+        "logprobs",
+        [
+            [],  # empty list: no scores recorded
+            "not-a-list",  # input data carrying an unrelated logprobs field
+            0.5,  # bare number, not a per-choice list
+            ["A", "B"],  # non-numeric elements
+            None,  # explicit null
+        ],
+    )
+    def test_non_score_logprobs_row_is_not_completed(
+        self, tmp_path: Path, logprobs: object
+    ) -> None:
+        """Only a non-empty numeric logprobs list marks a row completed."""
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps({"doc_id": "q1", "prompt": "p", "logprobs": logprobs}) + "\n"
+        )
+        assert load_resume_state(path, "prompt", "gen").completed_count == 0
+
+    def test_context_length_error_row_is_completed(self, tmp_path: Path) -> None:
+        """A permanent-failure row (empty response + error marker) is completed."""
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "p",
+                    "gen": "",
+                    "error": "context_length_exceeded",
+                }
+            )
+            + "\n"
+        )
+        assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
+
     def test_malformed_line_reports_path_and_line(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
         path.write_text("bad json\n")

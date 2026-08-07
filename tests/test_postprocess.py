@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from llmeval.tasks.postprocess import (
     FilterRegistry,
-    apply_text_pipeline,
-    build_text_pipeline,
+    normalize_single_generation_samples,
     strip_reasoning_wrappers,
 )
 
@@ -15,21 +16,35 @@ def test_strip_reasoning_wrappers_prefers_answer_tag() -> None:
     assert strip_reasoning_wrappers(text) == "42"
 
 
-def test_apply_text_pipeline_runs_in_order() -> None:
-    def add_a(text: str) -> str:
-        return text + "a"
-
-    def add_b(text: str) -> str:
-        return text + "b"
-
-    pipeline = build_text_pipeline(add_a, add_b)
-    assert apply_text_pipeline("x", pipeline) == "xab"
-
-
-def test_apply_text_pipeline_handles_none() -> None:
-    assert (
-        apply_text_pipeline(None, build_text_pipeline(strip_reasoning_wrappers)) == ""
+def test_normalize_repeated_samples_preserves_identical_responses() -> None:
+    rows = [
+        {"doc_id": "d0", "answer": "1", "gen": ["a"]},
+        {"doc_id": "d0", "answer": "1", "gen": ["b"]},
+        {"doc_id": "d0", "answer": "1", "gen": ["a"]},
+    ]
+    normalized = normalize_single_generation_samples(
+        rows,
+        "gen",
+        problem_identity=lambda item, _index: str(item["doc_id"]),
+        conflict_keys=("answer",),
+        record_kind="document",
     )
+    assert [row["gen"] for row in normalized] == [["a"], ["b"], ["a"]]
+
+
+def test_normalize_repeated_samples_rejects_conflicts() -> None:
+    rows = [
+        {"doc_id": "d0", "answer": "1", "gen": ["a"]},
+        {"doc_id": "d0", "answer": "2", "gen": ["b"]},
+    ]
+    with pytest.raises(ValueError, match="Conflicting 'answer'"):
+        normalize_single_generation_samples(
+            rows,
+            "gen",
+            problem_identity=lambda item, _index: str(item["doc_id"]),
+            conflict_keys=("answer",),
+            record_kind="document",
+        )
 
 
 def test_registered_pipeline_records_each_filter_step() -> None:

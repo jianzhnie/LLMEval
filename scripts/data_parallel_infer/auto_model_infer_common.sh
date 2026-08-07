@@ -360,14 +360,23 @@ log_error() {
 }
 
 wait_for_pids() {
-    local failed=0
-    local pid
-    for pid in "$@"; do
+    local pids=("$@")
+    local index pid remaining
+    for index in "${!pids[@]}"; do
+        pid="${pids[index]}"
         if ! wait "$pid"; then
-            failed=1
+            # Stop sibling monitors immediately. Otherwise a failed instance
+            # can leave the remaining 10-day polling loops orphaned.
+            for remaining in "${pids[@]:index+1}"; do
+                kill "$remaining" 2>/dev/null || true
+            done
+            for remaining in "${pids[@]:index+1}"; do
+                wait "$remaining" 2>/dev/null || true
+            done
+            return 1
         fi
     done
-    return "$failed"
+    return 0
 }
 
 # 错误处理函数，并在退出前清理资源
@@ -395,7 +404,12 @@ acquire_lock() {
     if ! mkdir "$LOCK_DIR" 2>/dev/null; then
         local pid
         pid=$(cat "$LOCK_PID_FILE" 2>/dev/null || true)
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        if [[ -z "$pid" ]]; then
+            handle_error 1 "部署锁正在初始化或已损坏: ${LOCK_DIR}；请稍后重试，确认无部署进程后再手动清理"
+        fi
+        # kill -0 may return EPERM for another user's live process. ps provides
+        # a second existence check before classifying the lock as stale.
+        if kill -0 "$pid" 2>/dev/null || ps -p "$pid" -o pid= >/dev/null 2>&1; then
             handle_error 1 "另一个部署进程 (PID: $pid) 正在运行"
         fi
         # 不能在检查后自动删除：另一个进程可能已在两步之间取得同一路径的
@@ -1152,7 +1166,8 @@ run_task_batch_parallel() {
         # 添加一个小延迟以确保任务正确启动
         sleep 2
     else
-        log_warn "节点 ${node} 上没有有效的推理任务命令，跳过执行"
+        log_error "节点 ${node} 分配到的输入文件均不可用，无法启动推理任务"
+        return 1
     fi
     # 等待任务完成
     wait_for_batch_completion_and_cleanup "$node" "$port" ${#commands[@]}
@@ -1203,6 +1218,7 @@ wait_for_batch_completion_and_cleanup() {
     # 即使超时，仍然尝试停止服务
     log_warn "正在强制停止节点 ${node} 上的 vLLM 服务..."
     stop_service_on_node "$node" "$port"
+    return 1
 }
 
 # 分发并启动所有推理任务

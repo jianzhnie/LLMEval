@@ -21,13 +21,12 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
-from llmeval.tasks.persistence import persist_results
 from llmeval.tasks.postprocess import (
     DEFAULT_FILTER_REGISTRY,
     TextFilterPipeline,
     build_filter_artifacts,
-    dedupe_repeated_samples,
-    expand_single_generation_samples,
+    normalize_single_generation_samples,
+    persist_results,
     resolve_max_workers,
 )
 from llmeval.tasks.registry import ScorerResult
@@ -299,7 +298,7 @@ def _math_text_equiv(gold_text: Any, pred_text: Any) -> bool:
         return False
 
 
-def process_answers(
+def _process_answers_impl(
     args: tuple[int, dict[str, Any], str, str],
 ) -> MathAnswerResult:
     """
@@ -454,6 +453,25 @@ def process_answers(
             gold_answer_text,
             failure_stage="verification",
             failure_reason=str(e),
+        )
+
+
+def process_answers(
+    args: tuple[int, dict[str, Any], str, str],
+) -> MathAnswerResult:
+    """Return an indexed failure sentinel if any worker-stage operation crashes."""
+    index = args[0]
+    try:
+        return _process_answers_impl(args)
+    except Exception as exc:
+        logger.warning("Math scoring worker failed for job %d: %s", index, exc)
+        return MathAnswerResult(
+            index,
+            0.0,
+            None,
+            None,
+            failure_stage="verification",
+            failure_reason=f"worker error: {exc}",
         )
 
 
@@ -738,7 +756,7 @@ def score_math_result(
             failure_counts[f"{stage}_failed"] += 1
         elif item.get("evaluation_status") == "timeout":
             failure_counts["timeout"] += 1
-    failure_counts["wrong_answer"] = sum(
+    wrong_answer_count = sum(
         item.get("evaluation_status", "completed") == "completed"
         and float(item.get("accuracy", 0.0)) != 1.0
         for item in scoring_dataset
@@ -759,6 +777,7 @@ def score_math_result(
             "problem_level": details,
             "complete_problem_count": complete_problem_count,
             "incomplete_problem_count": len(details) - complete_problem_count,
+            "wrong_answer_count": wrong_answer_count,
             "excluded_problem_doc_ids": [
                 problem["doc_id"] for problem in details if not problem["complete"]
             ],
@@ -777,19 +796,16 @@ def _normalize_math_samples(
 ) -> list[dict[str, Any]]:
     """Validate and normalize one math generation per input row.
 
-    Exact duplicate rows (a resumed run re-appending an identical record)
-    are skipped idempotently; rows that repeat a ``doc_id`` with a
-    conflicting gold answer or prompt raise ``ValueError``.
+    Repeated rows remain independent samples, including rows with identical
+    responses. Rows that repeat a ``doc_id`` with a conflicting gold answer
+    or prompt raise ``ValueError``.
     """
-    deduped = dedupe_repeated_samples(
+    return normalize_single_generation_samples(
         eval_dataset,
         response_key,
         problem_identity=_problem_identity,
         conflict_keys=(label_key, "prompt"),
         record_kind="math document",
-    )
-    return expand_single_generation_samples(
-        deduped, response_key, problem_identity=_problem_identity
     )
 
 
@@ -865,6 +881,7 @@ def _build_problem_level_metrics(
         )
         majority_prediction, majority_correct = _majority_cluster(completed)
         sample_count = len(items)
+        observed_samples = len(completed)
         item_expected = max(
             [
                 int(item["expected_samples"])
@@ -881,22 +898,22 @@ def _build_problem_level_metrics(
             else item_expected
         )
         target_count = target_count or sample_count
-        if len(items) > target_count:
+        if observed_samples > target_count:
             logger.warning(
-                "Problem %s has %d observed rows, %d more than the expected "
+                "Problem %s has %d completed rows, %d more than the expected "
                 "sample count %d; the extra rows still enter sample-level metrics",
                 problem_id,
-                len(items),
-                len(items) - target_count,
+                observed_samples,
+                observed_samples - target_count,
                 target_count,
             )
-        complete = len(items) >= target_count
+        complete = observed_samples >= target_count
         problems.append(
             {
                 "doc_id": problem_id,
                 "correct_samples": correct_samples,
                 "sample_count": sample_count,
-                "observed_samples": sample_count,
+                "observed_samples": observed_samples,
                 "expected_samples": target_count,
                 "complete": complete,
                 "correct_fraction": correct_samples / sample_count

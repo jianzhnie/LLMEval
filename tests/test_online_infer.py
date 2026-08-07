@@ -83,6 +83,8 @@ def _make_runner(tmp_path: Path, **overrides: Any) -> InferenceRunner:
         "top_p": 0.95,
         "top_k": 40,
         "enable_thinking": False,
+        "seed": 0,
+        "repair_resume": False,
     }
     defaults.update(overrides)
 
@@ -158,7 +160,7 @@ class TestProcessItem:
         assert result is None
         assert runner._stats["failed"] == 1
 
-    def test_process_item_creates_independent_gen_list(self, tmp_path: Path) -> None:
+    def test_process_item_replaces_prior_gen_value(self, tmp_path: Path) -> None:
         """Verify process_item doesn't mutate the input item."""
         runner = _make_runner(tmp_path)
         # Mock the client to return a simple response
@@ -179,7 +181,34 @@ class TestProcessItem:
         assert item["gen"] == original_gen
         # One row per sample: the fresh response replaces the prior gen.
         assert result is not None
-        assert result["gen"] == ["test response"]
+        assert result["gen"] == "test response"
+
+    def test_process_item_writes_permanent_failure_on_context_length(
+        self, tmp_path: Path
+    ) -> None:
+        """Context-length rejection persists a marked row instead of failing."""
+        runner = _make_runner(tmp_path)
+        Path(runner.args.input_file).write_text(
+            json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "a"}) + "\n"
+        )
+        mock_client = MagicMock()
+        mock_client.get_content.return_value = None  # context-length rejection
+        runner.client = mock_client
+
+        item = {"doc_id": "test:0", "prompt": "q", "answer": "a", "_request_seed": 1}
+        result = runner.process_item(item)
+
+        assert result is not None
+        assert result["gen"] == ""
+        assert result["error"] == "context_length_exceeded"
+        assert runner._stats["failed"] == 1
+        # The row is persisted, so resume treats the sample as completed.
+        rows = [
+            json.loads(line)
+            for line in Path(runner.args.output_file).read_text().splitlines()
+        ]
+        assert rows[0]["error"] == "context_length_exceeded"
+        assert runner.load_data() == []
 
 
 # ── InferenceClient request behavior ──────────────────────────────
@@ -204,6 +233,7 @@ def _make_client(max_retries: int = 0):
     client.max_retries = max_retries
     client.tool_choice = "none"
     client.base_url = "http://example.test/v1"
+    client.seed = 0
     client.client = MagicMock()
     client._usage_lock = threading.Lock()
     client.usage_stats = {"prompt_tokens": 0, "completion_tokens": 0}
@@ -263,12 +293,39 @@ class TestGetContent:
         result = client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
         assert result == ""
 
-    def test_context_length_returns_empty(self) -> None:
+    def test_context_length_returns_none(self) -> None:
         client = _make_client()
         client.client.chat.completions.create.side_effect = _make_api_error(
             "This model's maximum context length is 8192"
         )
-        assert client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False) == ""
+        assert client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False) is None
+
+    def test_malformed_response_retried_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty-choices response is malformed: retried, then accepted."""
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+        client = _make_client(max_retries=2)
+        client.client.chat.completions.create.side_effect = [
+            _fake_completion([]),  # no choices → malformed
+            _fake_completion(["ok"]),
+        ]
+
+        assert client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False) == "ok"
+        assert client.client.chat.completions.create.call_count == 2
+
+    def test_malformed_response_fails_after_retries_exhausted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Persistently malformed responses exhaust retries and raise."""
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+        client = _make_client(max_retries=2)
+        client.client.chat.completions.create.return_value = _fake_completion([])
+        from llmeval.utils.retry import ClientError
+
+        with pytest.raises(ClientError, match="Max retries exceeded"):
+            client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
+        assert client.client.chat.completions.create.call_count == 3
 
     def test_4xx_fails_fast_without_retry(self) -> None:
         client = _make_client(max_retries=3)

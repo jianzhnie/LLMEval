@@ -210,6 +210,23 @@ class TestProcessAnswers:
 
 
 class TestComputeScores:
+    def test_worker_exception_returns_indexed_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.tasks.math_eval.math_score as math_mod
+
+        monkeypatch.setattr(
+            math_mod,
+            "_process_answers_impl",
+            lambda _args: (_ for _ in ()).throw(TypeError("bad schema")),
+        )
+
+        result = math_mod.process_answers((3, {}, "answer", "gen"))
+
+        assert result.index == 3
+        assert result.failure_stage == "verification"
+        assert result.failure_reason == "worker error: bad schema"
+
     def test_extraction_failure_is_separate_from_wrong_answer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -244,7 +261,8 @@ class TestComputeScores:
         assert result.failed_count == 1
         assert result.effective_sample_count == 1
         assert result.failure_counts["extraction_failed"] == 1
-        assert result.failure_counts["wrong_answer"] == 1
+        assert "wrong_answer" not in result.failure_counts
+        assert result.details["wrong_answer_count"] == 1
 
     def test_mixed_accuracy_and_fields(self, tmp_path: Path) -> None:
         from llmeval.tasks.math_eval.math_score import compute_scores
@@ -305,6 +323,50 @@ class TestComputeScores:
         )
         assert acc == 0.0
 
+    def test_pool_timeout_is_classified_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pool-level timeout (missing worker result) is timeout, not failed."""
+        import llmeval.tasks.math_eval.math_score as math_mod
+
+        class _EmptyFuture:
+            def result(self) -> object:
+                return iter([])
+
+        class _FakePool:
+            def __init__(self, max_workers: int) -> None:
+                pass
+
+            def __enter__(self) -> _FakePool:
+                return self
+
+            def __exit__(self, *_args: object) -> bool:
+                return False
+
+            def map(self, *_args: object, **_kwargs: object) -> _EmptyFuture:
+                return _EmptyFuture()
+
+        monkeypatch.setattr(math_mod, "ProcessPool", _FakePool)
+        result = math_mod.score_math_result(
+            eval_dataset=[
+                _math_item("5", ["$\\boxed{5}$"]),
+                _math_item("4", ["$\\boxed{4}$"]),
+            ],
+            label_key="answer",
+            response_key="gen",
+            cache_path=str(tmp_path / "cache.jsonl"),
+            max_workers=2,
+            timeout=60,
+        )
+
+        assert result.sample_count == 2
+        assert result.timeout_count == 2
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 0
+        assert result.failure_counts["timeout"] == 2
+        assert "verification_failed" not in result.failure_counts
+        assert all(item["evaluation_status"] == "timeout" for item in result.per_item)
+
     def test_structured_result_counts_with_skipped_item(self, tmp_path: Path) -> None:
         from llmeval.tasks.math_eval.math_score import score_math_result
 
@@ -345,7 +407,8 @@ class TestComputeScores:
                 "doc_id": "aime24:0",
             },
             {
-                **_math_item("5", ["$\\boxed{5}$"]),
+                # Distinct raw text extracting to the same answer as row 1.
+                **_math_item("5", ["The answer is $\\boxed{5}$"]),
                 "doc_id": "aime24:0",
             },
             {
@@ -357,7 +420,7 @@ class TestComputeScores:
                 "doc_id": "aime24:1",
             },
             {
-                **_math_item("7", ["$\\boxed{8}$"]),
+                **_math_item("7", ["The answer is $\\boxed{8}$"]),
                 "doc_id": "aime24:1",
             },
         ]
@@ -373,7 +436,7 @@ class TestComputeScores:
 
         assert result.sample_count == 6
         assert result.effective_sample_count == 6
-        assert result.metrics["sample_accuracy"] == pytest.approx(0.5)
+        assert result.metrics["accuracy"] == pytest.approx(0.5)
         assert result.metrics["problem_pass@3"] == pytest.approx(1.0)
         assert result.metrics["problem_majority@3"] == pytest.approx(0.5)
         problems = result.details["problem_level"]
@@ -385,24 +448,24 @@ class TestComputeScores:
 
 
 # ===========================================================================
-# save_cache
+# atomic JSONL persistence (previously math_score.save_cache)
 # ===========================================================================
 
 
-class TestSaveCache:
+class TestAtomicWriteJsonl:
     def test_writes_jsonl(self, tmp_path: Path) -> None:
-        from llmeval.tasks.math_eval.math_score import save_cache
+        from llmeval.tasks.postprocess import atomic_write_jsonl
 
         cache = tmp_path / "out.jsonl"
-        save_cache([{"a": 1}, {"a": 2}], str(cache))
+        atomic_write_jsonl(cache, [{"a": 1}, {"a": 2}])
         lines = cache.read_text(encoding="utf-8").strip().split("\n")
         assert [json.loads(line)["a"] for line in lines] == [1, 2]
 
     def test_creates_nested_directories(self, tmp_path: Path) -> None:
-        from llmeval.tasks.math_eval.math_score import save_cache
+        from llmeval.tasks.postprocess import atomic_write_jsonl
 
         cache = tmp_path / "deep" / "nested" / "out.jsonl"
-        save_cache([{"a": 1}], str(cache))
+        atomic_write_jsonl(cache, [{"a": 1}])
         assert cache.exists()
 
     def test_bare_filename_no_directory(
@@ -410,17 +473,17 @@ class TestSaveCache:
     ) -> None:
         """Regression: os.makedirs('') crashed for cache paths without a
         directory component (e.g. --cache_path results.jsonl)."""
-        from llmeval.tasks.math_eval.math_score import save_cache
+        from llmeval.tasks.postprocess import atomic_write_jsonl
 
         monkeypatch.chdir(tmp_path)
-        save_cache([{"a": 1}], "results.jsonl")
+        atomic_write_jsonl("results.jsonl", [{"a": 1}])
         assert (tmp_path / "results.jsonl").exists()
 
     def test_unicode_preserved(self, tmp_path: Path) -> None:
-        from llmeval.tasks.math_eval.math_score import save_cache
+        from llmeval.tasks.postprocess import atomic_write_jsonl
 
         cache = tmp_path / "out.jsonl"
-        save_cache([{"answer": "答案是 5"}], str(cache))
+        atomic_write_jsonl(cache, [{"answer": "答案是 5"}])
         record = json.loads(cache.read_text(encoding="utf-8").strip())
         assert record["answer"] == "答案是 5"
 
@@ -485,15 +548,38 @@ class TestRepeatedMathRows:
         assert result.failed_count == 1
         assert result.per_item[0]["failure_stage"] == "inference"
 
-    def test_identical_generations_remain_distinct(self, tmp_path: Path) -> None:
+    def test_identical_responses_remain_independent_samples(
+        self, tmp_path: Path
+    ) -> None:
         row = {
             **_math_item("5", ["$\\boxed{5}$"]),
             "doc_id": "aime24:0",
         }
-        result = self._score([dict(row), dict(row)], tmp_path)
-        problems = result.details["problem_level"]
+        single = self._score([dict(row)], tmp_path)
+        doubled = self._score([dict(row), dict(row)], tmp_path)
+
+        assert single.sample_count == 1
+        assert doubled.sample_count == 2
+        assert doubled.metrics["accuracy"] == single.metrics["accuracy"] == 1.0
+        assert doubled.metrics["problem_pass@2"] == 1.0
+        problems = doubled.details["problem_level"]
         assert problems[0]["sample_count"] == 2
         assert problems[0]["correct_samples"] == 2
+
+    def test_conflicting_duplicate_rows_raise(self, tmp_path: Path) -> None:
+        """Same doc_id with a different gold answer signals a corrupt resume."""
+        data = [
+            {
+                **_math_item("5", ["$\\boxed{5}$"]),
+                "doc_id": "aime24:0",
+            },
+            {
+                **_math_item("6", ["$\\boxed{6}$"]),
+                "doc_id": "aime24:0",
+            },
+        ]
+        with pytest.raises(ValueError, match="Conflicting 'answer'"):
+            self._score(data, tmp_path)
 
     def test_different_generations_remain_distinct(self, tmp_path: Path) -> None:
         data = [
@@ -507,7 +593,7 @@ class TestRepeatedMathRows:
             },
         ]
         result = self._score(data, tmp_path)
-        assert result.metrics["sample_accuracy"] == pytest.approx(0.5)
+        assert result.metrics["accuracy"] == pytest.approx(0.5)
 
 
 # ===========================================================================
@@ -564,14 +650,53 @@ class TestProblemCompleteness:
         assert problems[0]["complete"] is True
         assert metrics["problem_pass@64"] == 0.0
 
-    def test_too_many_rows_mark_problem_incomplete(self) -> None:
+    def test_failed_rows_do_not_make_problem_complete(self) -> None:
         from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
 
-        rows = [_scored_sample("p1", correct=False) for _ in range(65)]
-        problems, metrics, _ = _build_problem_level_metrics(rows, expected_samples=64)
-        assert problems[0]["sample_count"] == 65
+        completed = _scored_sample("p1", correct=True, expected=2)
+        timeout = {
+            **_scored_sample("p1", correct=False, expected=2),
+            "evaluation_status": "timeout",
+        }
+
+        problems, metrics, _ = _build_problem_level_metrics([completed, timeout])
+
+        assert problems[0]["sample_count"] == 2
+        assert problems[0]["observed_samples"] == 1
         assert problems[0]["complete"] is False
+        assert metrics["problem_pass@2"] == 0.0
+
+    def test_extra_rows_keep_problem_complete(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Rows beyond the requested depth warn but no longer exclude the problem."""
+        import logging
+
+        import llmeval.tasks.math_eval.math_score as math_mod
+
+        rows = [_scored_sample("p1", correct=False) for _ in range(65)]
+        math_mod.logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.WARNING, logger="math_score"):
+                problems, metrics, _ = math_mod._build_problem_level_metrics(
+                    rows, expected_samples=64
+                )
+        finally:
+            math_mod.logger.removeHandler(caplog.handler)
+        assert problems[0]["sample_count"] == 65
+        assert problems[0]["complete"] is True
         assert metrics["problem_pass@64"] == 0.0
+        assert any("65 completed rows" in r.message for r in caplog.records)
+
+    def test_bool_expected_samples_is_ignored(self) -> None:
+        """``True``/``False`` are not valid expected sample counts."""
+        from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
+
+        row = {**_scored_sample("p1", correct=True), "expected_samples": True}
+        problems, metrics, _ = _build_problem_level_metrics([row])
+        assert problems[0]["expected_samples"] == 1  # falls back to sample count
+        assert problems[0]["complete"] is True
+        assert metrics["problem_pass@1"] == pytest.approx(1.0)
 
     def test_mixed_problems_denominator_only_complete(self, tmp_path: Path) -> None:
         """With mixed problems, pass@k/majority@k divide by complete problems."""

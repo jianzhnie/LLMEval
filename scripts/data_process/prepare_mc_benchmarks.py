@@ -112,8 +112,6 @@ def _format_mc_row(
         choices: list of choice texts (for loglikelihood mode)
         gold:    integer index of correct answer (for loglikelihood mode)
     """
-    template = MC_PROMPT_TEMPLATE[name]
-
     def choice_labels(count: int) -> list[str]:
         labels: list[str] = []
         for index in range(count):
@@ -214,6 +212,7 @@ def _format_mc_row(
         )
         prompt = f"{example['question']}\n{option_lines}\nAnswer:"
     else:
+        template = MC_PROMPT_TEMPLATE[name]
         prompt = template.format(**fmt)
     return {
         "doc_id": f"{name}:{source_id}",

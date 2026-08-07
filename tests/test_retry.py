@@ -38,6 +38,7 @@ if _openai_mod is not None:
 
 from llmeval.utils.retry import (
     ClientError,
+    MalformedResponseError,
     call_with_retry,
     is_context_length_error,
     non_retryable_client_error,
@@ -144,6 +145,14 @@ class TestShouldRetry:
         with pytest.raises(RuntimeError, match="weird"):
             should_retry(RuntimeError("weird"), 0, 3)
 
+    def test_malformed_response_retries(self) -> None:
+        """A structurally broken payload is transient — worth retrying."""
+        assert should_retry(MalformedResponseError("empty choices"), 0, 3) is True
+
+    def test_malformed_response_exhaustion_raises(self) -> None:
+        with pytest.raises(ClientError, match="Max retries exceeded"):
+            should_retry(MalformedResponseError("empty choices"), 3, 3)
+
 
 # ── call_with_retry attempt loop ──────────────────────────────────
 
@@ -192,6 +201,17 @@ class TestCallWithRetry:
         with pytest.raises(RuntimeError, match="down"):
             call_with_retry(fn, 3)
         assert fn.call_count == 1
+
+    def test_malformed_response_retried_then_success(self) -> None:
+        fn = MagicMock(side_effect=[MalformedResponseError("empty choices"), "ok"])
+        assert call_with_retry(fn, 3) == "ok"
+        assert fn.call_count == 2
+
+    def test_malformed_response_exhaustion_raises(self) -> None:
+        fn = MagicMock(side_effect=MalformedResponseError("empty choices"))
+        with pytest.raises(ClientError, match="Max retries exceeded"):
+            call_with_retry(fn, 2)
+        assert fn.call_count == 3  # 1 initial + 2 retries
 
     def test_return_value_passthrough(self) -> None:
         payload: dict[str, Any] = {"choices": [1, 2]}

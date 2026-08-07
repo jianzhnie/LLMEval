@@ -16,7 +16,7 @@ from pathlib import Path
 from statistics import fmean, pstdev
 from typing import Any, Protocol
 
-from llmeval.tasks.persistence import persist_results
+from llmeval.tasks.postprocess import persist_results
 from llmeval.utils.log import init_logger
 
 logger = init_logger("task_registry")

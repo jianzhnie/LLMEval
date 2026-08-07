@@ -1,4 +1,4 @@
-"""Shared input-record processing helpers for task-specific scoring.
+"""Shared input-record processing and atomic persistence helpers.
 
 The task scorers use these helpers explicitly so the response-cleanup chain is
 easy to inspect and test.  The helpers are intentionally small and composable:
@@ -7,18 +7,25 @@ easy to inspect and test.  The helpers are intentionally small and composable:
   wrappers used by reasoning models.
 * ``resolve_single_generation`` validates the one-generation-per-row protocol
   and extracts the single generation from an inference output record.
-* ``dedupe_repeated_samples`` skips exact duplicate rows from resumed runs
-  and rejects rows that conflict on problem-level fields.
+* ``normalize_single_generation_samples`` validates repeated sample rows while
+  preserving every independently generated response.
 * ``resolve_max_workers`` clamps the process-pool size to the workload,
   requested workers, and available CPUs.
+* ``atomic_write_json`` / ``atomic_write_jsonl`` / ``persist_results`` persist
+  scorer output via atomically replaced sibling temporary files.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
-from collections.abc import Callable, Sequence
+import tempfile
+from collections.abc import Callable, Generator, Iterable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from io import TextIOBase
+from pathlib import Path
 from typing import Any
 
 __all__ = [
@@ -27,9 +34,12 @@ __all__ = [
     "TextFilter",
     "TextFilterPipeline",
     "apply_text_pipeline_with_trace",
+    "atomic_write_json",
+    "atomic_write_jsonl",
+    "atomic_write_text",
     "build_filter_artifacts",
-    "dedupe_repeated_samples",
-    "expand_single_generation_samples",
+    "normalize_single_generation_samples",
+    "persist_results",
     "resolve_max_workers",
     "resolve_single_generation",
     "strip_reasoning_wrappers",
@@ -227,7 +237,7 @@ def resolve_single_generation(
     return value
 
 
-def dedupe_repeated_samples(
+def normalize_single_generation_samples(
     eval_dataset: list[dict[str, Any]],
     response_key: str,
     *,
@@ -235,59 +245,30 @@ def dedupe_repeated_samples(
     conflict_keys: tuple[str, ...] = (),
     record_kind: str = "document",
 ) -> list[dict[str, Any]]:
-    """Drop exact duplicate rows while rejecting conflicting resumed rows.
+    """Validate repeated samples and normalize one generation per input row.
 
-    Rows that share one problem identity are independent samples, except
-    exact duplicates (same response payload) produced when a resumed run
-    re-appends an identical record — those are skipped idempotently.  Rows
-    that repeat an identity while disagreeing on *conflict_keys* signal a
-    corrupted resume and raise ``ValueError`` (mirroring the MC conflict
-    detection in ``mc_score.merge_generate_records``).
+    Rows sharing one problem identity remain independent even when their
+    responses are identical. Problem-level fields listed in *conflict_keys*
+    must agree across those rows.
     """
     first_seen: dict[str, dict[str, Any]] = {}
-    seen_responses: dict[str, list[Any]] = {}
-    deduped: list[dict[str, Any]] = []
-    for row_index, item in enumerate(eval_dataset):
-        identity = problem_identity(item, row_index)
-        first = first_seen.get(identity)
-        if first is None:
-            first_seen[identity] = item
-            seen_responses[identity] = [item.get(response_key)]
-            deduped.append(item)
-            continue
-        for key in conflict_keys:
-            if key in item and key in first and item[key] != first[key]:
-                raise ValueError(
-                    f"Conflicting {key!r} for resumed {record_kind} {identity!r}"
-                )
-        response = item.get(response_key)
-        if any(response == seen for seen in seen_responses[identity]):
-            continue
-        seen_responses[identity].append(response)
-        deduped.append(item)
-    return deduped
-
-
-def expand_single_generation_samples(
-    eval_dataset: list[dict[str, Any]],
-    response_key: str,
-    *,
-    problem_identity: Callable[[dict[str, Any], int], str],
-) -> list[dict[str, Any]]:
-    """Validate and normalize one generation per input row.
-
-    Each output record carries exactly one generation under *response_key*
-    (or an empty list when the response failed); *problem_identity* supplies
-    the stable problem id used in validation error messages.
-    """
-    expanded: list[dict[str, Any]] = []
+    normalized: list[dict[str, Any]] = []
     for row_index, item in enumerate(eval_dataset):
         problem_id = problem_identity(item, row_index)
+        first = first_seen.get(problem_id)
+        if first is None:
+            first_seen[problem_id] = item
+        else:
+            for key in conflict_keys:
+                if item.get(key) != first.get(key):
+                    raise ValueError(
+                        f"Conflicting {key!r} for {record_kind} {problem_id!r}"
+                    )
         response = resolve_single_generation(item, response_key, problem_id=problem_id)
         record = dict(item)
         record[response_key] = [response] if response is not None else []
-        expanded.append(record)
-    return expanded
+        normalized.append(record)
+    return normalized
 
 
 def resolve_max_workers(total: int, requested: int) -> int:
@@ -298,3 +279,70 @@ def resolve_max_workers(total: int, requested: int) -> int:
         raise ValueError("requested workers must be positive")
     cpu_count = os.cpu_count() or 1
     return min(total, requested, max(1, cpu_count - 1))
+
+
+# ---------------------------------------------------------------------------
+# Atomic persistence
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _atomic_text_writer(path: str | Path) -> Generator[TextIOBase, None, None]:
+    """Yield a sibling temporary file and atomically publish it on success."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    except Exception:
+        # A failed write must never leave a partial file behind: the
+        # destination keeps its previous (complete) content, and the
+        # sibling temporary is removed so a later run starts clean.
+        # BaseExceptions (KeyboardInterrupt/SystemExit) propagate untouched,
+        # intentionally leaving the uniquely-named temp in place for recovery.
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_text(path: str | Path, content: str) -> None:
+    """Replace ``path`` atomically after flushing a sibling temporary file."""
+    with _atomic_text_writer(path) as handle:
+        handle.write(content)
+
+
+def atomic_write_json(
+    path: str | Path, value: Any, *, indent: int | None = None
+) -> None:
+    """Serialize JSON and persist it atomically."""
+    atomic_write_text(
+        path,
+        json.dumps(value, ensure_ascii=False, indent=indent)
+        + ("\n" if indent is not None else ""),
+    )
+
+
+def atomic_write_jsonl(path: str | Path, records: Iterable[dict[str, Any]]) -> None:
+    """Stream objects to an atomically replaced JSONL file."""
+    with _atomic_text_writer(path) as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def persist_results(
+    cache_path: str | Path,
+    records: Iterable[dict[str, Any]],
+    summary: Any,
+) -> Path:
+    """Persist per-item JSONL and its adjacent summary using atomic writes."""
+    destination = Path(cache_path)
+    atomic_write_jsonl(destination, records)
+    summary_path = destination.with_suffix(".summary.json")
+    atomic_write_json(summary_path, summary, indent=2)
+    return summary_path

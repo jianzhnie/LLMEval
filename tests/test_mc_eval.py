@@ -541,18 +541,20 @@ class TestMCLoglikelihoodClient:
         assert result == [float("-inf"), -1.2, -3.0]
 
     def test_4xx_aborts_without_retry(self) -> None:
-        """Non-retryable 4xx errors abort immediately, returning all -inf."""
+        """Non-retryable 4xx errors propagate after the first request."""
+        from llmeval.utils.retry import ClientError
+
         client = _make_ll_client(max_retries=3)
         client.client.completions.create.side_effect = _make_api_error("bad", 400)
-        result = client.get_choices_logprobs("p", ["a", "b"])
-        assert result == [float("-inf"), float("-inf")]
+        with pytest.raises(ClientError, match="status=400"):
+            client.get_choices_logprobs("p", ["a", "b"])
         assert client.client.completions.create.call_count == 1
 
-    def test_total_failure_returns_all_neg_inf(self) -> None:
-        """When every retry fails the result is all -inf (never an exception)."""
+    def test_programming_error_propagates(self) -> None:
         client = _make_ll_client(max_retries=0)
         client.client.completions.create.side_effect = RuntimeError("down")
-        assert client.get_choices_logprobs("p", ["a"]) == [float("-inf")]
+        with pytest.raises(RuntimeError, match="down"):
+            client.get_choices_logprobs("p", ["a"])
 
     def test_empty_top_logprobs_returns_all_neg_inf(self) -> None:
         """An empty top_logprobs dict yields -inf for every choice."""
@@ -576,9 +578,15 @@ class TestMCLoglikelihoodClient:
             response.choices.append(choice)
         client.client.completions.create.return_value = response
 
-        result = client.get_choices_continuation_logprobs("Q:", ["AB", "C"])
+        from llmeval.inference.schema import LoglikelihoodRequest
 
-        assert result == [[-1.0, -2.0], [-0.5]]
+        result = client.score_continuations(LoglikelihoodRequest("Q:", ("AB", "C")))
+
+        assert result.exact is True
+        assert [list(c.token_logprobs) for c in result.choices] == [
+            [-1.0, -2.0],
+            [-0.5],
+        ]
         kwargs = client.client.completions.create.call_args.kwargs
         assert kwargs["prompt"] == ["Q:AB", "Q:C"]
         assert kwargs["echo"] is True
@@ -618,7 +626,7 @@ class TestProcessLoglikelihoodItem:
         runner = _make_mc_runner(tmp_path)
         runner.client = MagicMock()
         runner.client.get_choices_logprobs.return_value = [-5.0, -1.0]
-        item = {"prompt": "q", "choices": ["a", "b"], "gold": 1}
+        item = {"doc_id": "test:0", "prompt": "q", "choices": ["a", "b"], "gold": 1}
         result = runner.process_loglikelihood_item(item)
         assert result["pred"] == 1 and result["correct"] is True
         assert result["choice_tokens"] == ["A", "B"]
@@ -628,7 +636,12 @@ class TestProcessLoglikelihoodItem:
         runner = _make_mc_runner(tmp_path)
         runner.client = MagicMock()
         runner.client.get_choices_logprobs.return_value = [-1.0, -5.0]
-        item = {"prompt": "q", "choices": ["Paris", "London"], "gold": 0}
+        item = {
+            "doc_id": "test:0",
+            "prompt": "q",
+            "choices": ["Paris", "London"],
+            "gold": 0,
+        }
         result = runner.process_loglikelihood_item(item)
         assert result["choice_tokens"] == ["A", "B"]
         assert result["correct"] is True
@@ -649,7 +662,7 @@ class TestProcessGenerateItem:
         result = runner.process_generate_item(
             {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
         )
-        assert result["gen"] == ["ans"]
+        assert result["gen"] == "ans"
 
     def test_null_content_raises(self, tmp_path: Path) -> None:
         """Null/empty generation must raise (not write an empty gen)."""
@@ -760,6 +773,38 @@ class TestMCRunnerEndToEnd:
 
 
 class TestMCScoreEdgeCases:
+    def test_null_logprob_restores_missing_candidate(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
+
+        record = score_loglikelihood_item(
+            {"gold": 0, "choices": ["A", "B"], "logprobs": [-0.2, None]}
+        )
+
+        assert record["pred"] == 0
+        assert record["correct"] is True
+
+    def test_context_length_marker_is_excluded_as_inference_failure(
+        self, tmp_path: Path
+    ) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
+
+        result = score_loglikelihood_result(
+            [
+                {
+                    "doc_id": "mmlu:0",
+                    "gold": 0,
+                    "choices": ["A", "B"],
+                    "logprobs": [],
+                    "error": "context_length_exceeded",
+                }
+            ],
+            tmp_path / "context.jsonl",
+        )
+
+        assert result.sample_count == 1
+        assert result.effective_sample_count == 0
+        assert result.failed_count == 1
+
     """Regression tests for scorer fixes (2026-07-30)."""
 
     def test_generate_empty_gold_and_pred_not_correct(self, tmp_path: Path) -> None:
@@ -776,6 +821,108 @@ class TestMCScoreEdgeCases:
         assert summary["sample_total"] == 2
         assert summary["effective_sample_count"] == 1
         assert summary["skipped_count"] == 1
+
+    def test_generate_null_gold_is_skipped(self, tmp_path: Path) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate
+
+        items = [
+            {"answer": None, "gen": ["Answer: A"]},
+            {"answer": "B", "gen": ["Answer: B"]},
+        ]
+        cache = tmp_path / "null_gold.jsonl"
+        assert score_generate(items, "answer", "gen", cache) == 1.0
+        summary = json.loads(cache.with_suffix(".summary.json").read_text())
+        assert summary["effective_sample_count"] == 1
+        assert summary["skipped_count"] == 1
+
+    def test_per_sample_timeout_remains_visible_in_structured_counts(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import (
+            MCScoreResult,
+            _error_record,
+            _to_scorer_result,
+        )
+
+        timeout_record = _error_record(
+            {"answer": "A", "gen": ["Answer: A", "Answer: B"]},
+            "generate",
+            "answer",
+            "gen",
+            "per_sample",
+            "timeout",
+        )
+        # The generation count is backfilled so per_sample weighting keeps the
+        # item visible instead of evaporating from every count.
+        assert timeout_record["sample_total"] == 2
+        result = _to_scorer_result(MCScoreResult(per_item=[timeout_record]))
+
+        assert result.sample_count == 2
+        assert result.effective_sample_count == 0
+        assert result.timeout_count == 2
+        assert result.failure_counts == {"timeout": 2}
+
+    def test_per_sample_timeout_counts_string_generation_as_one_sample(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import (
+            MCScoreResult,
+            _error_record,
+            _to_scorer_result,
+        )
+
+        timeout_record = _error_record(
+            {"answer": "A", "gen": "Answer: A"},
+            "generate",
+            "answer",
+            "gen",
+            "per_sample",
+            "timeout",
+        )
+
+        assert timeout_record["sample_total"] == 1
+        result = _to_scorer_result(MCScoreResult(per_item=[timeout_record]))
+        assert result.sample_count == 1
+        assert result.timeout_count == 1
+
+    def test_pool_timeout_is_classified_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pool-level timeout (missing worker result) is timeout, not failed."""
+        import llmeval.tasks.mc_eval.mc_score as mc_score
+
+        class _EmptyFuture:
+            def result(self) -> object:
+                return iter([])
+
+        class _FakePool:
+            def __init__(self, max_workers: int) -> None:
+                pass
+
+            def __enter__(self) -> _FakePool:
+                return self
+
+            def __exit__(self, *_args: object) -> bool:
+                return False
+
+            def map(self, *_args: object, **_kwargs: object) -> _EmptyFuture:
+                return _EmptyFuture()
+
+        monkeypatch.setattr(mc_score, "ProcessPool", _FakePool)
+        result = mc_score.score_generate_result(
+            [
+                {"doc_id": "mmlu:0", "answer": "A", "gen": ["Answer: A"]},
+                {"doc_id": "mmlu:1", "answer": "B", "gen": ["Answer: B"]},
+            ],
+            "answer",
+            "gen",
+            tmp_path / "pool_timeout.jsonl",
+            max_workers=2,
+            timeout=60,
+        )
+
+        assert result.sample_count == 2
+        assert result.timeout_count == 2
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 0
+        assert result.failure_counts == {"timeout": 2}
+        assert all(r["evaluation_status"] == "timeout" for r in result.per_item)
 
     def test_loglikelihood_all_neg_inf_counted_wrong(self, tmp_path: Path) -> None:
         """All -inf logprobs (failed inference) must not be argmax-scored."""

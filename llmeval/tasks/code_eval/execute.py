@@ -91,6 +91,25 @@ _FORBIDDEN_OS_FUNCTIONS: tuple[str, ...] = (
     # before it writes its result file, turning a wrong answer into an
     # infrastructure failure excluded from the Pass@k denominator.
     "_exit",
+    "execl",
+    "execle",
+    "execlp",
+    "execlpe",
+    "execv",
+    "execve",
+    "execvp",
+    "execvpe",
+    "popen",
+    "posix_spawn",
+    "posix_spawnp",
+    "spawnl",
+    "spawnle",
+    "spawnlp",
+    "spawnlpe",
+    "spawnv",
+    "spawnve",
+    "spawnvp",
+    "spawnvpe",
 )
 
 #: ``shutil`` functions that are disabled by ``reliability_guard``.
