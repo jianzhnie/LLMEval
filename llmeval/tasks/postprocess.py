@@ -30,6 +30,7 @@ __all__ = [
     "apply_text_pipeline_with_trace",
     "build_filter_artifacts",
     "build_text_pipeline",
+    "expand_single_generation_samples",
     "resolve_max_workers",
     "resolve_single_generation",
     "strip_reasoning_wrappers",
@@ -253,6 +254,28 @@ def resolve_single_generation(
             "string or a list containing one string"
         )
     return value
+
+
+def expand_single_generation_samples(
+    eval_dataset: list[dict[str, Any]],
+    response_key: str,
+    *,
+    problem_identity: Callable[[dict[str, Any], int], str],
+) -> list[dict[str, Any]]:
+    """Validate and normalize one generation per input row.
+
+    Each output record carries exactly one generation under *response_key*
+    (or an empty list when the response failed), keyed by the stable identity
+    returned by *problem_identity*.
+    """
+    expanded: list[dict[str, Any]] = []
+    for row_index, item in enumerate(eval_dataset):
+        problem_id = problem_identity(item, row_index)
+        response = resolve_single_generation(item, response_key, problem_id=problem_id)
+        record = dict(item)
+        record[response_key] = [response] if response is not None else []
+        expanded.append(record)
+    return expanded
 
 
 def resolve_max_workers(total: int, requested: int) -> int:

@@ -89,18 +89,6 @@ def init_logger(
     return logger
 
 
-def get_logger(name: str) -> logging.Logger:
-    """Get an existing logger by name.
-
-    Args:
-        name (str): The name of the logger.
-
-    Returns:
-        logging.Logger: Logger instance.
-    """
-    return logging.getLogger(name)
-
-
 def set_log_level(logger: logging.Logger, level: int | str) -> None:
     """Set the logging level for a logger and all its handlers.
 

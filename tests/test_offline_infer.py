@@ -8,6 +8,7 @@ import json
 import sys
 import threading
 import types
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -38,13 +39,15 @@ def _args(tmp_path: Path, **overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "input_file": str(tmp_path / "input.jsonl"),
         "output_file": str(tmp_path / "output.jsonl"),
-        "cache_dir": str(tmp_path / "cache"),
         "input_key": "prompt",
         "label_key": "answer",
         "response_key": "gen",
         "system_prompt_type": "empty",
         "n_samples": 1,
         "batch_size": 2,
+        "fail_fast": True,
+        "do_sample": True,
+        "skip_special_tokens": True,
         "model_name_or_path": "test-model",
         "model_revision": "revision-1",
         "task": "math_opensource/test",
@@ -78,6 +81,7 @@ def _runner(tmp_path: Path, **overrides: object) -> OfflineInferenceRunner:
     runner = OfflineInferenceRunner.__new__(OfflineInferenceRunner)
     runner.args = _args(tmp_path, **overrides)
     runner._file_lock = threading.Lock()
+    runner._run_id = uuid.uuid4().hex
     runner.llm = None
     runner.system_prompt = None
     return runner

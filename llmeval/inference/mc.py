@@ -573,8 +573,12 @@ class MCRunner:
         Used both for resume filtering and inference so the two always agree,
         even when n_shot > 0 changes the prompt that gets written to output.
         """
-        raw_prompt = item.get(self.config.input_key) or item.get("prompt") or ""
-        prompt = raw_prompt if isinstance(raw_prompt, str) else str(raw_prompt)
+        prompt = item.get(self.config.input_key) or item.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError(
+                f"Prompt under {self.config.input_key!r} or 'prompt' must be a "
+                "non-empty string"
+            )
         fs_prefix = (
             self._few_shot_fmt.get_prefix(prompt, str(item.get("doc_id", "")))
             if self._few_shot_fmt
@@ -689,31 +693,24 @@ class MCRunner:
         choice_scored_tokens: list[list[str]] = []
         choice_token_ids: list[list[int] | None] | None = None
         if scoring_mode == "continuation":
-            candidate_scores: list[list[float]]
-            candidate_scores = self.client.get_choices_continuation_logprobs(
-                prompt, choice_tokens
+            continuation_result = self.client.score_continuations(
+                LoglikelihoodRequest(prompt, tuple(choice_tokens))
             )
-            if (
-                isinstance(candidate_scores, list)
-                and len(candidate_scores) == len(choice_tokens)
-                and all(
-                    isinstance(scores, list) and scores for scores in candidate_scores
-                )
-            ):
-                choice_logprobs = candidate_scores
-                choice_scored_tokens = getattr(
-                    candidate_scores,
-                    "token_texts",
-                    [[] for _ in candidate_scores],
-                )
-                candidate_token_ids = getattr(candidate_scores, "token_ids", None)
-                if isinstance(candidate_token_ids, list) and any(
-                    token_ids is not None for token_ids in candidate_token_ids
-                ):
-                    choice_token_ids = candidate_token_ids
-            else:
-                reason = getattr(candidate_scores, "error", None) or "unknown reason"
+            if not continuation_result.exact:
+                reason = continuation_result.error or "unknown reason"
                 raise RuntimeError(f"Continuation logprob request failed: {reason}")
+            choice_logprobs = [
+                list(choice.token_logprobs) for choice in continuation_result.choices
+            ]
+            choice_scored_tokens = [
+                list(choice.token_texts) for choice in continuation_result.choices
+            ]
+            candidate_token_ids = [
+                list(choice.token_ids) if choice.token_ids is not None else None
+                for choice in continuation_result.choices
+            ]
+            if any(token_ids is not None for token_ids in candidate_token_ids):
+                choice_token_ids = candidate_token_ids
 
         if scoring_mode == "first_token":
             logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)

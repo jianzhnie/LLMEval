@@ -24,8 +24,8 @@ from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
     build_filter_artifacts,
+    expand_single_generation_samples,
     resolve_max_workers,
-    resolve_single_generation,
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.registry import ScorerResult
@@ -513,24 +513,24 @@ def _score_items(
     ]
 
 
-def _expand_code_samples(
+def _code_identity(item: dict[str, Any], row_index: int) -> str:
+    """Return the stable code task identity, validating a non-empty task_id."""
+    task_id = item.get("task_id")
+    if task_id is None or not str(task_id).strip():
+        raise ValueError(
+            f"Code evaluation record at index {row_index} is missing required "
+            "non-empty 'task_id'"
+        )
+    return str(task_id)
+
+
+def _normalize_code_samples(
     eval_dataset: list[dict[str, Any]], response_key: str
 ) -> list[dict[str, Any]]:
     """Validate and normalize one code generation per input row."""
-    expanded: list[dict[str, Any]] = []
-    for item_idx, item in enumerate(eval_dataset):
-        task_id = item.get("task_id")
-        if task_id is None or not str(task_id).strip():
-            raise ValueError(
-                f"Code evaluation record at index {item_idx} is missing required "
-                "non-empty 'task_id'"
-            )
-        task_id = str(task_id)
-        sample = resolve_single_generation(item, response_key, problem_id=task_id)
-        sample_item = item.copy()
-        sample_item[response_key] = [sample] if sample is not None else []
-        expanded.append(sample_item)
-    return expanded
+    return expand_single_generation_samples(
+        eval_dataset, response_key, problem_identity=_code_identity
+    )
 
 
 def _pass_at_k_scores(grouped: dict[str, list[dict[str, Any]]], k: int) -> list[float]:
@@ -595,8 +595,8 @@ def _score_code_task_result(
     ----------
     eval_dataset : list[dict]
         Items to score.  Each must contain *label_key* (test harness) and
-        *response_key* (model output).  List-valued generations are expanded
-        so every sample contributes to pass@k.
+        *response_key* (model output). Each row must contain exactly one
+        generation; repeated rows for one ``task_id`` contribute to pass@k.
     label_key : str
         Dict key for the ground-truth test harness (e.g. ``"answer"``).
     response_key : str
@@ -632,7 +632,7 @@ def _score_code_task_result(
         raise ValueError(
             f"k_values must contain only positive integers, got {k_values}"
         )
-    expanded_dataset = _expand_code_samples(eval_dataset, response_key)
+    expanded_dataset = _normalize_code_samples(eval_dataset, response_key)
     total = len(expanded_dataset)
 
     logger.info(

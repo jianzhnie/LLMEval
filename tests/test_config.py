@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,8 @@ from llmeval.utils.config import (
     EvalTaskArguments,
     GenerationArguments,
     MCInferConfig,
+    OfflineInferArguments,
+    OnlineInferArguments,
     PromptArguments,
     ServerArguments,
     VLLMEngineArguments,
@@ -22,13 +25,7 @@ class TestDataArguments:
         in_file = tmp_path / "input.jsonl"
         in_file.touch()  # DataArguments now raises on missing input
         args = DataArguments(input_file=str(in_file))
-        assert args.batch_size > 0
-
-    def test_invalid_batch_size_raises(self, tmp_path: Path) -> None:
-        in_file = tmp_path / "x.jsonl"
-        in_file.touch()
-        with pytest.raises(ValueError, match="positive integer"):
-            DataArguments(input_file=str(in_file), batch_size=-1)
+        assert args.input_file == str(in_file)
 
     def test_config_construction_does_not_create_output_dir(
         self, tmp_path: Path
@@ -79,6 +76,11 @@ class TestPromptArguments:
         assert args.system_prompt is not None
         assert "think" in args.system_prompt.lower()
 
+    @pytest.mark.parametrize("key", ["input_key", "label_key", "response_key"])
+    def test_empty_record_key_raises(self, key: str) -> None:
+        with pytest.raises(ValueError, match=key):
+            PromptArguments(**{key: "  "})
+
 
 class TestGenerationArguments:
     def test_defaults_valid(self) -> None:
@@ -92,14 +94,37 @@ class TestGenerationArguments:
         with pytest.raises(ValueError, match=r"[Tt]emperature"):
             GenerationArguments(temperature=temp)
 
-    def test_zero_temperature_sets_greedy(self) -> None:
-        args = GenerationArguments(temperature=0.0)
-        assert args.do_sample is False  # temperature=0 → greedy decoding
-        assert args.temperature == 0.0
+    def test_zero_temperature_is_valid_for_online_backends(self) -> None:
+        assert GenerationArguments(temperature=0.0).temperature == 0.0
 
-    def test_positive_temperature_keeps_sampling(self) -> None:
-        args = GenerationArguments(temperature=0.6)
-        assert args.do_sample is True  # temperature>0 → sampling
+
+class TestInferenceSpecificArguments:
+    def test_online_does_not_expose_offline_only_fields(self) -> None:
+        online_fields = {item.name for item in fields(OnlineInferArguments)}
+        assert not online_fields.intersection(
+            {
+                "cache_dir",
+                "batch_size",
+                "fail_fast",
+                "do_sample",
+                "repetition_penalty",
+                "skip_special_tokens",
+            }
+        )
+
+    def test_offline_keeps_and_validates_local_fields(self, tmp_path: Path) -> None:
+        input_file = tmp_path / "input.jsonl"
+        input_file.touch()
+        args = OfflineInferArguments(input_file=str(input_file), temperature=0.0)
+
+        assert args.batch_size == 128
+        assert args.fail_fast is True
+        assert args.do_sample is False
+        assert args.skip_special_tokens is True
+        assert args.repetition_penalty == 1.0
+
+        with pytest.raises(ValueError, match="positive integer"):
+            OfflineInferArguments(input_file=str(input_file), batch_size=0)
 
 
 class TestVLLMEngineArguments:
@@ -172,6 +197,11 @@ class TestMCInferConfig:
         with pytest.raises(ValueError, match="mode"):
             MCInferConfig(mode="bogus")
 
+    @pytest.mark.parametrize("key", ["input_key", "label_key", "response_key"])
+    def test_empty_record_key_raises(self, key: str) -> None:
+        with pytest.raises(ValueError, match=key):
+            MCInferConfig(**{key: "\t"})
+
     @pytest.mark.parametrize(
         "kwargs",
         [
@@ -191,6 +221,9 @@ class TestMCInferConfig:
 
 
 class TestEvalTaskArguments:
+    def test_does_not_expose_unused_input_key(self) -> None:
+        assert "input_key" not in {item.name for item in fields(EvalTaskArguments)}
+
     def test_valid_task_names(self, tmp_path: Path) -> None:
         input_f = tmp_path / "data.jsonl"
         input_f.write_text('{"prompt": "q", "answer": "a"}\n')

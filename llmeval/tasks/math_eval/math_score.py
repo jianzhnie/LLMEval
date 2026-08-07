@@ -29,8 +29,8 @@ from llmeval.tasks.postprocess import (
     DEFAULT_FILTER_REGISTRY,
     TextFilterPipeline,
     build_filter_artifacts,
+    expand_single_generation_samples,
     resolve_max_workers,
-    resolve_single_generation,
 )
 from llmeval.tasks.registry import ScorerResult
 from llmeval.utils.log import init_logger
@@ -719,10 +719,9 @@ def score_math_result(
     result from the in-memory annotated records, without reading those files
     back from disk.
     """
-    # Inference groups multiple generations for one problem in a single row.
-    # The legacy float API intentionally scores the first generation only, but
-    # structured evaluation must account for every requested sample.
-    scoring_dataset = _expand_math_samples(eval_dataset, response_key)
+    # Each inference row carries one generation; normalize its representation
+    # before scoring and problem-level aggregation.
+    scoring_dataset = _normalize_math_samples(eval_dataset, response_key)
     accuracy = compute_scores(
         eval_dataset=scoring_dataset,
         label_key=label_key,
@@ -788,18 +787,13 @@ def score_math_result(
     )
 
 
-def _expand_math_samples(
+def _normalize_math_samples(
     eval_dataset: list[dict[str, Any]], response_key: str
 ) -> list[dict[str, Any]]:
     """Validate and normalize one math generation per input row."""
-    expanded: list[dict[str, Any]] = []
-    for row_index, item in enumerate(eval_dataset):
-        problem_id = _problem_identity(item, row_index)
-        response = resolve_single_generation(item, response_key, problem_id=problem_id)
-        record = dict(item)
-        record[response_key] = [response] if response is not None else []
-        expanded.append(record)
-    return expanded
+    return expand_single_generation_samples(
+        eval_dataset, response_key, problem_identity=_problem_identity
+    )
 
 
 def _problem_identity(item: dict[str, Any], row_index: int) -> str:

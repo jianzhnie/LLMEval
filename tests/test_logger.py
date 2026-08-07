@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from llmeval.utils.log import get_logger, init_logger, set_log_level
+from llmeval.utils.log import init_logger, set_log_level
 
 
 class TestInitLogger:
@@ -42,7 +42,7 @@ class TestInitLogger:
 class TestGetLogger:
     def test_returns_same_logger(self) -> None:
         init_logger("test_get")
-        assert get_logger("test_get").name == "test_get"
+        assert logging.getLogger("test_get").name == "test_get"
 
 
 class TestSetLogLevel:

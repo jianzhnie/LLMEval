@@ -46,25 +46,10 @@ logger = init_logger("eval_config")
 
 @dataclass
 class DataArguments:
-    """
-    Arguments for configuring the dataset and data loading.
-
-    This class handles all parameters related to data input/output,
-    including file paths, caching, and batch processing.
-
-    Attributes:
-        input_file (str): Path to the input JSONL file containing prompts.
-        cache_dir (str): Path to the directory for caching models and data.
-        output_file (str): Path to the output JSONL file to save results.
-        batch_size (int): The number of samples to process in each batch.
-    """
+    """Input, output, and resume paths shared by inference backends."""
 
     input_file: str = field(
         default="input.jsonl", metadata={"help": "Input JSONL file containing prompts."}
-    )
-    cache_dir: str = field(
-        default_factory=lambda: os.path.expanduser("~/.cache/huggingface"),
-        metadata={"help": "Cache directory for models."},
     )
     output_file: str = field(
         default="output.jsonl", metadata={"help": "Output JSONL file to save results."}
@@ -78,37 +63,20 @@ class DataArguments:
             )
         },
     )
-    batch_size: int = field(
-        default=128, metadata={"help": "Batch size for data loading."}
-    )
-    fail_fast: bool = field(
-        default=True,
-        metadata={
-            "help": (
-                "Stop on the first failed inference batch. Set to false to "
-                "record the failed batch and continue."
-            )
-        },
-    )
-
     def __post_init__(self) -> None:
-        """
-        Validate data arguments after initialization.
-
-        Raises:
-            ValueError: If batch_size is not a positive integer or if input file doesn't exist.
-        """
-        if self.batch_size <= 0:
-            raise ValueError(
-                f"Batch size must be a positive integer, but got {self.batch_size}."
-            )
-
-        # Validate input file exists
+        """Validate the input path without creating output-side directories."""
         if not Path(self.input_file).exists():
             raise ValueError(
                 f"Input file '{self.input_file}' does not exist. "
                 "Please provide a valid input file path."
             )
+
+
+def _validate_field_names(**field_names: str) -> None:
+    """Require non-empty string keys before records are read or written."""
+    for name, value in field_names.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
 
 
 @dataclass
@@ -160,10 +128,11 @@ class PromptArguments:
             ValueError: If input_key or label_key is empty, or if system_prompt_type
                        is not found in SYSTEM_PROMPT_FACTORY.
         """
-        if not self.input_key:
-            raise ValueError("Input key must be a non-empty string.")
-        if not self.label_key:
-            raise ValueError("Label key must be a non-empty string.")
+        _validate_field_names(
+            input_key=self.input_key,
+            label_key=self.label_key,
+            response_key=self.response_key,
+        )
 
         if (
             self.system_prompt_type is not None
@@ -195,23 +164,17 @@ class GenerationArguments:
     sampling strategies, token limits, and output formatting.
 
     Attributes:
-        do_sample (bool): Whether to use sampling or greedy decoding.
         n_samples (int): Number of sequences to generate per prompt.
         temperature (float): Controls randomness; higher is more diverse.
         top_p (float): Nucleus sampling probability threshold.
         top_k (int): Top-k sampling parameter.
         max_tokens (Optional[int]): Maximum number of tokens to generate per sequence.
-        skip_special_tokens (bool): Whether to remove special tokens from the output.
-        repetition_penalty (float): Repetition penalty parameter.
         enable_thinking (bool): Enable thinking mode for LLMs (if supported).
 
     Raises:
         ValueError: If any parameter is outside its valid range.
     """
 
-    do_sample: bool = field(
-        default=True, metadata={"help": "Whether to use sampling vs greedy decoding."}
-    )
     n_samples: int = field(
         default=1, metadata={"help": "Number of sequences to generate per prompt."}
     )
@@ -222,12 +185,6 @@ class GenerationArguments:
     top_k: int = field(default=40, metadata={"help": "Top-k sampling parameter."})
     max_tokens: int = field(
         default=32768, metadata={"help": "The Maximum number of tokens to generate."}
-    )
-    skip_special_tokens: bool = field(
-        default=True, metadata={"help": "Remove special tokens from output."}
-    )
-    repetition_penalty: float = field(
-        default=1.0, metadata={"help": "Repetition penalty parameter."}
     )
     enable_thinking: bool = field(
         default=False, metadata={"help": "Enable thinking mode for LLMs."}
@@ -258,15 +215,6 @@ class GenerationArguments:
             raise ValueError(
                 f"Number of samples must be positive, but got {self.n_samples}."
             )
-        if self.repetition_penalty < 0:
-            raise ValueError(
-                f"Repetition penalty must be non-negative, got: {self.repetition_penalty}"
-            )
-        if self.temperature <= 0.0:
-            self.do_sample = False
-            logger.info("Greedy decoding: temperature=0 → do_sample=False")
-
-
 @dataclass
 class VLLMEngineArguments:
     """
@@ -555,12 +503,46 @@ class OfflineInferArguments(
     and VLLMEngineArguments.
     """
 
+    batch_size: int = field(
+        default=128, metadata={"help": "Batch size for local vLLM inference."}
+    )
+    fail_fast: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Stop on the first failed inference batch. Set to false to "
+                "record failed batches and continue."
+            )
+        },
+    )
+    do_sample: bool = field(
+        default=True, metadata={"help": "Use sampling instead of greedy decoding."}
+    )
+    skip_special_tokens: bool = field(
+        default=True, metadata={"help": "Remove special tokens from generated text."}
+    )
+    repetition_penalty: float = field(
+        default=1.0, metadata={"help": "Local vLLM repetition penalty."}
+    )
+
     def __post_init__(self) -> None:
         """Validate all inherited arguments."""
         DataArguments.__post_init__(self)
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)
         VLLMEngineArguments.__post_init__(self)
+        if self.batch_size <= 0:
+            raise ValueError(
+                f"Batch size must be a positive integer, but got {self.batch_size}."
+            )
+        if self.repetition_penalty < 0:
+            raise ValueError(
+                "Repetition penalty must be non-negative, got: "
+                f"{self.repetition_penalty}"
+            )
+        if self.temperature <= 0.0:
+            self.do_sample = False
+            logger.info("Greedy decoding: temperature=0, do_sample=False")
 
 
 @dataclass
@@ -755,6 +737,11 @@ class MCInferConfig:
                 "few_shot_file is required when n_shot is greater than zero; "
                 "do not sample demonstrations from the evaluation set"
             )
+        _validate_field_names(
+            input_key=self.input_key,
+            label_key=self.label_key,
+            response_key=self.response_key,
+        )
         if self.system_prompt_type not in SYSTEM_PROMPT_FACTORY:
             raise ValueError(
                 f"Invalid system prompt type: {self.system_prompt_type}. "
@@ -775,7 +762,6 @@ class EvalTaskArguments:
         input_path (str): Path to the input JSONL file containing evaluation data.
         task_name (str): Name of the evaluation task to run.
             Validation is delegated to the task registry.
-        input_key (str): Key for input text in dataset.
         label_key (str): Key for target/label text in dataset.
         response_key (str): Key for model generated text.
         cache_path (str): Legacy name for the evaluation result JSONL path. Existing
@@ -792,9 +778,6 @@ class EvalTaskArguments:
     task_name: str = field(
         default="math_opensource/aime24",
         metadata={"help": "Evaluation task name (e.g. math_opensource/aime24)."},
-    )
-    input_key: str = field(
-        default="prompt", metadata={"help": "Key for input text in dataset."}
     )
     label_key: str = field(
         default="answer", metadata={"help": "Key for target/label text in dataset."}
@@ -879,6 +862,10 @@ class EvalTaskArguments:
             self.cache_path = self.result_path
         if not self.cache_path:
             raise ValueError("result_path or cache_path is required")
+        _validate_field_names(
+            label_key=self.label_key,
+            response_key=self.response_key,
+        )
         try:
             parsed_k = tuple(
                 dict.fromkeys(

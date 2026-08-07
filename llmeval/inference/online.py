@@ -44,11 +44,6 @@ from llmeval.utils.retry import call_with_retry
 logger = init_logger("online_vllm_server", logging.INFO)
 
 
-def _config_for_logging(args: OnlineInferArguments) -> dict[str, Any]:
-    """Return online configuration without misleading empty optional fields."""
-    return redact_config_for_logging(dataclasses.asdict(args))
-
-
 class InferenceClient:
     """
     A robust client to interact with OpenAI-compatible APIs.
@@ -359,8 +354,8 @@ class InferenceRunner:
             return None
 
         query = item.get(self.args.input_key) or item.get("prompt")
-        if not query:
-            logger.warning(f"Missing required query field in item: {item}")
+        if not isinstance(query, str) or not query.strip():
+            logger.warning("Query must be a non-empty string")
             with self._stats_lock:
                 self._stats["skipped"] += 1
             return None
@@ -467,7 +462,10 @@ class InferenceRunner:
             raise ValueError("Output file path is required")
 
         logger.info("🚀 Initializing inference pipeline")
-        logger.info("Configuration: %s", _config_for_logging(self.args))
+        logger.info(
+            "Configuration: %s",
+            redact_config_for_logging(dataclasses.asdict(self.args)),
+        )
 
         eval_dataset: list[dict[str, Any]] = self.load_data()
         if not eval_dataset:
@@ -512,7 +510,11 @@ def main() -> None:
             "Initializing OnlineInferArguments with parsed command line arguments..."
         )
         logger.info("\n--- Parsed Arguments ---")
-        logger.info(json.dumps(_config_for_logging(eval_args), indent=2))
+        logger.info(
+            json.dumps(
+                redact_config_for_logging(dataclasses.asdict(eval_args)), indent=2
+            )
+        )
 
         # Initialize and run the inference process
         runner = InferenceRunner(eval_args)

@@ -25,7 +25,6 @@ __all__ = [
     "get_request_seed",
     "is_explicit_tool_choice",
     "is_local_endpoint",
-    "iter_resume_records",
     "load_jsonl",
     "load_resume_state",
     "process_batches_with_policy",
@@ -76,7 +75,7 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
     return records
 
 
-def iter_resume_records(
+def _iter_resume_records(
     path: str | Path,
     *,
     repair_truncated_last_line: bool = False,
@@ -135,7 +134,8 @@ def save_failed_items(
 
     with failed_path.open("a", encoding="utf-8") as handle:
         for entry in failed_items:
-            source = entry.get("item") if isinstance(entry.get("item"), dict) else entry
+            nested_item = entry.get("item")
+            source: dict[str, Any] = nested_item if isinstance(nested_item, dict) else entry
             identity = {
                 "doc_id": source.get("doc_id"),
                 "error_category": entry.get("error_category")
@@ -195,7 +195,7 @@ def load_resume_state(
         return state
 
     try:
-        for line_num, item in iter_resume_records(
+        for line_num, item in _iter_resume_records(
             output_path,
             repair_truncated_last_line=repair_truncated_last_line,
         ):
@@ -224,8 +224,13 @@ def load_resume_state(
             )
 
             prompt = item.get(input_key) or item.get("prompt")
-            if prompt is not None and str(prompt).strip():
-                prompt_text = str(prompt)
+            if prompt is not None:
+                if not isinstance(prompt, str) or not prompt.strip():
+                    raise ValueError(
+                        f"Resume file {output_path} line {line_num} has an invalid "
+                        "prompt; text prompts must be non-empty strings"
+                    )
+                prompt_text = prompt
                 previous_prompt = state.prompts.setdefault(document_key, prompt_text)
                 if previous_prompt != prompt_text:
                     raise ValueError(
@@ -302,19 +307,21 @@ def expand_data_with_resume(
                 f"Duplicate doc_id {document_key!r} at indices {previous_index} and "
                 f"{index}. Each prepared question must have a unique ID."
             )
-
-    for index, source in enumerate(raw_data):
-        document_key = str(source["doc_id"])
         if prompt_resolver is None:
             prompt_value = source.get(input_key) or source.get("prompt")
-            prompt = str(prompt_value) if prompt_value is not None else ""
         else:
-            prompt = str(prompt_resolver(source))
-        if not prompt.strip():
-            raise ValueError(
-                f"Input record at index {index} has no non-empty prompt under "
-                f"{input_key!r} or 'prompt'"
+            prompt_value = prompt_resolver(source)
+        if not isinstance(prompt_value, str) or not prompt_value.strip():
+            detail = (
+                f"got {type(prompt_value).__name__}"
+                if prompt_value is not None
+                else "field is missing"
             )
+            raise ValueError(
+                f"Input record at index {index} must contain a non-empty string prompt "
+                f"under {input_key!r} or 'prompt'; {detail}"
+            )
+        prompt = prompt_value
 
         recorded_prompt = resume_state.prompts.get(document_key)
         if recorded_prompt is not None and recorded_prompt != prompt:
@@ -329,10 +336,9 @@ def expand_data_with_resume(
                 f"exceeding requested n_samples={n_samples}"
             )
 
-        seed_prompt = str(source.get("prompt") or source.get("question") or "")
         for generation_ordinal in range(completed, n_samples):
             seed_payload = (
-                f"{base_seed}\0{document_key}\0{seed_prompt}\0{generation_ordinal}"
+                f"{base_seed}\0{document_key}\0{prompt}\0{generation_ordinal}"
             ).encode("utf-8", errors="replace")
             item = copy.deepcopy(source)
             item["_request_seed"] = (

@@ -51,6 +51,11 @@ if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
     sys.modules["tqdm"] = _tqdm
 
 from llmeval.inference.mc import MCLoglikelihoodClient, MCRunner
+from llmeval.inference.schema import (
+    ChoiceLoglikelihood,
+    LoglikelihoodRequest,
+    LoglikelihoodResult,
+)
 from llmeval.utils.config import MCInferConfig
 
 
@@ -308,16 +313,21 @@ class TestProcessLoglikelihoodItem:
         assert result["logprobs"] == [-0.2, -1.0]
         assert result["loglikelihood_exact"] is False
         assert result["scoring_approximation"] == "first_token_top_logprobs"
-        runner.client.get_choices_continuation_logprobs.assert_not_called()
+        runner.client.score_continuations.assert_not_called()
 
     def test_explicit_continuation_uses_exact_scoring(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
         runner.config.loglikelihood_mode = "continuation"
         runner.client = MagicMock()
-        runner.client.get_choices_continuation_logprobs.return_value = [
-            [-0.5, -0.1],
-            [-0.2],
-        ]
+        request = LoglikelihoodRequest("q", ("A", "B"))
+        runner.client.score_continuations.return_value = LoglikelihoodResult(
+            request=request,
+            choices=(
+                ChoiceLoglikelihood("A", "A", (-0.5,), ("A",)),
+                ChoiceLoglikelihood("B", "B", (-0.2,), ("B",)),
+            ),
+            exact=True,
+        )
 
         result = runner.process_loglikelihood_item(
             {"prompt": "q", "choices": ["a", "b"], "gold": 1}
@@ -325,7 +335,7 @@ class TestProcessLoglikelihoodItem:
 
         assert result["scoring_mode"] == "continuation"
         assert result["loglikelihood_exact"] is True
-        runner.client.get_choices_continuation_logprobs.assert_called_once()
+        runner.client.score_continuations.assert_called_once_with(request)
         runner.client.get_choices_logprobs.assert_not_called()
 
 

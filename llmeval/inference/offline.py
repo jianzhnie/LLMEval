@@ -16,6 +16,8 @@ import json
 import logging
 import sys
 import threading
+import time
+import uuid
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
@@ -85,6 +87,7 @@ class OfflineInferenceRunner:
         """
         self.args: OfflineInferArguments = args
         self._file_lock: threading.Lock = threading.Lock()
+        self._run_id = uuid.uuid4().hex
         self.llm: LLM | None = None
         # System prompt is resolved and validated by PromptArguments at parse time.
         self.system_prompt: str | None = args.system_prompt
@@ -118,9 +121,7 @@ class OfflineInferenceRunner:
 
     def _build_sampling_params(self, seed: int) -> SamplingParams:
         """Build generation parameters for one deterministic sample stream."""
-        temperature = (
-            self.args.temperature if getattr(self.args, "do_sample", True) else 0.0
-        )
+        temperature = self.args.temperature if self.args.do_sample else 0.0
         return SamplingParams(
             max_tokens=self.args.max_tokens,
             temperature=temperature,
@@ -128,7 +129,7 @@ class OfflineInferenceRunner:
             top_k=self.args.top_k,
             repetition_penalty=self.args.repetition_penalty,
             seed=seed,
-            skip_special_tokens=getattr(self.args, "skip_special_tokens", True),
+            skip_special_tokens=self.args.skip_special_tokens,
         )
 
     def _sampling_params_for_items(
@@ -154,18 +155,12 @@ class OfflineInferenceRunner:
         input_key: str = self.args.input_key
 
         # Only input_key is required for inference; prompt is the canonical fallback.
-        prompt: Any = item.get(input_key) or item.get("prompt")
-        if prompt is None:
-            logger.warning(
-                f"Missing required key '{input_key}' (or 'prompt') in item: {list(item.keys())}"
+        prompt = item.get(input_key) or item.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError(
+                f"Prompt under {input_key!r} or 'prompt' must be a non-empty string"
             )
-            return None
-
-        # Validate required fields
-        prompt_str: str = str(prompt).strip()
-        if not prompt_str:
-            logger.warning("Empty prompt field in item")
-            return None
+        prompt_str = prompt.strip()
 
         ensure_raw_prompt(prompt_str)
 
@@ -302,7 +297,7 @@ class OfflineInferenceRunner:
                 f"Sample {first['item']} failed {first['error_category']}: "
                 f"{first['error']}"
             )
-        save_failed_items(self.args.output_file, failures)
+        save_failed_items(self.args.output_file, failures, run_id=self._run_id)
 
     def run(self) -> None:
         """Load, resume, execute, and persist offline inference."""
@@ -352,14 +347,16 @@ class OfflineInferenceRunner:
                 on_batch_complete=lambda: pbar.update(1),
             )
         if failures:
-            save_failed_items(self.args.output_file, failures)
+            save_failed_items(self.args.output_file, failures, run_id=self._run_id)
             logger.warning(
                 "Continued after %d failed batch(es); details saved next to output",
                 len(failures),
             )
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Parse offline inference arguments and run the CLI."""
+    start_time = time.perf_counter()
     try:
         # Parse command line arguments
         parser = HfArgumentParser(OfflineInferArguments)  # type: ignore[arg-type]
@@ -378,12 +375,22 @@ if __name__ == "__main__":
 
         OfflineInferenceRunner(eval_args).run()
 
+        # Log successful completion with execution time
+        total_time = time.perf_counter() - start_time
+        logger.info(
+            f"✅ Offline inference completed successfully in {total_time:.2f} seconds"
+        )
+
     except ImportError as e:
         logger.error(f"❌ A required library is missing: {e}. Please install it.")
         sys.exit(1)
     except KeyboardInterrupt:
-        logger.info("Process interrupted by user")
-        sys.exit(0)
+        logger.info("Interrupted by user. Exiting gracefully...")
+        sys.exit(130)  # Standard exit code for SIGINT
     except Exception as e:
         logger.critical(f"❌ An unrecoverable error occurred during execution: {e}")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -241,9 +241,20 @@ class TestExpansion:
             expand_data_with_resume(
                 [{"prompt": "p"}], _resume(), "prompt", 1, base_seed=1
             )
-        with pytest.raises(ValueError, match="no non-empty prompt"):
+        with pytest.raises(ValueError, match="non-empty string prompt"):
             expand_data_with_resume(
                 [{"doc_id": "q1"}], _resume(), "prompt", 1, base_seed=1
+            )
+
+    @pytest.mark.parametrize("prompt", [{"text": "p"}, ["p"], 42])
+    def test_rejects_non_string_prompts(self, prompt: object) -> None:
+        with pytest.raises(ValueError, match="non-empty string prompt"):
+            expand_data_with_resume(
+                [{"doc_id": "q1", "prompt": prompt}],
+                _resume(),
+                "prompt",
+                1,
+                base_seed=1,
             )
 
     def test_duplicate_document_ids_are_rejected(self) -> None:
