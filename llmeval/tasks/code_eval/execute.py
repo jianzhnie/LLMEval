@@ -33,6 +33,7 @@ import traceback
 import types
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from typing import Any
 
 from llmeval.utils.log import init_logger
@@ -206,8 +207,15 @@ class TimeoutException(Exception):
     """Raised when code execution exceeds the allotted time."""
 
 
+@dataclass
+class _TimeoutState:
+    """Record whether SIGALRM fired, even if candidate code caught it."""
+
+    expired: bool = False
+
+
 @contextmanager
-def time_limit(seconds: float) -> Generator[None, None, None]:
+def time_limit(seconds: float) -> Generator[_TimeoutState, None, None]:
     """Context manager that raises :class:`TimeoutException` after *seconds*.
 
     Uses ``signal.setitimer(ITIMER_REAL, ...)`` so the timeout fires even
@@ -216,13 +224,16 @@ def time_limit(seconds: float) -> Generator[None, None, None]:
     The previous ``SIGALRM`` handler is saved and restored on exit.
     """
 
+    state = _TimeoutState()
+
     def _handler(_signum: int, _frame: Any) -> None:
+        state.expired = True
         raise TimeoutException("Code execution timed out")
 
     _prev_handler = signal.signal(signal.SIGALRM, _handler)
     signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
-        yield
+        yield state
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, _prev_handler)
@@ -399,7 +410,8 @@ def unsafe_execute(
     timeout : float
         Maximum seconds before raising :exc:`TimeoutException`.
     exec_globals : dict or None
-        Optional globals dict for ``exec()``.  ``None`` means a fresh ``{}``.
+        Optional globals dict for ``exec()``. ``None`` creates fresh globals
+        with ``__name__`` set to ``"__main__"``.
 
     Returns
     -------
@@ -408,7 +420,9 @@ def unsafe_execute(
         ``"passed"``, ``"timed out"``, or ``"failed: <ExceptionName>"``.
     """
     if exec_globals is None:
-        exec_globals = {}
+        exec_globals = {"__name__": "__main__"}
+    else:
+        exec_globals.setdefault("__name__", "__main__")
 
     with create_tempdir():
         # Save clean-up helpers before reliability_guard disables them.
@@ -418,8 +432,10 @@ def unsafe_execute(
 
         reliability_guard()
         try:
-            with swallow_io(), time_limit(timeout):
+            with swallow_io(), time_limit(timeout) as timeout_state:
                 exec(check_program, exec_globals)
+            if timeout_state.expired:
+                return ("timed out", "")
             return ("passed", "")
         except TimeoutException:
             return ("timed out", "")

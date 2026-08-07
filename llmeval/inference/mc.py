@@ -25,6 +25,7 @@ import random
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -36,12 +37,12 @@ from transformers import HfArgumentParser
 from llmeval.inference.common import (
     append_jsonl,
     build_chat_messages,
-    expand_data_with_resume,
     get_request_seed,
     is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
     load_resume_state,
+    prepare_sample_requests,
     redact_config_for_logging,
     save_failed_items,
 )
@@ -59,6 +60,50 @@ logger = init_logger("mc_infer")
 
 class ContinuationAlignmentError(ValueError):
     """A deterministic backend token-offset mismatch that should not be retried."""
+
+
+def _aligned_continuation_tokens(
+    offsets: Sequence[int | None],
+    token_logprobs: Sequence[float | None],
+    tokens: Sequence[Any],
+    context: str,
+    continuation: str,
+) -> tuple[list[int], tuple[str, ...]]:
+    """Locate a continuation using character or UTF-8 byte offsets."""
+    for byte_offsets in (False, True):
+        text_length = (
+            (lambda value: len(value.encode("utf-8"))) if byte_offsets else len
+        )
+        start = text_length(context)
+        end = start + text_length(continuation)
+        selected = [
+            index
+            for index, (offset, logprob) in enumerate(
+                zip(offsets, token_logprobs, strict=True)
+            )
+            if offset is not None and start <= offset < end and logprob is not None
+        ]
+        if not selected or offsets[selected[0]] != start:
+            continue
+
+        selected_tokens = tuple(str(tokens[index]) for index in selected)
+        expected_offset = start
+        aligned = True
+        for selected_index, token in zip(selected, selected_tokens, strict=True):
+            if offsets[selected_index] != expected_offset:
+                aligned = False
+                break
+            expected_offset += text_length(token)
+        if (
+            aligned
+            and expected_offset == end
+            and "".join(selected_tokens) == continuation
+        ):
+            return selected, selected_tokens
+
+    raise ContinuationAlignmentError(
+        "continuation token offsets do not align in characters or UTF-8 bytes"
+    )
 
 
 class ContinuationLogprobs(list[list[float]]):
@@ -273,11 +318,7 @@ class MCLoglikelihoodClient:
                 results.append(best)
             return results
 
-        try:
-            choice_logprobs = call_with_retry(do_request, self.max_retries)
-        except Exception as e:
-            logger.warning(f"Logprob request failed: {e}")
-            choice_logprobs = None
+        choice_logprobs = call_with_retry(do_request, self.max_retries)
         if choice_logprobs is None:
             # Request failed (4xx / exhausted retries / context length): the
             # all-"-inf" result marks the item failed downstream, never scored.
@@ -323,7 +364,6 @@ class MCLoglikelihoodClient:
                 ordered_completions[index] = completion
 
             choice_results: list[ChoiceLoglikelihood] = []
-            scoring_context_length = len(request.scoring_context)
             for choice_index, (completion, continuation) in enumerate(
                 zip(ordered_completions, request.continuations, strict=True)
             ):
@@ -342,46 +382,19 @@ class MCLoglikelihoodClient:
                 ):
                     raise ValueError("completion token offsets are malformed")
 
-                scored_text = request.scored_continuation(choice_index)
-                choice_end = scoring_context_length + len(scored_text)
-                selected_indices = [
-                    index
-                    for index, (offset, logprob) in enumerate(
-                        zip(offsets, token_logprobs, strict=False)
-                    )
-                    if offset is not None
-                    and scoring_context_length <= offset < choice_end
-                    and logprob is not None
-                ]
-                if (
-                    not selected_indices
-                    or offsets[selected_indices[0]] != scoring_context_length
-                ):
-                    raise ContinuationAlignmentError(
-                        "continuation does not start on a token boundary"
-                    )
-
                 tokens = getattr(logprobs, "tokens", None)
                 if not isinstance(tokens, list | tuple) or len(tokens) != len(
                     token_logprobs
                 ):
                     raise ValueError("completion is missing aligned token text")
-                selected_tokens = tuple(
-                    str(tokens[index]) for index in selected_indices
+                scored_text = request.scored_continuation(choice_index)
+                selected_indices, selected_tokens = _aligned_continuation_tokens(
+                    offsets,
+                    token_logprobs,
+                    tokens,
+                    request.scoring_context,
+                    scored_text,
                 )
-                expected_offset = scoring_context_length
-                for selected_index, token in zip(
-                    selected_indices, selected_tokens, strict=True
-                ):
-                    if offsets[selected_index] != expected_offset:
-                        raise ContinuationAlignmentError(
-                            "continuation token offsets do not match token text"
-                        )
-                    expected_offset += len(token)
-                if expected_offset != choice_end:
-                    raise ContinuationAlignmentError(
-                        "continuation token offsets do not cover the choice"
-                    )
 
                 backend_ids = getattr(logprobs, "token_ids", None)
                 if backend_ids is not None and (
@@ -549,7 +562,7 @@ class MCRunner:
             repair_truncated_last_line=getattr(self.config, "repair_resume", False),
         )
         target_samples = self.config.n_samples if self.config.mode == "generate" else 1
-        remaining = expand_data_with_resume(
+        remaining = prepare_sample_requests(
             raw_data,
             resume_state,
             self.config.input_key,
@@ -877,13 +890,11 @@ class MCRunner:
             # Context-length rejection (None) or null/empty content ("")
             raise RuntimeError("Generate produced no usable text (empty response)")
 
-        result = {
-            self.config.input_key: prompt,
-            self.config.label_key: gold,
-            self.config.response_key: [generation],
-            **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
-            "expected_samples": self.config.n_samples,
-        }
+        result = dict(item)
+        result.pop("_request_seed", None)
+        result[self.config.input_key] = prompt
+        result[self.config.label_key] = gold
+        result[self.config.response_key] = generation
         return result
 
     # ------------------------------------------------------------------

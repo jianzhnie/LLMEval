@@ -460,9 +460,13 @@ def _score_items(
     if max_workers <= 1 or total == 1:
         records: list[dict[str, Any]] = []
         for i, item in enumerate(eval_dataset):
-            _, rec = _process_code_item(
-                (i, item, label_key, response_key, exec_timeout, allow_unsafe_code),
-            )
+            try:
+                _, rec = _process_code_item(
+                    (i, item, label_key, response_key, exec_timeout, allow_unsafe_code),
+                )
+            except Exception as exc:
+                logger.warning("Code scoring failed for item %d: %s", i, exc)
+                rec = _failure_code_record(item)
             records.append(rec)
         return records
 
@@ -683,11 +687,12 @@ def _score_code_task_result(
         write_cache(result, cache_path)
 
     logger.info(
-        "Pass@1: %.2f%% (%d/%d correct samples, %d problem(s))",
+        "Pass@1 (problem macro): %.2f%% across %d problem(s); "
+        "sample outcomes: %d/%d passed",
         pass_at_1 * 100,
+        problems,
         correct,
         total,
-        problems,
     )
     return result
 

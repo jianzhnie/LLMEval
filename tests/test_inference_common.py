@@ -9,11 +9,11 @@ import pytest
 
 from llmeval.inference.common import (
     ResumeState,
-    expand_data_with_resume,
     get_request_seed,
     is_explicit_tool_choice,
     load_jsonl,
     load_resume_state,
+    prepare_sample_requests,
     redact_config_for_logging,
     save_failed_items,
 )
@@ -181,13 +181,13 @@ class TestResumeState:
 class TestExpansion:
     def test_copies_each_document_requested_number_of_times(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        expanded = expand_data_with_resume(raw, _resume(), "prompt", 3, base_seed=123)
+        expanded = prepare_sample_requests(raw, _resume(), "prompt", 3, base_seed=123)
         assert len(expanded) == 3
         assert len({get_request_seed(item) for item in expanded}) == 3
 
     def test_resume_uses_completed_count(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        expanded = expand_data_with_resume(
+        expanded = prepare_sample_requests(
             raw,
             _resume(completed_counts={"q1": 2}),
             "prompt",
@@ -196,7 +196,7 @@ class TestExpansion:
         )
         assert len(expanded) == 2
 
-        full = expand_data_with_resume(raw, _resume(), "prompt", 4, base_seed=123)
+        full = prepare_sample_requests(raw, _resume(), "prompt", 4, base_seed=123)
         assert [get_request_seed(item) for item in expanded] == [
             get_request_seed(item) for item in full[2:]
         ]
@@ -204,7 +204,7 @@ class TestExpansion:
     def test_all_completed_yields_nothing(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
         assert (
-            expand_data_with_resume(
+            prepare_sample_requests(
                 raw,
                 _resume(completed_counts={"q1": 2}),
                 "prompt",
@@ -217,7 +217,7 @@ class TestExpansion:
     def test_too_many_completed_rows_is_rejected(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
         with pytest.raises(ValueError, match="exceeding requested"):
-            expand_data_with_resume(
+            prepare_sample_requests(
                 raw,
                 _resume(completed_counts={"q1": 3}),
                 "prompt",
@@ -228,7 +228,7 @@ class TestExpansion:
     @pytest.mark.parametrize("count", [0, -1])
     def test_rejects_non_positive_generation_count(self, count: int) -> None:
         with pytest.raises(ValueError, match="n_samples must be positive"):
-            expand_data_with_resume(
+            prepare_sample_requests(
                 [{"doc_id": "q1", "prompt": "p"}],
                 _resume(),
                 "prompt",
@@ -238,18 +238,18 @@ class TestExpansion:
 
     def test_requires_document_id_and_prompt(self) -> None:
         with pytest.raises(ValueError, match="missing required 'doc_id'"):
-            expand_data_with_resume(
+            prepare_sample_requests(
                 [{"prompt": "p"}], _resume(), "prompt", 1, base_seed=1
             )
         with pytest.raises(ValueError, match="non-empty string prompt"):
-            expand_data_with_resume(
+            prepare_sample_requests(
                 [{"doc_id": "q1"}], _resume(), "prompt", 1, base_seed=1
             )
 
     @pytest.mark.parametrize("prompt", [{"text": "p"}, ["p"], 42])
     def test_rejects_non_string_prompts(self, prompt: object) -> None:
         with pytest.raises(ValueError, match="non-empty string prompt"):
-            expand_data_with_resume(
+            prepare_sample_requests(
                 [{"doc_id": "q1", "prompt": prompt}],
                 _resume(),
                 "prompt",
@@ -259,7 +259,7 @@ class TestExpansion:
 
     def test_duplicate_document_ids_are_rejected(self) -> None:
         with pytest.raises(ValueError, match="Duplicate doc_id"):
-            expand_data_with_resume(
+            prepare_sample_requests(
                 [
                     {"doc_id": "q1", "prompt": "first"},
                     {"doc_id": "q1", "prompt": "second"},
@@ -272,7 +272,7 @@ class TestExpansion:
 
     def test_base_seed_must_be_a_non_negative_integer(self) -> None:
         with pytest.raises(ValueError, match="base_seed must be non-negative"):
-            expand_data_with_resume(
+            prepare_sample_requests(
                 [{"doc_id": "q1", "prompt": "p"}],
                 _resume(),
                 "prompt",
@@ -282,7 +282,7 @@ class TestExpansion:
 
     def test_changed_prompt_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="changed prompt"):
-            expand_data_with_resume(
+            prepare_sample_requests(
                 [{"doc_id": "q1", "prompt": "new"}],
                 _resume(completed_counts={"q1": 1}, prompts={"q1": "old"}),
                 "prompt",
@@ -292,7 +292,7 @@ class TestExpansion:
 
     def test_copies_are_independent(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p", "gen": ["existing"]}]
-        expanded = expand_data_with_resume(raw, _resume(), "prompt", 2, base_seed=1)
+        expanded = prepare_sample_requests(raw, _resume(), "prompt", 2, base_seed=1)
         expanded[0]["gen"].append("new")
         assert expanded[1]["gen"] == ["existing"]
         assert raw[0]["gen"] == ["existing"]

@@ -21,13 +21,13 @@ __all__ = [
     "build_chat_messages",
     "build_vllm_llm_kwargs",
     "ensure_raw_prompt",
-    "expand_data_with_resume",
     "get_request_seed",
     "is_explicit_tool_choice",
     "is_local_endpoint",
     "load_jsonl",
     "load_resume_state",
     "process_batches_with_policy",
+    "prepare_sample_requests",
     "redact_config_for_logging",
     "save_failed_items",
 ]
@@ -269,7 +269,7 @@ def _is_completed_record(
     return True
 
 
-def expand_data_with_resume(
+def prepare_sample_requests(
     raw_data: list[dict[str, Any]],
     resume_state: ResumeState,
     input_key: str,
@@ -278,7 +278,7 @@ def expand_data_with_resume(
     base_seed: int,
     prompt_resolver: Callable[[dict[str, Any]], str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Copy each input once per unfinished generation request."""
+    """Return one independent request row per unfinished sample."""
     if not input_key:
         raise ValueError("input_key must be non-empty")
     if n_samples <= 0:

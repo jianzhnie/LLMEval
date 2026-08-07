@@ -33,10 +33,10 @@ from llmeval.inference.common import (
     build_chat_messages,
     build_vllm_llm_kwargs,
     ensure_raw_prompt,
-    expand_data_with_resume,
     get_request_seed,
     load_jsonl,
     load_resume_state,
+    prepare_sample_requests,
     process_batches_with_policy,
     redact_config_for_logging,
     save_failed_items,
@@ -190,7 +190,7 @@ class OfflineInferenceRunner:
         for original_item, model_response in valid_pairs:
             result = dict(original_item)
             result.pop("_request_seed", None)
-            result[self.args.response_key] = [model_response]
+            result[self.args.response_key] = model_response
             results.append(result)
         append_jsonl(self.args.output_file, results, self._file_lock)
 
@@ -231,7 +231,7 @@ class OfflineInferenceRunner:
                 resume_state.completed_count,
             )
 
-        expanded_data = expand_data_with_resume(
+        expanded_data = prepare_sample_requests(
             raw_data,
             resume_state,
             self.args.input_key,

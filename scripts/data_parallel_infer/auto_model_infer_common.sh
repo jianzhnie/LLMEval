@@ -148,10 +148,8 @@ get_device_visibility() {
 
 get_remote_device_count() {
     local node=$1
-    # 使用ssh-keyscan防止"Host key verification failed"错误
-    ssh-keyscan -H "$node" >/dev/null 2>&1
-
-    # 尝试连接并执行命令，同时忽略ssh警告（复用 ssh_run，带上 SSH_USER 与 SSH_OPTS）
+    # 尝试连接并执行命令。SSH_OPTS 已禁用交互式 host-key 检查；额外的
+    # ssh-keyscan 会让不可达节点在 set -e 下提前终止整个部署。
     local output
     if ! output=$(ssh_run "$node" "npu-smi info 2>/dev/null" 2>/dev/null); then
         # 如果ssh命令失败（例如连接超时），则直接判定为不可用
@@ -483,6 +481,9 @@ validate_node_directories() {
 cleanup_and_exit() {
     # 如果没有传递退出码，使用上一个命令的退出码
     local exit_code="${1:-$?}"
+    # cleanup_and_exit 自己会 exit；先移除 trap，避免 exit 再次触发同一
+    # 清理流程，造成重复的远程 SSH 停服往返。
+    trap - EXIT TERM INT
 
     log_info "开始清理资源..."
 
@@ -746,8 +747,10 @@ check_remote_port_free() {
     fi
     if [[ "${used:-0}" -gt 0 ]]; then
         log_warn "节点 ${node} 端口 ${port} 已被占用，尝试清理旧 vLLM 进程..."
-        # 尝试通过匹配端口的 vLLM 进程杀掉旧服务
-        ssh_run "$node" "pkill -f 'vllm serve.*--port ${port}' || true" >/dev/null 2>&1 || true
+        # 使用带端口边界的共享模式，避免 6000 误匹配 60001。
+        local search_pattern
+        search_pattern=$(build_vllm_kill_pattern "$port")
+        ssh_run "$node" "pkill -f '${search_pattern}' || true" >/dev/null 2>&1 || true
         sleep 1
     fi
 }
@@ -1147,6 +1150,10 @@ wait_for_batch_completion_and_cleanup() {
     local max_wait_time=864000  # 最大等待时间（秒）(10天)
     local wait_interval=600     # 检查间隔（秒）
     local total_wait_time=0
+    local infer_script_name="${INFER_SCRIPT##*/}"
+    # [p]ython 不会匹配 pgrep 所在的远端 shell 命令行自身；脚本名前要求
+    # 路径分隔符，避免无关的同名参数被计为推理任务。
+    local infer_process_pattern="[p]ython([0-9.]*)?[[:space:]]+[^[:space:]]*/${infer_script_name}([[:space:]]|$)"
 
     log_info "⏳ 等待节点 ${node} 上的 ${expected_count} 个任务完成..."
 
@@ -1154,7 +1161,7 @@ wait_for_batch_completion_and_cleanup() {
         local current_running_tasks
         # 区分 SSH 失败与 pgrep 真返回 0：SSH 抖动时不判定完成，
         # 打 warning 并跳过本轮检查，避免误杀仍在运行的推理服务
-        if ! current_running_tasks=$(ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l" 2>/dev/null); then
+        if ! current_running_tasks=$(ssh_run "$node" "pgrep -f '${infer_process_pattern}' | wc -l" 2>/dev/null); then
             log_warn "⚠️ 节点 ${node} 状态检查失败（SSH 异常，可能是网络抖动），跳过本轮检查，继续等待..."
             sleep $wait_interval
             total_wait_time=$((total_wait_time + wait_interval))
@@ -1405,4 +1412,3 @@ main() {
     log_info "   - 日志目录: ${LOG_DIR}"
     echo "================================================"
 }
-

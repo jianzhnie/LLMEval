@@ -90,6 +90,11 @@ _LAST_LETTER_RE: re.Pattern[str] = re.compile(r"\b([A-Ja-j])\b")
 _FALLBACK_STOPWORDS = frozenset({"I", "a"})
 
 
+def _normalize_generate_gold(value: Any) -> str:
+    """Normalize a generate-mode label; missing labels remain empty/skipped."""
+    return "" if value is None else str(value).strip().upper()
+
+
 @dataclass
 class MCScoreResult:
     """Aggregate MC evaluation metrics (lm-eval aligned).
@@ -430,7 +435,7 @@ def _error_record(
             gold = -1
         pred: int | str = -1
     else:
-        gold = str(item.get(label_key, "")).strip().upper()
+        gold = _normalize_generate_gold(item.get(label_key))
         pred = ""
     return {
         **{
@@ -506,7 +511,10 @@ def _sample_weight(record: dict[str, Any]) -> int:
     to one scored observation per record.
     """
     if record.get("aggregation") == "per_sample":
-        return max(int(record.get("sample_total", 0)), 0)
+        sample_total = record.get("sample_total")
+        # Pool-level timeout/crash records represent the input item whose
+        # generations could not be scored and therefore still count once.
+        return 1 if sample_total is None else max(int(sample_total), 0)
     return 1
 
 
@@ -742,7 +750,7 @@ def score_generate_item(
     if aggregation not in _MC_AGGREGATIONS:
         raise ValueError(f"Unsupported MC aggregation: {aggregation}")
 
-    gold = str(item.get(label_key, "")).strip().upper()
+    gold = _normalize_generate_gold(item.get(label_key))
     generations: Any = item.get(response_key, [])
 
     if isinstance(generations, str):

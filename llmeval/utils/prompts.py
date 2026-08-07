@@ -38,9 +38,11 @@ SYSTEM_PROMPT_FACTORY: dict[str, str | None] = {
     "empty": None,
 }
 
-_CHAT_ROLE_LINE_RE: re.Pattern[str] = re.compile(
-    r"(?m)^\s*(?:###\s*)?(?:Human|Assistant)\s*:",
+_HASHED_CHAT_ROLE_LINE_RE: re.Pattern[str] = re.compile(
+    r"(?m)^\s*###\s*(?:Human|Assistant)\s*:",
 )
+_HUMAN_ROLE_LINE_RE: re.Pattern[str] = re.compile(r"(?m)^\s*Human\s*:")
+_ASSISTANT_ROLE_LINE_RE: re.Pattern[str] = re.compile(r"(?m)^\s*Assistant\s*:")
 
 # Unambiguous special tokens — plain substring matching is safe for these.
 _SPECIAL_TOKEN_MARKERS = (
@@ -78,6 +80,13 @@ def is_chat_template_applied(query: str) -> bool:
     if _S_TAG_RE.search(query) or _INST_TAG_RE.search(query):
         return True
 
-    # Human:/Assistant: is too common as normal problem text to detect via
-    # substring; treat it as a template only when it appears as a role line.
-    return bool(_CHAT_ROLE_LINE_RE.search(query))
+    # A single plain Human:/Assistant: line is common in dialogue benchmarks.
+    # Hashed role markers are template-specific; plain markers require both
+    # sides of a serialized conversation before rejecting the prompt.
+    return bool(
+        _HASHED_CHAT_ROLE_LINE_RE.search(query)
+        or (
+            _HUMAN_ROLE_LINE_RE.search(query)
+            and _ASSISTANT_ROLE_LINE_RE.search(query)
+        )
+    )

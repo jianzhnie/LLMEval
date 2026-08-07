@@ -28,12 +28,12 @@ from llmeval.inference.common import (
     append_jsonl,
     build_chat_messages,
     ensure_raw_prompt,
-    expand_data_with_resume,
     get_request_seed,
     is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
     load_resume_state,
+    prepare_sample_requests,
     redact_config_for_logging,
     save_failed_items,
 )
@@ -326,7 +326,7 @@ class InferenceRunner:
                 resume_state.completed_count,
             )
 
-        prepared_data = expand_data_with_resume(
+        prepared_data = prepare_sample_requests(
             raw_data,
             resume_state,
             self.args.input_key,
@@ -373,7 +373,7 @@ class InferenceRunner:
 
         result = item.copy()
         result.pop("_request_seed", None)
-        result[self.args.response_key] = [response]
+        result[self.args.response_key] = response
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
