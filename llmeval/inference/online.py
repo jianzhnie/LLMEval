@@ -26,12 +26,12 @@ from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
     expand_data_with_resume,
+    get_request_seed,
     is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
     load_resume_state,
     redact_config_for_logging,
-    get_request_seed,
     save_failed_items,
 )
 from llmeval.utils.config import OnlineInferArguments

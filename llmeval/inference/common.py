@@ -24,12 +24,12 @@ __all__ = [
     "ResumeState",
     "build_vllm_llm_kwargs",
     "expand_data_with_resume",
+    "get_request_seed",
     "is_explicit_tool_choice",
     "is_local_endpoint",
     "iter_resume_records",
     "load_jsonl",
     "load_resume_state",
-    "get_request_seed",
     "process_batches_with_policy",
     "redact_config_for_logging",
     "require_document_id",
@@ -223,7 +223,11 @@ def load_resume_state(
             output_path,
             repair_truncated_last_line=repair_truncated_last_line,
         ):
-            internal_fields = [key for key in item if key.startswith("_llmeval_")]
+            internal_fields = [
+                key
+                for key in item
+                if key.startswith("_llmeval_") or key == "_request_seed"
+            ]
             if internal_fields:
                 raise ValueError(
                     f"Resume file {output_path} line {line_num} uses unsupported "

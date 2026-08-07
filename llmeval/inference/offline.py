@@ -29,11 +29,11 @@ from vllm.outputs import RequestOutput
 from llmeval.inference.common import (
     build_vllm_llm_kwargs,
     expand_data_with_resume,
+    get_request_seed,
     load_jsonl,
     load_resume_state,
     process_batches_with_policy,
     redact_config_for_logging,
-    get_request_seed,
     save_failed_items,
 )
 from llmeval.utils.config import OfflineInferArguments

@@ -535,7 +535,6 @@ class TestScoreCode:
         )
 
         summary = json.loads(cache_path.with_suffix(".summary.json").read_text())
-        records = [json.loads(line) for line in cache_path.read_text().splitlines()]
         assert acc == pytest.approx(0.5)
         assert summary["pass_at_k"]["pass@1"] == 0.5
         assert summary["pass_at_k"]["pass@2"] == 1.0
