@@ -91,6 +91,16 @@ class TestResumeState:
         )
         assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
 
+    def test_logprobs_with_null_missing_choice_is_completed(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps({"doc_id": "q1", "prompt": "p", "logprobs": [None, -0.5]})
+            + "\n"
+        )
+        assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
+
     @pytest.mark.parametrize(
         "logprobs",
         [
@@ -99,6 +109,9 @@ class TestResumeState:
             0.5,  # bare number, not a per-choice list
             ["A", "B"],  # non-numeric elements
             None,  # explicit null
+            [None, None],  # no choice received a finite score
+            [float("nan")],  # non-standard/non-finite JSON number
+            [float("inf")],  # non-standard/non-finite JSON number
         ],
     )
     def test_non_score_logprobs_row_is_not_completed(
@@ -121,6 +134,21 @@ class TestResumeState:
                     "prompt": "p",
                     "gen": "",
                     "error": "context_length_exceeded",
+                }
+            )
+            + "\n"
+        )
+        assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
+
+    def test_empty_response_error_row_is_completed(self, tmp_path: Path) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "p",
+                    "gen": "",
+                    "error": "empty_response",
                 }
             )
             + "\n"

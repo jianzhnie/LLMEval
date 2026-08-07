@@ -130,6 +130,10 @@ class TestShouldRetry:
         err = _api_error("This model's maximum context length is 8192", 400)
         assert should_retry(err, 3, 3) is None
 
+    def test_rate_limit_wrapped_context_length_returns_none(self) -> None:
+        err = _rate_limit_error("maximum context length exceeded")
+        assert should_retry(err, 0, 3) is None
+
     def test_5xx_retries_then_exhaustion_raises(self) -> None:
         err = _api_error("boom", 500)
         assert should_retry(err, 0, 1) is True

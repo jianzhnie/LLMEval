@@ -355,6 +355,21 @@ class TestMCLoglikelihoodClient:
         assert result.error is not None
         assert client.client.completions.create.call_count == 3
 
+    @pytest.mark.parametrize("index", [None, "0", True, -1, 1])
+    def test_continuation_rejects_invalid_choice_index(self, index: object) -> None:
+        client = _make_ll_client(max_retries=0)
+        choice = MagicMock(index=index)
+        choice.logprobs.text_offset = [0, 6]
+        choice.logprobs.token_logprobs = [None, -0.2]
+        choice.logprobs.tokens = ["prompt", " A"]
+        choice.logprobs.token_ids = None
+        client.client.completions.create.return_value.choices = [choice]
+
+        result = client.score_continuations(LoglikelihoodRequest("prompt", (" A",)))
+
+        assert result.exact is False
+        assert "indices" in str(result.error)
+
 
 class TestProcessLoglikelihoodItem:
     def test_context_marker_counts_failed_not_processed(self, tmp_path: Path) -> None:

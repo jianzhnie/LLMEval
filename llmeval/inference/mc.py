@@ -347,20 +347,16 @@ class MCLoglikelihoodClient:
                 )
 
             ordered_completions: list[Any | None] = [None] * len(request.continuations)
-            for fallback_index, completion in enumerate(completions):
-                response_index = getattr(completion, "index", fallback_index)
-                index = (
-                    response_index
-                    if isinstance(response_index, int)
-                    else fallback_index
-                )
+            for completion in completions:
+                index = getattr(completion, "index", None)
                 if (
-                    index < 0
+                    type(index) is not int
+                    or index < 0
                     or index >= len(request.continuations)
                     or ordered_completions[index] is not None
                 ):
                     raise MalformedResponseError(
-                        "completion indices are invalid or duplicated"
+                        "completion indices are missing, invalid, or duplicated"
                     )
                 ordered_completions[index] = completion
 

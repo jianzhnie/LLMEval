@@ -124,14 +124,17 @@ def should_retry(exc: Exception, attempt: int, max_retries: int) -> bool | None:
         :class:`MalformedResponseError`, which marks a structurally broken
         response payload and follows the normal bounded retry path.
     """
+    # Some OpenAI-compatible gateways wrap prompt-length rejections in a 429.
+    # Classify by the explicit message before applying subclass retry rules.
+    if isinstance(exc, APIError) and is_context_length_error(exc):
+        logger.warning("Max context length exceeded, returning empty result")
+        return None
+
     # Connection / rate-limit errors are APIError subclasses, so they must be
-    # excluded from the fatal-4xx checks (a 429 is always worth retrying).
+    # excluded from the remaining fatal-4xx checks.
     if isinstance(exc, APIError) and not isinstance(
         exc, APIConnectionError | RateLimitError
     ):
-        if is_context_length_error(exc):
-            logger.warning("Max context length exceeded, returning empty result")
-            return None
         # 4xx (except 408/429): retrying can never succeed.
         non_retryable = non_retryable_client_error(exc)
         if non_retryable:

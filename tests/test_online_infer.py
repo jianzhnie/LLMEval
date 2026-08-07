@@ -210,6 +210,25 @@ class TestProcessItem:
         assert rows[0]["error"] == "context_length_exceeded"
         assert runner.load_data() == []
 
+    def test_process_item_persists_exhausted_empty_response(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _make_runner(tmp_path)
+        Path(runner.args.input_file).write_text(
+            json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "a"}) + "\n"
+        )
+        runner.client = MagicMock()
+        runner.client.get_content.return_value = ""
+
+        result = runner.process_item(
+            {"doc_id": "test:0", "prompt": "q", "answer": "a", "_request_seed": 1}
+        )
+
+        assert result is not None
+        assert result["error"] == "empty_response"
+        assert runner._stats["failed"] == 1
+        assert runner.load_data() == []
+
 
 # ── InferenceClient request behavior ──────────────────────────────
 
@@ -292,6 +311,19 @@ class TestGetContent:
         client.client.chat.completions.create.return_value = _fake_completion([None])
         result = client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
         assert result == ""
+
+    def test_empty_content_retried_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+        client = _make_client(max_retries=2)
+        client.client.chat.completions.create.side_effect = [
+            _fake_completion([None]),
+            _fake_completion(["ok"]),
+        ]
+
+        assert client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False) == "ok"
+        assert client.client.chat.completions.create.call_count == 2
 
     def test_context_length_returns_none(self) -> None:
         client = _make_client()
