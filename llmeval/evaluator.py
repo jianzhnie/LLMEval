@@ -44,13 +44,13 @@ from llmeval.tasks.mc_eval.mc_score import (
 from llmeval.tasks.registry import (
     EvaluationContext,
     EvaluationResult,
+    MetricValue,
     PreparationContext,
     TaskRegistry,
     build_default_registry,
     evaluate_registered_task,
     persist_evaluation_result,
 )
-from llmeval.tasks.results import MetricValue
 from llmeval.utils.config import EvalTaskArguments
 from llmeval.utils.log import init_logger
 

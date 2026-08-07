@@ -54,7 +54,7 @@ from llmeval.evaluator import (
     _resolve_cache_path,
     evaluate_task,
 )
-from llmeval.tasks.results import ScorerResult
+from llmeval.tasks.registry import ScorerResult
 
 
 def _scorer_result(name: str, value: float) -> ScorerResult:

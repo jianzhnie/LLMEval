@@ -8,30 +8,27 @@ from pathlib import Path
 import pytest
 
 from llmeval.inference.mc import FewShotFormatter
-from llmeval.tasks.execution import resolve_max_workers
-from llmeval.tasks.postprocess import build_filter_artifacts
+from llmeval.tasks.postprocess import build_filter_artifacts, resolve_max_workers
 from llmeval.tasks.registry import (
     CodeTask,
     EvaluationContext,
+    EvaluationResult,
     MathTask,
     MCTask,
-    TaskRegistry,
-    write_per_item_results,
-    write_structured_summary,
-)
-from llmeval.tasks.results import (
-    EvaluationResult,
     MetricValue,
     ScorerResult,
+    TaskRegistry,
     aggregate_metric_values,
     metric_from_samples,
+    write_per_item_results,
+    write_structured_summary,
 )
 
 
 def test_shared_task_helpers_preserve_limits_and_filter_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("llmeval.tasks.execution.os.cpu_count", lambda: 8)
+    monkeypatch.setattr("llmeval.tasks.postprocess.os.cpu_count", lambda: 8)
 
     assert resolve_max_workers(total=20, requested=12) == 7
     assert resolve_max_workers(total=3, requested=12) == 3

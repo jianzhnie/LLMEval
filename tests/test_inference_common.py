@@ -87,8 +87,7 @@ class TestResumeState:
     def test_logprobs_row_is_completed(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
         path.write_text(
-            json.dumps({"doc_id": "q1", "prompt": "p", "logprobs": [0.0]})
-            + "\n"
+            json.dumps({"doc_id": "q1", "prompt": "p", "logprobs": [0.0]}) + "\n"
         )
         assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
 
@@ -101,13 +100,28 @@ class TestResumeState:
     def test_repair_ignores_only_truncated_final_line(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
         path.write_text(
-            json.dumps({"doc_id": "q1", "prompt": "p", "gen": ["a"]})
-            + "\n{"
+            json.dumps({"doc_id": "q1", "prompt": "p", "gen": ["a"]}) + "\n{"
         )
         state = load_resume_state(
             path, "prompt", "gen", repair_truncated_last_line=True
         )
         assert state.completed_counts == {"q1": 1}
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "bad json\n" + json.dumps({"doc_id": "q1", "gen": ["a"]}) + "\n",
+            "bad json\n",
+        ],
+    )
+    def test_repair_rejects_non_truncated_invalid_lines(
+        self, tmp_path: Path, content: str
+    ) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(content)
+
+        with pytest.raises(ValueError, match=r"out\.jsonl at line 1"):
+            load_resume_state(path, "prompt", "gen", repair_truncated_last_line=True)
 
     def test_custom_response_key_uses_gen_fallback(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
@@ -130,8 +144,7 @@ class TestResumeState:
     def test_grouped_generation_row_is_rejected(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
         path.write_text(
-            json.dumps({"doc_id": "q1", "prompt": "p", "gen": ["a", "b"]})
-            + "\n"
+            json.dumps({"doc_id": "q1", "prompt": "p", "gen": ["a", "b"]}) + "\n"
         )
         with pytest.raises(ValueError, match="exactly one generation"):
             load_resume_state(path, "prompt", "gen")
@@ -168,9 +181,7 @@ class TestResumeState:
 class TestExpansion:
     def test_copies_each_document_requested_number_of_times(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        expanded = expand_data_with_resume(
-            raw, _resume(), "prompt", 3, base_seed=123
-        )
+        expanded = expand_data_with_resume(raw, _resume(), "prompt", 3, base_seed=123)
         assert len(expanded) == 3
         assert len({get_request_seed(item) for item in expanded}) == 3
 
@@ -235,6 +246,29 @@ class TestExpansion:
                 [{"doc_id": "q1"}], _resume(), "prompt", 1, base_seed=1
             )
 
+    def test_duplicate_document_ids_are_rejected(self) -> None:
+        with pytest.raises(ValueError, match="Duplicate doc_id"):
+            expand_data_with_resume(
+                [
+                    {"doc_id": "q1", "prompt": "first"},
+                    {"doc_id": "q1", "prompt": "second"},
+                ],
+                _resume(),
+                "prompt",
+                1,
+                base_seed=1,
+            )
+
+    def test_base_seed_must_be_a_non_negative_integer(self) -> None:
+        with pytest.raises(ValueError, match="base_seed must be non-negative"):
+            expand_data_with_resume(
+                [{"doc_id": "q1", "prompt": "p"}],
+                _resume(),
+                "prompt",
+                1,
+                base_seed=-1,
+            )
+
     def test_changed_prompt_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="changed prompt"):
             expand_data_with_resume(
@@ -247,9 +281,7 @@ class TestExpansion:
 
     def test_copies_are_independent(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p", "gen": ["existing"]}]
-        expanded = expand_data_with_resume(
-            raw, _resume(), "prompt", 2, base_seed=1
-        )
+        expanded = expand_data_with_resume(raw, _resume(), "prompt", 2, base_seed=1)
         expanded[0]["gen"].append("new")
         assert expanded[1]["gen"] == ["existing"]
         assert raw[0]["gen"] == ["existing"]

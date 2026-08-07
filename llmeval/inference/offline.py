@@ -136,10 +136,7 @@ class OfflineInferenceRunner:
         self, items: Sequence[dict[str, Any]]
     ) -> list[SamplingParams]:
         """Return independent, resume-stable sampling parameters per item."""
-        return [
-            self._build_sampling_params(get_request_seed(item))
-            for item in items
-        ]
+        return [self._build_sampling_params(get_request_seed(item)) for item in items]
 
     def _prepare_hf_overrides(self) -> dict[str, Any]:
         """Return explicitly configured Hugging Face model overrides."""

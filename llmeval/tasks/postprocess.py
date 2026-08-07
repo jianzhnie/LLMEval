@@ -1,4 +1,4 @@
-"""Shared text post-processing helpers for task-specific scoring.
+"""Shared input-record processing helpers for task-specific scoring.
 
 The task scorers use these helpers explicitly so the response-cleanup chain is
 easy to inspect and test.  The helpers are intentionally small and composable:
@@ -7,10 +7,15 @@ easy to inspect and test.  The helpers are intentionally small and composable:
 * ``apply_text_pipeline`` runs the pipeline on a response value.
 * ``strip_reasoning_wrappers`` removes common ``<think>`` / ``<answer>``
   wrappers used by reasoning models.
+* ``resolve_single_generation`` validates the one-generation-per-row protocol
+  and extracts the single generation from an inference output record.
+* ``resolve_max_workers`` clamps the process-pool size to the workload,
+  requested workers, and available CPUs.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -26,6 +31,8 @@ __all__ = [
     "apply_text_pipeline_with_trace",
     "build_filter_artifacts",
     "build_text_pipeline",
+    "resolve_max_workers",
+    "resolve_single_generation",
     "strip_reasoning_wrappers",
 ]
 
@@ -227,3 +234,33 @@ DEFAULT_FILTER_REGISTRY = FilterRegistry()
 DEFAULT_FILTER_REGISTRY.register(
     "strip_reasoning", strip_reasoning_wrappers, version="1"
 )
+
+
+def resolve_single_generation(
+    item: dict[str, Any], response_key: str, *, problem_id: str
+) -> str | None:
+    """Return one generation, using ``None`` for a failed empty response."""
+    value = item.get(response_key)
+    if isinstance(value, list):
+        if len(value) > 1:
+            raise ValueError(
+                f"Invalid {response_key!r} for problem {problem_id!r}: expected "
+                "one generation per row"
+            )
+        value = value[0] if value else None
+    if value is not None and not isinstance(value, str):
+        raise ValueError(
+            f"Invalid {response_key!r} for problem {problem_id!r}: expected a "
+            "string or a list containing one string"
+        )
+    return value
+
+
+def resolve_max_workers(total: int, requested: int) -> int:
+    """Clamp process workers to the workload, request, and available CPUs."""
+    if total < 1:
+        raise ValueError("total must be positive")
+    if requested < 1:
+        raise ValueError("requested workers must be positive")
+    cpu_count = os.cpu_count() or 1
+    return min(total, requested, max(1, cpu_count - 1))

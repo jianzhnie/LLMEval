@@ -461,9 +461,7 @@ class TestMCStableResume:
 
         assert runner.load_data() == []
 
-    def test_generate_resume_uses_completed_row_count(
-        self, tmp_path: Path
-    ) -> None:
+    def test_generate_resume_uses_completed_row_count(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         runner.config.n_samples = 3
         Path(runner.config.input_file).write_text(

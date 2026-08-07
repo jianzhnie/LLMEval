@@ -2,8 +2,8 @@
 
 Focuses on request behavior, thread-safe writing, and independent sample
 processing --
-all testable without a live vLLM server.  The shared data-loading / resume
-helpers are covered by tests/test_inference_common.py.
+all testable without a live vLLM server. The shared records/resume helpers are
+covered by tests/test_inference_common.py.
 """
 
 from __future__ import annotations
@@ -435,9 +435,7 @@ class TestLoadData:
         assert len({item["_request_seed"] for item in loaded}) == 2
         assert all(item["expected_samples"] == 4 for item in loaded)
 
-    def test_load_data_uses_completed_row_count(
-        self, tmp_path: Path
-    ) -> None:
+    def test_load_data_uses_completed_row_count(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path, n_samples=4)
         Path(runner.args.input_file).write_text(
             json.dumps({"doc_id": "test:0", "prompt": "q"}) + "\n",

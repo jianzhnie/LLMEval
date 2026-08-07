@@ -19,16 +19,16 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.code_eval.execute import check_correctness
-from llmeval.tasks.execution import resolve_max_workers
 from llmeval.tasks.persistence import persist_results
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
     build_filter_artifacts,
+    resolve_max_workers,
+    resolve_single_generation,
     strip_reasoning_wrappers,
 )
-from llmeval.tasks.results import ScorerResult
-from llmeval.tasks.sample_record import resolve_single_generation
+from llmeval.tasks.registry import ScorerResult
 from llmeval.utils.log import init_logger
 
 logger = init_logger("code_score")

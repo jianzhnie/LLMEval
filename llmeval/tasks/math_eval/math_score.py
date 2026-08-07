@@ -21,7 +21,6 @@ from typing import Any
 from pebble import ProcessPool
 from tqdm import tqdm
 
-from llmeval.tasks.execution import resolve_max_workers
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
 from llmeval.tasks.persistence import (
     atomic_write_json,
@@ -32,9 +31,10 @@ from llmeval.tasks.postprocess import (
     DEFAULT_FILTER_REGISTRY,
     TextFilterPipeline,
     build_filter_artifacts,
+    resolve_max_workers,
+    resolve_single_generation,
 )
-from llmeval.tasks.results import ScorerResult
-from llmeval.tasks.sample_record import resolve_single_generation
+from llmeval.tasks.registry import ScorerResult
 from llmeval.utils.log import init_logger
 
 # Configure a dedicated logger for the math scoring module

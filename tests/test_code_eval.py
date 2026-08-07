@@ -940,7 +940,9 @@ class TestCodeRepeatedRows:
         assert len(records) == 1
         assert records[0]["result"] == "failed: empty generation"
 
-    def test_identical_generations_remain_distinct_samples(self, tmp_path: Path) -> None:
+    def test_identical_generations_remain_distinct_samples(
+        self, tmp_path: Path
+    ) -> None:
         items = [
             self._item([self._RIGHT]),
             self._item([self._RIGHT]),
@@ -949,7 +951,9 @@ class TestCodeRepeatedRows:
         assert acc == 1.0
         assert len(records) == 2
 
-    def test_different_generations_remain_distinct_samples(self, tmp_path: Path) -> None:
+    def test_different_generations_remain_distinct_samples(
+        self, tmp_path: Path
+    ) -> None:
         items = [
             self._item([self._WRONG]),
             self._item([self._RIGHT]),

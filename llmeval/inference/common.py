@@ -1,16 +1,10 @@
-"""Shared infrastructure for inference runners.
-
-This module owns backend-independent concerns: JSONL parsing, resume-state
-validation, sampling-plan construction, configuration redaction, and failure
-auditing.  Backend-specific request shapes stay in the online/offline runners.
-"""
+"""Backend-independent persistence, resume, and request helpers."""
 
 from __future__ import annotations
 
 import copy
 import hashlib
 import json
-import os
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -30,15 +24,20 @@ __all__ = [
     "get_request_seed",
     "is_explicit_tool_choice",
     "is_local_endpoint",
+    "iter_resume_records",
     "load_jsonl",
     "load_resume_state",
     "process_batches_with_policy",
     "redact_config_for_logging",
-    "require_document_id",
     "save_failed_items",
 ]
 
 logger = init_logger("inference_common")
+
+
+# ---------------------------------------------------------------------------
+# JSONL persistence and failure auditing
+# ---------------------------------------------------------------------------
 
 
 def append_jsonl(
@@ -54,66 +53,110 @@ def append_jsonl(
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 handle.flush()
         except Exception as exc:
-            raise OSError(f"Failed to append JSONL results to {output_path}: {exc}") from exc
+            raise OSError(
+                f"Failed to append JSONL results to {output_path}: {exc}"
+            ) from exc
 
 
-def ensure_raw_prompt(prompt: str) -> None:
-    """Reject prompts that already contain a serialized chat template."""
-    if is_chat_template_applied(prompt):
-        raise ValueError(
-            "Query already contains a chat_template; provide the raw prompt because "
-            "the inference backend applies its template automatically"
-        )
+def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    """Load JSON objects from non-blank lines in ``path``."""
+    records: list[dict[str, Any]] = []
+    with Path(path).open(encoding="utf-8") as handle:
+        for line_num, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise ValueError(
+                    f"JSONL line {line_num} must contain an object, "
+                    f"got {type(record).__name__}"
+                )
+            records.append(record)
+    return records
 
 
-def _batch_item_identity(item: dict[str, Any]) -> dict[str, Any]:
-    """Return stable, compact identity fields for a failed batch item."""
-    identity: dict[str, Any] = {}
-    for key in ("doc_id",):
-        if key in item:
-            identity[key] = item[key]
-    return identity
-
-
-def process_batches_with_policy(
-    items: Sequence[dict[str, Any]],
-    batch_size: int,
-    process_batch: Callable[[Sequence[dict[str, Any]]], None],
+def iter_resume_records(
+    path: str | Path,
     *,
-    fail_fast: bool = True,
-    on_batch_complete: Callable[[], None] | None = None,
-) -> list[dict[str, Any]]:
-    """Process batches with an explicit strict or fault-isolating policy.
+    repair_truncated_last_line: bool = False,
+) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Yield strict resume rows, optionally ignoring one truncated final row."""
+    resume_path = Path(path)
+    with resume_path.open(encoding="utf-8") as handle:
+        line_num = 0
+        line = handle.readline()
+        while line:
+            line_num += 1
+            next_line = handle.readline()
+            if line.strip():
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    is_truncated_final_line = (
+                        repair_truncated_last_line
+                        and not next_line
+                        and not line.endswith(("\n", "\r"))
+                    )
+                    if is_truncated_final_line:
+                        logger.warning(
+                            "Ignoring truncated final resume line in %s at line %d",
+                            resume_path,
+                            line_num,
+                        )
+                        return
+                    raise ValueError(
+                        f"Invalid JSON in resume file {resume_path} at line "
+                        f"{line_num}: {exc.msg}"
+                    ) from exc
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        f"Resume file {resume_path} line {line_num} must contain an "
+                        f"object, got {type(item).__name__}"
+                    )
+                yield line_num, item
+            line = next_line
 
-    In strict mode the original exception is propagated immediately. In
-    tolerant mode failed batches are skipped and returned as compact audit
-    records so callers can persist and summarize them.
-    """
-    if batch_size <= 0:
-        raise ValueError(f"batch_size must be positive, got {batch_size}")
 
-    failures: list[dict[str, Any]] = []
-    for batch_index, start in enumerate(range(0, len(items), batch_size)):
-        batch = items[start : start + batch_size]
-        try:
-            process_batch(batch)
-        except Exception as exc:
-            if fail_fast:
-                raise
-            failures.append(
-                {
-                    "error_category": "batch_processing",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "batch_index": batch_index,
-                    "batch_size": len(batch),
-                    "items": [_batch_item_identity(item) for item in batch],
-                }
-            )
-        finally:
-            if on_batch_complete is not None:
-                on_batch_complete()
-    return failures
+def save_failed_items(
+    output_file: str | Path,
+    failed_items: list[dict[str, Any]],
+    *,
+    run_id: str | None = None,
+) -> None:
+    """Append stable, run-scoped failure audit records next to an output file."""
+    if not failed_items:
+        return
+
+    output_path = Path(output_file)
+    failed_path = output_path.with_name(f"{output_path.stem}_failed.jsonl")
+    failed_path.parent.mkdir(parents=True, exist_ok=True)
+    current_run_id = run_id or uuid.uuid4().hex
+
+    with failed_path.open("a", encoding="utf-8") as handle:
+        for entry in failed_items:
+            source = entry.get("item") if isinstance(entry.get("item"), dict) else entry
+            identity = {
+                "doc_id": source.get("doc_id"),
+                "error_category": entry.get("error_category")
+                or entry.get("error_type")
+                or "unknown",
+                "batch_index": entry.get("batch_index"),
+                "items": entry.get("items"),
+            }
+            failure_id = hashlib.sha256(
+                json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:24]
+
+            record = dict(entry)
+            record.setdefault("run_id", current_run_id)
+            record.setdefault("failure_id", failure_id)
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    logger.info("Failed items saved to: %s", failed_path)
+
+
+# ---------------------------------------------------------------------------
+# Resume state and request expansion
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -129,106 +172,12 @@ class ResumeState:
         return sum(self.completed_counts.values())
 
 
-def is_local_endpoint(base_url: str) -> bool:
-    """Return whether an API URL targets the local machine."""
-    hostname = urlparse(base_url).hostname
-    return hostname in {"localhost", "127.0.0.1", "::1"} or bool(
-        hostname and hostname.endswith(".localhost")
-    )
-
-
-def require_document_id(item: dict[str, Any], index: int | None = None) -> str:
-    """Return the dataset-provided ``doc_id`` or raise a preparation error.
-
-    Document identity is assigned once by the benchmark preparation scripts
-    and persisted in JSONL. Inference must never synthesize a replacement ID,
-    because doing so makes resume state depend on input ordering or prompts.
-    """
-    document_id = item.get("doc_id")
-    if document_id is None or not str(document_id).strip():
-        location = f" at index {index}" if index is not None else ""
-        raise ValueError(
-            f"Input record{location} is missing required 'doc_id'. "
-            "Regenerate the evaluation dataset with the data preparation script."
-        )
-    return str(document_id)
-
-
-def validate_document_ids(items: list[dict[str, Any]]) -> None:
-    """Validate that every prepared input record has a unique ``doc_id``."""
-    first_indices: dict[str, int] = {}
-    for index, item in enumerate(items):
-        if not isinstance(item, dict):
-            raise ValueError(
-                f"Input record at index {index} must be an object, "
-                f"got {type(item).__name__}"
-            )
-        document_id = require_document_id(item, index)
-        previous = first_indices.setdefault(document_id, index)
-        if previous != index:
-            raise ValueError(
-                f"Duplicate doc_id {document_id!r} at indices {previous} and {index}. "
-                "Each prepared question must have a unique ID."
-            )
-
-
-def _derive_request_seed(
-    base_seed: int, item: dict[str, Any], generation_ordinal: int
-) -> int:
-    """Derive a stable seed for one repeated generation request."""
-    if type(base_seed) is not int or base_seed < 0:
-        raise ValueError(f"base_seed must be non-negative, got {base_seed}")
-    if generation_ordinal < 0:
-        raise ValueError("generation_ordinal must be non-negative")
-    document_id = str(item.get("doc_id") or "")
-    prompt = str(item.get("prompt") or item.get("question") or "")
-    payload = f"{base_seed}\0{document_id}\0{prompt}\0{generation_ordinal}".encode(
-        "utf-8", errors="replace"
-    )
-    # Keep the value within the range accepted by common vLLM backends.
-    return int.from_bytes(hashlib.sha256(payload).digest()[:4], "big") & 0x7FFFFFFF
-
-
 def get_request_seed(item: dict[str, Any]) -> int:
-    """Consume the transient seed attached during request expansion."""
+    """Return the validated transient seed attached during request expansion."""
     value = item.get("_request_seed")
     if type(value) is not int or value < 0:
         raise ValueError("Expanded inference item is missing a valid request seed")
     return value
-
-
-def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
-    """Load a line-delimited JSON file, skipping blank lines.
-
-    Args:
-        path: Input JSONL file path.
-
-    Returns:
-        Parsed items, one per non-blank line.
-
-    Raises:
-        FileNotFoundError: If the input file does not exist.
-        json.JSONDecodeError: If an input line is not valid JSON.
-        ValueError: If a line contains valid JSON but not an object.
-    """
-    records: list[dict[str, Any]] = []
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line_num, line in enumerate(f, 1):
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                if not isinstance(record, dict):
-                    raise ValueError(
-                        f"JSONL line {line_num} must contain an object, "
-                        f"got {type(record).__name__}"
-                    )
-                records.append(record)
-    except (FileNotFoundError, json.JSONDecodeError):
-        # Add context at the CLI boundary; library callers receive the native
-        # exception and can classify it without duplicate log records.
-        raise
-    return records
 
 
 def load_resume_state(
@@ -259,10 +208,7 @@ def load_resume_state(
                     f"Resume file {output_path} line {line_num} uses unsupported "
                     f"internal fields: {internal_fields}"
                 )
-
-            if not _is_completed_resume_record(
-                item, response_key, output_path, line_num
-            ):
+            if not _is_completed_record(item, response_key, output_path, line_num):
                 continue
 
             document_id = item.get("doc_id")
@@ -286,13 +232,11 @@ def load_resume_state(
                         f"prompts for doc_id={document_key!r}"
                     )
     except OSError as exc:
-        # Continuing with a partially-read state would re-generate completed
-        # samples and append duplicate rows — fail loudly instead.
         raise OSError(f"Failed to read resume state from {output_file}: {exc}") from exc
     return state
 
 
-def _is_completed_resume_record(
+def _is_completed_record(
     item: dict[str, Any], response_key: str, output_path: Path, line_num: int
 ) -> bool:
     """Validate the one-result-per-row protocol and report completion."""
@@ -319,64 +263,6 @@ def _is_completed_resume_record(
     return True
 
 
-def iter_resume_records(
-    path: str | Path,
-    *,
-    repair_truncated_last_line: bool = False,
-) -> Iterator[tuple[int, dict[str, Any]]]:
-    """Yield validated resume records with their source line numbers.
-
-    Repair mode only ignores an invalid final non-empty line when the file ends
-    without a newline, which is the shape produced by an interrupted append.
-    """
-    resume_path = Path(path)
-    pending: tuple[int, str] | None = None
-    with resume_path.open(encoding="utf-8") as handle:
-        for line_num, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
-            if pending is not None:
-                yield _parse_resume_record(resume_path, *pending)
-            pending = (line_num, line)
-
-    if pending is None:
-        return
-
-    line_num, line = pending
-    try:
-        yield _parse_resume_record(resume_path, line_num, line)
-    except ValueError as exc:
-        is_unterminated = not line.endswith(("\n", "\r"))
-        if (
-            not repair_truncated_last_line
-            or not is_unterminated
-            or not isinstance(exc.__cause__, json.JSONDecodeError)
-        ):
-            raise
-        logger.warning(
-            "Ignoring truncated final resume line in %s at line %d",
-            resume_path,
-            line_num,
-        )
-
-
-def _parse_resume_record(
-    path: Path, line_num: int, line: str
-) -> tuple[int, dict[str, Any]]:
-    try:
-        item = json.loads(line)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Invalid JSON in resume file {path} at line {line_num}: {exc.msg}"
-        ) from exc
-    if not isinstance(item, dict):
-        raise ValueError(
-            f"Resume file {path} line {line_num} must contain an object, "
-            f"got {type(item).__name__}"
-        )
-    return line_num, item
-
-
 def expand_data_with_resume(
     raw_data: list[dict[str, Any]],
     resume_state: ResumeState,
@@ -386,15 +272,38 @@ def expand_data_with_resume(
     base_seed: int,
     prompt_resolver: Callable[[dict[str, Any]], str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Copy each input once per remaining generation request."""
+    """Copy each input once per unfinished generation request."""
     if not input_key:
         raise ValueError("input_key must be non-empty")
     if n_samples <= 0:
         raise ValueError(f"n_samples must be positive, got {n_samples}")
+    if type(base_seed) is not int or base_seed < 0:
+        raise ValueError(f"base_seed must be non-negative, got {base_seed}")
 
-    validate_document_ids(raw_data)
     expanded: list[dict[str, Any]] = []
+    first_indices: dict[str, int] = {}
     for index, source in enumerate(raw_data):
+        if not isinstance(source, dict):
+            raise ValueError(
+                f"Input record at index {index} must be an object, "
+                f"got {type(source).__name__}"
+            )
+        document_id = source.get("doc_id")
+        if document_id is None or not str(document_id).strip():
+            raise ValueError(
+                f"Input record at index {index} is missing required 'doc_id'. "
+                "Regenerate the evaluation dataset with the data preparation script."
+            )
+        document_key = str(document_id)
+        previous_index = first_indices.setdefault(document_key, index)
+        if previous_index != index:
+            raise ValueError(
+                f"Duplicate doc_id {document_key!r} at indices {previous_index} and "
+                f"{index}. Each prepared question must have a unique ID."
+            )
+
+    for index, source in enumerate(raw_data):
+        document_key = str(source["doc_id"])
         if prompt_resolver is None:
             prompt_value = source.get(input_key) or source.get("prompt")
             prompt = str(prompt_value) if prompt_value is not None else ""
@@ -406,36 +315,97 @@ def expand_data_with_resume(
                 f"{input_key!r} or 'prompt'"
             )
 
-        document_id = str(source["doc_id"])
-        recorded_prompt = resume_state.prompts.get(document_id)
+        recorded_prompt = resume_state.prompts.get(document_key)
         if recorded_prompt is not None and recorded_prompt != prompt:
             raise ValueError(
                 f"Input record at index {index} changed prompt for doc_id="
-                f"{document_id!r}; use a new output file"
+                f"{document_key!r}; use a new output file"
             )
-        completed = resume_state.completed_counts.get(document_id, 0)
+        completed = resume_state.completed_counts.get(document_key, 0)
         if completed > n_samples:
             raise ValueError(
-                f"Resume output contains {completed} rows for doc_id={document_id!r}, "
+                f"Resume output contains {completed} rows for doc_id={document_key!r}, "
                 f"exceeding requested n_samples={n_samples}"
             )
+
+        seed_prompt = str(source.get("prompt") or source.get("question") or "")
         for generation_ordinal in range(completed, n_samples):
+            seed_payload = (
+                f"{base_seed}\0{document_key}\0{seed_prompt}\0{generation_ordinal}"
+            ).encode("utf-8", errors="replace")
             item = copy.deepcopy(source)
-            item["_request_seed"] = _derive_request_seed(
-                base_seed, item, generation_ordinal
+            item["_request_seed"] = (
+                int.from_bytes(hashlib.sha256(seed_payload).digest()[:4], "big")
+                & 0x7FFFFFFF
             )
             item["expected_samples"] = n_samples
             expanded.append(item)
     return expanded
 
 
-def build_vllm_llm_kwargs(args: Any) -> dict[str, Any]:
-    """Assemble the vLLM ``LLM(**kwargs)`` constructor arguments.
+# ---------------------------------------------------------------------------
+# Backend request and configuration helpers
+# ---------------------------------------------------------------------------
 
-    Used by the offline runner. Optional fields
-    (``max_num_batched_tokens``, ``quantization``, ``revision``) are only
-    included when explicitly set.
-    """
+
+def ensure_raw_prompt(prompt: str) -> None:
+    """Reject prompts that already contain a serialized chat template."""
+    if is_chat_template_applied(prompt):
+        raise ValueError(
+            "Query already contains a chat_template; provide the raw prompt because "
+            "the inference backend applies its template automatically"
+        )
+
+
+def process_batches_with_policy(
+    items: Sequence[dict[str, Any]],
+    batch_size: int,
+    process_batch: Callable[[Sequence[dict[str, Any]]], None],
+    *,
+    fail_fast: bool = True,
+    on_batch_complete: Callable[[], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Process batches strictly or return compact audit records for failures."""
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+    failures: list[dict[str, Any]] = []
+    for batch_index, start in enumerate(range(0, len(items), batch_size)):
+        batch = items[start : start + batch_size]
+        try:
+            process_batch(batch)
+        except Exception as exc:
+            if fail_fast:
+                raise
+            failures.append(
+                {
+                    "error_category": "batch_processing",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "batch_index": batch_index,
+                    "batch_size": len(batch),
+                    "items": [
+                        {"doc_id": item["doc_id"]} if "doc_id" in item else {}
+                        for item in batch
+                    ],
+                }
+            )
+        finally:
+            if on_batch_complete is not None:
+                on_batch_complete()
+    return failures
+
+
+def is_local_endpoint(base_url: str) -> bool:
+    """Return whether an API URL targets the local machine."""
+    hostname = urlparse(base_url).hostname
+    return hostname in {"localhost", "127.0.0.1", "::1"} or bool(
+        hostname and hostname.endswith(".localhost")
+    )
+
+
+def build_vllm_llm_kwargs(args: Any) -> dict[str, Any]:
+    """Build vLLM constructor arguments, omitting unset optional fields."""
     llm_kwargs: dict[str, Any] = {
         "model": args.model_name_or_path,
         "tensor_parallel_size": args.tensor_parallel_size,
@@ -464,12 +434,7 @@ def build_vllm_llm_kwargs(args: Any) -> dict[str, Any]:
 def redact_config_for_logging(
     payload: dict[str, Any], *, replacement: str = "***"
 ) -> dict[str, Any]:
-    """Return a copy of a config payload with credential-like values redacted.
-
-    Configurations are commonly serialized with ``dataclasses.asdict`` before
-    logging. Keep the redaction recursive so nested request/config dictionaries
-    cannot accidentally reintroduce credentials into run logs.
-    """
+    """Recursively redact credential-like values from a configuration copy."""
     sensitive_fragments = (
         "api_key",
         "api-token",
@@ -496,59 +461,5 @@ def redact_config_for_logging(
 
 
 def is_explicit_tool_choice(tool_choice: str | None) -> bool:
-    """Return whether ``tool_choice`` should be sent to the API.
-
-    The CLI default ``"none"`` means "do not enable tools" for OpenAI-compatible
-    backends.  Omitting the field is more compatible than sending
-    ``tool_choice="none"`` to servers that do not implement tool calling.
-    """
+    """Return whether ``tool_choice`` should be sent to an API backend."""
     return bool(tool_choice and tool_choice.strip().lower() != "none")
-
-
-def save_failed_items(
-    output_file: str | Path,
-    failed_items: list[dict[str, Any]],
-    *,
-    run_id: str | None = None,
-) -> None:
-    """Append failed-item audit records next to the output file.
-
-    Each invocation gets a run ID. A stable failure ID is derived from sample
-    identity and error category, while variable text remains in the audit
-    payload. Records are intentionally not deduplicated: repeated failures
-    across resume runs are meaningful history and appending stays O(new rows).
-
-    Args:
-        output_file: The run's output file (derives the failed-file path).
-        failed_items: Records describing each failure (item + error).
-    """
-    if not failed_items:
-        return
-    failed_file = os.path.splitext(str(output_file))[0] + "_failed.jsonl"
-    current_run_id = run_id or uuid.uuid4().hex
-    failed_path = Path(failed_file)
-    failed_path.parent.mkdir(parents=True, exist_ok=True)
-    with failed_path.open("a", encoding="utf-8") as handle:
-        for entry in failed_items:
-            record = dict(entry)
-            record.setdefault("run_id", current_run_id)
-            record.setdefault("failure_id", _failure_id(entry))
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    logger.info("Failed items saved to: %s", failed_file)
-
-
-def _failure_id(entry: dict[str, Any]) -> str:
-    """Build a stable failure identity without volatile exception text."""
-    source = entry.get("item") if isinstance(entry.get("item"), dict) else entry
-    identity = {
-        "doc_id": source.get("doc_id"),
-        "error_category": entry.get("error_category")
-        or entry.get("error_type")
-        or "unknown",
-        "batch_index": entry.get("batch_index"),
-        "items": entry.get("items"),
-    }
-    digest = hashlib.sha256(
-        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    return digest[:24]

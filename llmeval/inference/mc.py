@@ -7,7 +7,7 @@ documentation style so the two can be reviewed side by side with a file diff:
 - main() (HfArgumentParser) ~  main()
 
 Shared utilities (ClientError, retry classification, backoff) live in
-llmeval/utils/retry.py; data-loading / resume helpers live in
+llmeval/utils/retry.py; shared JSONL and resume helpers live in
 llmeval/inference/common.py; the configuration dataclass lives in
 llmeval/utils/config.py (MCInferConfig).
 MC-specific pieces (kept deliberately): FewShotFormatter, answer-token
