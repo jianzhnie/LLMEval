@@ -6,7 +6,9 @@ import pytest
 
 from llmeval.tasks.postprocess import (
     FilterRegistry,
+    build_filter_artifacts,
     normalize_single_generation_samples,
+    resolve_max_workers,
     strip_reasoning_wrappers,
 )
 
@@ -61,3 +63,17 @@ def test_registered_pipeline_records_each_filter_step() -> None:
     assert [step["name"] for step in trace["filters"]] == ["strip", "upper"]
     assert trace["filters"][0]["input"] == " a "
     assert trace["filters"][1]["output"] == "A"
+
+
+def test_shared_task_helpers_preserve_limits_and_filter_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("llmeval.tasks.postprocess.os.cpu_count", lambda: 8)
+
+    assert resolve_max_workers(total=20, requested=12) == 7
+    assert resolve_max_workers(total=3, requested=12) == 3
+    assert build_filter_artifacts("raw", "answer", {"pipeline": "test"}) == {
+        "raw_gen": "raw",
+        "filtered_gen": "answer",
+        "filter_trace": {"pipeline": "test"},
+    }

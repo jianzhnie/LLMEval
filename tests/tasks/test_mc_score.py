@@ -1,57 +1,83 @@
-"""Tests for llmeval.tasks.mc_eval (mc_score + mc_infer)."""
+"""Tests for llmeval.tasks.mc_eval.mc_score.
+
+Contains golden metric parity checks against the local lm-evaluation-harness,
+responsiveness checks for the redistributed scorer tests (moved from the old
+mega-file ``tests/test_mc_eval.py``).
+"""
 
 from __future__ import annotations
 
-import importlib.machinery
-import importlib.util
 import json
-import sys
 import tempfile
-import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
+from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
 
-# ── Mock heavy dependencies ──
-# Only stub modules that are genuinely absent — a bare ModuleType stub has
-# __spec__ = None, which crashes importlib.util.find_spec (called inside the
-# transformers import chain) with "ValueError: <pkg>.__spec__ is None".
-def _make_stub(name: str) -> types.ModuleType:
-    mod = types.ModuleType(name)
-    mod.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
-    return mod
+task_module = pytest.importorskip("lm_eval.api.task")
+ConfigurableTask = task_module.ConfigurableTask
 
 
-for mod_name in ("openai", "httpx"):
-    if mod_name not in sys.modules and not importlib.util.find_spec(mod_name):
-        sys.modules[mod_name] = _make_stub(mod_name)
+class _HarnessMultipleChoiceTask:
+    OUTPUT_TYPE = "multiple_choice"
+    config = SimpleNamespace(process_results=None)
+    _metric_fn_list: ClassVar[dict[str, None]] = {
+        "acc": None,
+        "acc_norm": None,
+        "acc_bytes": None,
+    }
+    multiple_input = False
+    multiple_target = False
 
-# Provide stubs for openai exceptions used at module level in mc_infer
-# (real openai already has them; only the stub needs patching)
-_openai_mod = sys.modules.get("openai")
-if _openai_mod is not None:
-    for _exc in ("APIConnectionError", "APIError", "RateLimitError"):
-        if not hasattr(_openai_mod, _exc):
-            setattr(_openai_mod, _exc, type(_exc, (Exception,), {}))
+    @staticmethod
+    def doc_to_choice(doc: dict[str, object]) -> list[str]:
+        choices = doc["choices"]
+        assert isinstance(choices, list)
+        return [str(choice) for choice in choices]
 
-# mc_infer imports HfArgumentParser/tqdm at module level; stub only if absent.
-# A partial transformers stub would pollute sys.modules for other test modules
-# that need the real AutoTokenizer.
-if "transformers" not in sys.modules and not importlib.util.find_spec("transformers"):
-    _tf = types.ModuleType("transformers")
-    _tf.HfArgumentParser = MagicMock
-    sys.modules["transformers"] = _tf
+    @staticmethod
+    def doc_to_target(doc: dict[str, object]) -> int:
+        return int(doc["gold"])
 
-if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
-    _tqdm = types.ModuleType("tqdm")
-    _tqdm.tqdm = MagicMock
-    sys.modules["tqdm"] = _tqdm
+
+@pytest.mark.parametrize(
+    ("choices", "logprobs", "gold"),
+    [
+        (["A", "B", "C"], [-2.0, -0.5, -3.0], 1),
+        (["AB", "C"], [-1.0, -0.7], 0),
+        (["你你", "abc"], [-1.0, -0.8], 0),
+    ],
+)
+def test_mc_metrics_match_local_harness(
+    choices: list[str], logprobs: list[float], gold: int
+) -> None:
+    document: dict[str, object] = {"choices": choices, "gold": gold}
+    harness = ConfigurableTask.process_results(
+        _HarnessMultipleChoiceTask(),
+        document,
+        [(logprob, False) for logprob in logprobs],
+    )
+    llmeval = score_loglikelihood_item(
+        {
+            "gold": gold,
+            "logprobs": logprobs,
+            "choice_logprobs": [[logprob] for logprob in logprobs],
+            "choice_tokens": choices,
+            "choice_char_count": [len(choice) for choice in choices],
+            "choice_byte_count": [len(choice.encode("utf-8")) for choice in choices],
+        }
+    )
+
+    assert float(llmeval["correct"]) == harness["acc"]
+    assert float(llmeval["correct_norm"]) == harness["acc_norm"]
+    assert float(llmeval["correct_bytes"]) == harness["acc_bytes"]
 
 
 # ===========================================================================
-# mc_score tests
+# Scorer behavior tests (redistributed from tests/test_mc_eval.py)
 # ===========================================================================
 
 
@@ -262,130 +288,6 @@ class TestScoreGenerate:
         assert summary["total"] == 2
 
 
-# ===========================================================================
-# mc_infer tests
-# ===========================================================================
-
-
-class TestMCInferConfig:
-    """Test MCInferConfig defaults and API key resolution."""
-
-    def test_defaults(self) -> None:
-        from llmeval.inference.mc import MCInferConfig
-
-        c = MCInferConfig()
-        assert c.mode == "loglikelihood"
-        assert c.max_workers == 32
-        assert c.temperature == 0.0
-        assert c.n_shot == 0
-
-    def test_api_key_default(self) -> None:
-        from llmeval.inference.mc import MCInferConfig
-
-        with patch.dict("os.environ", {}, clear=True):
-            c = MCInferConfig()
-            assert c.api_key == "EMPTY"
-
-    def test_api_key_from_env(self) -> None:
-        from llmeval.inference.mc import MCInferConfig
-
-        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
-            c = MCInferConfig()
-            assert c.api_key == "sk-test"
-
-
-class TestFewShotFormatter:
-    """Test few-shot example loading and dedup."""
-
-    def _make_examples(self, count: int) -> str:
-        """Create a temp JSONL with `count` examples."""
-        items = [
-            {
-                "prompt": f"Q{i}: test?\nA. a\nB. b\nC. c\nD. d\nAnswer:",
-                "answer": "B",
-                "choices": ["a", "b", "c", "d"],
-                "gold": 1,
-            }
-            for i in range(count)
-        ]
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-            for it in items:
-                f.write(json.dumps(it, ensure_ascii=False) + "\n")
-            return f.name
-
-    def test_zero_shot(self) -> None:
-        from llmeval.inference.mc import FewShotFormatter
-
-        fmt = FewShotFormatter(n_shot=0)
-        assert fmt.get_prefix("any prompt") == ""
-
-    def test_load_and_prefix(self) -> None:
-        from llmeval.inference.mc import FewShotFormatter
-
-        tmp = self._make_examples(10)
-        try:
-            fmt = FewShotFormatter(n_shot=3, few_shot_file=tmp, seed=42)
-            fmt.load()
-            prefix = fmt.get_prefix("some other prompt")
-            # Should contain 3 examples separated by \n\n
-            assert prefix.count("\n\n") >= 3
-            assert "Q" in prefix
-            assert "Answer: B" in prefix
-        finally:
-            Path(tmp).unlink(missing_ok=True)
-
-    def test_dedup_excludes_test_prompt(self) -> None:
-        from llmeval.inference.mc import FewShotFormatter
-
-        tmp = self._make_examples(10)
-        try:
-            fmt = FewShotFormatter(n_shot=3, few_shot_file=tmp, seed=42)
-            fmt.load()
-            # Get the raw prompt from one of the few-shot pool
-            test_prompt = fmt._few_shot_pool[0]["prompt"]
-            prefix_with_dedup = fmt.get_prefix(test_prompt)
-            prefix_without = fmt.get_prefix("unrelated prompt")
-            # Dedup should produce different prefixes (one fewer example)
-            # Both should have content
-            assert len(prefix_with_dedup) > 0
-            assert len(prefix_without) > 0
-            # Dedup removes the matching example, so non-dedup prefix may differ
-            # The key invariant: formatted demo starts with raw_prompt + " " + answer
-            assert any(test_prompt in d for d in fmt._all_formatted)
-        finally:
-            Path(tmp).unlink(missing_ok=True)
-
-    def test_insufficient_examples(self) -> None:
-        from llmeval.inference.mc import FewShotFormatter
-
-        tmp = self._make_examples(3)
-        try:
-            fmt = FewShotFormatter(n_shot=10, few_shot_file=tmp)
-            with pytest.raises(ValueError, match="Few-shot pool is too small"):
-                fmt.load()
-        finally:
-            Path(tmp).unlink(missing_ok=True)
-
-    def test_load_failure_is_fatal(self, tmp_path: Path) -> None:
-        from llmeval.inference.mc import FewShotFormatter
-
-        missing = tmp_path / "missing.jsonl"
-        fmt = FewShotFormatter(n_shot=1, few_shot_file=str(missing))
-
-        with pytest.raises(RuntimeError, match="Failed to load few-shot data"):
-            fmt.load()
-
-    def test_per_document_dedup_shortage_is_fatal(self) -> None:
-        from llmeval.inference.mc import FewShotFormatter
-
-        fmt = FewShotFormatter(n_shot=1)
-        fmt._few_shot_pool = [{"doc_id": "same", "prompt": "question"}]
-        fmt._all_formatted = ["question A"]
-
-        with pytest.raises(ValueError, match="insufficient after excluding"):
-            fmt.get_prefix("question", "same")
-
-
 class TestScoreLoglikelihoodItem:
     """Per-item loglikelihood scoring: argmax, gold parsing, guards."""
 
@@ -432,347 +334,9 @@ class TestScoreLoglikelihoodItem:
         assert rec["correct"] is True
 
 
-# ===========================================================================
-# mc_infer runner/client tests (offline, mocked API)
-# ===========================================================================
-
-
-def _make_api_error(message: str = "", status_code: int | None = None) -> Exception:
-    """Build an APIError instance compatible with the (possibly stubbed) openai module."""
-    cls = sys.modules["openai"].APIError
-    err = cls.__new__(cls)
-    Exception.__init__(err, message)
-    err.message = message
-    err.status_code = status_code
-    return err
-
-
-def _fake_top_probs_resp(top_probs: dict[str, float]) -> MagicMock:
-    """Completions response with top_logprobs for the first generated token.
-
-    Matches the new echo=False + logprobs=20 + max_tokens=1 API shape
-    that :meth:`MCLoglikelihoodClient.get_choices_logprobs` now uses.
-    """
-    resp = MagicMock()
-    choice = MagicMock()
-    choice.logprobs.top_logprobs = [top_probs]
-    resp.choices = [choice]
-    return resp
-
-
-def _make_ll_client(max_retries: int = 0):
-    """MCLoglikelihoodClient bypassing __init__ (works with stubbed openai)."""
-    from llmeval.inference.mc import MCLoglikelihoodClient
-
-    client = MCLoglikelihoodClient.__new__(MCLoglikelihoodClient)
-    client.model_name = "m"
-    client.timeout = 5
-    client.max_retries = max_retries
-    client.base_url = "http://test/v1"
-    client.seed = 0
-    client.client = MagicMock()
-    return client
-
-
-def _make_mc_runner(tmp_path: Path, mode: str = "loglikelihood", max_retries: int = 0):
-    """MCRunner bypassing __init__ (no client construction)."""
-    import threading as _threading
-
-    from llmeval.inference.mc import MCRunner
-    from llmeval.utils.config import MCInferConfig
-
-    runner = MCRunner.__new__(MCRunner)
-    runner.config = MCInferConfig(
-        input_file=str(tmp_path / "in.jsonl"),
-        output_file=str(tmp_path / "out.jsonl"),
-        mode=mode,
-        max_retries=max_retries,
-        max_workers=1,
-    )
-    runner.client = None
-    runner.system_prompt = None
-    runner._few_shot_fmt = None
-    runner._file_lock = _threading.Lock()
-    runner._stats_lock = _threading.Lock()
-    runner._stats = {
-        "processed": 0,
-        "failed": 0,
-        "correct": 0,
-        "skipped": 0,
-        "continuation_fallback": 0,
-    }
-    return runner
-
-
-class TestMCLoglikelihoodClient:
-    def test_single_request_with_top_logprobs(self) -> None:
-        """Prompt is sent once; per-choice logprobs extracted from top_logprobs."""
-        client = _make_ll_client()
-        client.client.completions.create.return_value = _fake_top_probs_resp(
-            {" A": -3.0, " B": -0.5, " C": -4.2, " D": -5.0}
-        )
-        result = client.get_choices_logprobs("prompt", ["A", "B"])
-        assert result == [-3.0, -0.5]
-        # Single prompt, not a list — echo=False sends one request.
-        client.client.completions.create.assert_called_once()
-        call_kwargs = client.client.completions.create.call_args.kwargs
-        assert call_kwargs["prompt"] == "prompt"
-        assert call_kwargs["echo"] is False
-        assert call_kwargs["logprobs"] == 20
-        assert call_kwargs["max_tokens"] == 1
-
-    def test_choice_not_in_top_returns_neg_inf(self) -> None:
-        """A target letter absent from top_logprobs gets float('-inf')."""
-        client = _make_ll_client()
-        client.client.completions.create.return_value = _fake_top_probs_resp(
-            {" B": -0.5, " C": -4.2}
-        )
-        result = client.get_choices_logprobs("p", ["A", "B", "C"])
-        assert result == [float("-inf"), -0.5, -4.2]
-
-    def test_token_form_variants_are_checked(self) -> None:
-        """Letters are looked up as 'X', ' X', 'x', ' x' to handle tokenizer variance."""
-        client = _make_ll_client()
-        # Tokenizer uses lowercase form for some models.
-        client.client.completions.create.return_value = _fake_top_probs_resp(
-            {"b": -1.2, " C": -3.0}
-        )
-        result = client.get_choices_logprobs("p", ["A", "B", "C"])
-        assert result == [float("-inf"), -1.2, -3.0]
-
-    def test_4xx_aborts_without_retry(self) -> None:
-        """Non-retryable 4xx errors propagate after the first request."""
-        from llmeval.utils.retry import ClientError
-
-        client = _make_ll_client(max_retries=3)
-        client.client.completions.create.side_effect = _make_api_error("bad", 400)
-        with pytest.raises(ClientError, match="status=400"):
-            client.get_choices_logprobs("p", ["a", "b"])
-        assert client.client.completions.create.call_count == 1
-
-    def test_programming_error_propagates(self) -> None:
-        client = _make_ll_client(max_retries=0)
-        client.client.completions.create.side_effect = RuntimeError("down")
-        with pytest.raises(RuntimeError, match="down"):
-            client.get_choices_logprobs("p", ["a"])
-
-    def test_empty_top_logprobs_returns_all_neg_inf(self) -> None:
-        """An empty top_logprobs dict yields -inf for every choice."""
-        client = _make_ll_client(max_retries=0)
-        client.client.completions.create.return_value = _fake_top_probs_resp({})
-        assert client.get_choices_logprobs("p", ["A", "B"]) == [
-            float("-inf"),
-            float("-inf"),
-        ]
-
-    def test_complete_continuation_uses_choice_offsets(self) -> None:
-        client = _make_ll_client()
-        response = MagicMock()
-        response.choices = []
-        for text, values in (("AB", [-1.0, -2.0]), ("C", [-0.5])):
-            choice = MagicMock()
-            choice.logprobs.text_offset = [0, *range(2, 2 + len(text))]
-            choice.logprobs.token_logprobs = [None, *values]
-            choice.logprobs.tokens = ["Q:", *text]
-            choice.logprobs.token_ids = None
-            response.choices.append(choice)
-        client.client.completions.create.return_value = response
-
-        from llmeval.inference.schema import LoglikelihoodRequest
-
-        result = client.score_continuations(LoglikelihoodRequest("Q:", ("AB", "C")))
-
-        assert result.exact is True
-        assert [list(c.token_logprobs) for c in result.choices] == [
-            [-1.0, -2.0],
-            [-0.5],
-        ]
-        kwargs = client.client.completions.create.call_args.kwargs
-        assert kwargs["prompt"] == ["Q:AB", "Q:C"]
-        assert kwargs["echo"] is True
-
-
-class TestContinuationScoring:
-    def test_acc_norm_uses_harness_character_counts(self, tmp_path: Path) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
-
-        items = [
-            {
-                "gold": 0,
-                "logprobs": [-1.0, -1.2],
-                "choice_logprobs": [[-1.0], [-0.3, -0.3, -0.3, -0.3]],
-                "choice_tokens": ["AB", "C"],
-                "choice_token_count": [1, 4],
-                "choice_char_count": [2, 1],
-                "choice_byte_count": [2, 1],
-            }
-        ]
-        cache = tmp_path / "continuation.jsonl"
-        assert score_loglikelihood(items, cache) == 1.0
-        summary = json.loads(cache.with_suffix(".summary.json").read_text())
-        assert summary["acc_norm"] == 1.0
-
-
-class TestProcessLoglikelihoodItem:
-    def test_all_neg_inf_raises(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path)
-        runner.client = MagicMock()
-        runner.client.get_choices_logprobs.return_value = [float("-inf")] * 2
-        item = {"prompt": "q", "choices": ["a", "b"], "gold": 1}
-        with pytest.raises(RuntimeError, match="failed for all choices"):
-            runner.process_loglikelihood_item(item)
-
-    def test_normal_pred_and_correct(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path)
-        runner.client = MagicMock()
-        runner.client.get_choices_logprobs.return_value = [-5.0, -1.0]
-        item = {"doc_id": "test:0", "prompt": "q", "choices": ["a", "b"], "gold": 1}
-        result = runner.process_loglikelihood_item(item)
-        assert result["pred"] == 1 and result["correct"] is True
-        assert result["choice_tokens"] == ["A", "B"]
-        runner.client.get_choices_logprobs.assert_called_once_with("q", ["A", "B"])
-
-    def test_full_choice_text_uses_answer_letters(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path)
-        runner.client = MagicMock()
-        runner.client.get_choices_logprobs.return_value = [-1.0, -5.0]
-        item = {
-            "doc_id": "test:0",
-            "prompt": "q",
-            "choices": ["Paris", "London"],
-            "gold": 0,
-        }
-        result = runner.process_loglikelihood_item(item)
-        assert result["choice_tokens"] == ["A", "B"]
-        assert result["correct"] is True
-
-    def test_no_choices_returns_none(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path)
-        assert runner.process_loglikelihood_item({"prompt": "q"}) is None
-
-
-class TestProcessGenerateItem:
-    def test_success(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path, mode="generate")
-        client = MagicMock()
-        choice = MagicMock()
-        choice.index = 0
-        choice.message.content = "ans"
-        client.chat.completions.create.return_value.choices = [choice]
-        result = runner.process_generate_item(
-            {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
-        )
-        assert result["gen"] == "ans"
-
-    def test_null_content_raises(self, tmp_path: Path) -> None:
-        """Null/empty generation must raise (not write an empty gen)."""
-        runner = _make_mc_runner(tmp_path, mode="generate")
-        client = MagicMock()
-        choice = MagicMock()
-        choice.index = 0
-        choice.message.content = None
-        client.chat.completions.create.return_value.choices = [choice]
-        with pytest.raises(RuntimeError, match="no usable text"):
-            runner.process_generate_item(
-                {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
-            )
-
-    def test_persistent_error_raises_after_retries(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path, mode="generate", max_retries=0)
-        client = MagicMock()
-        client.chat.completions.create.side_effect = RuntimeError("down")
-        with pytest.raises(RuntimeError):
-            runner.process_generate_item(
-                {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
-            )
-
-
-class TestMCRunnerEndToEnd:
-    """Full run() pipeline with a fake loglikelihood client."""
-
-    def _write_input(self, path: Path) -> None:
-        items = [
-            {
-                "doc_id": "test:0",
-                "prompt": "Q1?\nA. x\nB. y\nAnswer:",
-                "choices": ["x", "y"],
-                "gold": 1,
-            },
-            {
-                "doc_id": "test:1",
-                "prompt": "Q2?\nA. p\nB. q\nAnswer:",
-                "choices": ["p", "q"],
-                "gold": 0,
-            },
-        ]
-        with open(path, "w", encoding="utf-8") as f:
-            for it in items:
-                f.write(json.dumps(it, ensure_ascii=False) + "\n")
-
-    def test_run_and_resume(self, tmp_path: Path) -> None:
-        from llmeval.inference import mc as mc_infer
-        from llmeval.inference.mc import MCRunner
-        from llmeval.utils.config import MCInferConfig
-
-        class FakeLLClient:
-            def __init__(self, **kwargs):
-                pass
-
-            def get_choices_logprobs(self, _prompt, choice_texts):
-                return [-1.0 if i == 1 else -5.0 for i in range(len(choice_texts))]
-
-        inp = tmp_path / "in.jsonl"
-        out = tmp_path / "out.jsonl"
-        self._write_input(inp)
-        cfg = MCInferConfig(
-            input_file=str(inp),
-            output_file=str(out),
-            mode="loglikelihood",
-            max_workers=2,
-        )
-        with patch.object(mc_infer, "MCLoglikelihoodClient", FakeLLClient):
-            MCRunner(cfg).run()
-        rows = [json.loads(x) for x in out.read_text().splitlines()]
-        assert len(rows) == 2
-        by_pred = {r["prompt"][:2]: r for r in rows}
-        assert by_pred["Q1"]["pred"] == 1 and by_pred["Q1"]["correct"] is True
-        assert by_pred["Q2"]["pred"] == 1 and by_pred["Q2"]["correct"] is False
-
-        # Resume: second run must not duplicate
-        with patch.object(mc_infer, "MCLoglikelihoodClient", FakeLLClient):
-            MCRunner(cfg).run()
-        assert len(out.read_text().strip().split("\n")) == 2
-
-    def test_failed_items_dumped_not_written(self, tmp_path: Path) -> None:
-        from llmeval.inference import mc as mc_infer
-        from llmeval.inference.mc import MCRunner
-        from llmeval.utils.config import MCInferConfig
-
-        class FailLLClient:
-            def __init__(self, **kwargs):
-                pass
-
-            def get_choices_logprobs(self, _prompt, choice_texts):
-                return [float("-inf")] * len(choice_texts)
-
-        inp = tmp_path / "in.jsonl"
-        out = tmp_path / "out.jsonl"
-        self._write_input(inp)
-        cfg = MCInferConfig(
-            input_file=str(inp),
-            output_file=str(out),
-            mode="loglikelihood",
-            max_workers=2,
-        )
-        with patch.object(mc_infer, "MCLoglikelihoodClient", FailLLClient):
-            MCRunner(cfg).run()
-        assert not out.exists()  # nothing scored
-        failed = tmp_path / "out_failed.jsonl"
-        assert failed.exists()
-        assert len(failed.read_text().strip().split("\n")) == 2
-
-
 class TestMCScoreEdgeCases:
+    """Regression tests for scorer fixes."""
+
     def test_null_logprob_restores_missing_candidate(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
 
@@ -804,8 +368,6 @@ class TestMCScoreEdgeCases:
         assert result.sample_count == 1
         assert result.effective_sample_count == 0
         assert result.failed_count == 1
-
-    """Regression tests for scorer fixes (2026-07-30)."""
 
     def test_generate_empty_gold_and_pred_not_correct(self, tmp_path: Path) -> None:
         """Empty gold + unparseable (empty) pred must NOT count as correct."""
@@ -1055,15 +617,10 @@ def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None
     assert summary["aggregation"] == "majority_vote"
 
 
-# ===========================================================================
-# Sample-index protocol (P0-1)
-# ===========================================================================
-
-
 class TestMCRepeatedRows:
     """MC aggregation consumes repeated one-generation rows."""
 
-    def _row(self, gens: list[str], **extra) -> dict:
+    def _row(self, gens: list[str], **extra: object) -> dict:
         return {
             "doc_id": "mmlu:0",
             "prompt": "q",

@@ -9,6 +9,7 @@ import importlib.machinery
 import importlib.util
 import json
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -51,7 +52,7 @@ if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
     _tqdm.tqdm = MagicMock
     sys.modules["tqdm"] = _tqdm
 
-from llmeval.inference.mc import MCLoglikelihoodClient, MCRunner
+from llmeval.inference.mc import FewShotFormatter, MCLoglikelihoodClient, MCRunner
 from llmeval.inference.schema import (
     ChoiceLoglikelihood,
     LoglikelihoodRequest,
@@ -731,3 +732,325 @@ class TestMCRunnerEndToEnd:
             MCRunner(cfg).run()
 
         assert len(out.read_text().strip().split("\n")) == 2
+
+
+# ===========================================================================
+# Additional inference/client tests (redistributed from tests/test_mc_eval.py)
+# ===========================================================================
+
+
+class TestMCInferConfig:
+    """Test MCInferConfig defaults and API key resolution."""
+
+    def test_defaults(self) -> None:
+        c = MCInferConfig()
+        assert c.mode == "loglikelihood"
+        assert c.max_workers == 32
+        assert c.temperature == 0.0
+        assert c.n_shot == 0
+
+    def test_api_key_default(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            c = MCInferConfig()
+            assert c.api_key == "EMPTY"
+
+    def test_api_key_from_env(self) -> None:
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
+            c = MCInferConfig()
+            assert c.api_key == "sk-test"
+
+
+class TestFewShotFormatter:
+    """Test few-shot example loading and dedup."""
+
+    def _make_examples(self, count: int) -> str:
+        """Create a temp JSONL with `count` examples."""
+        items = [
+            {
+                "prompt": f"Q{i}: test?\nA. a\nB. b\nC. c\nD. d\nAnswer:",
+                "answer": "B",
+                "choices": ["a", "b", "c", "d"],
+                "gold": 1,
+            }
+            for i in range(count)
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for it in items:
+                f.write(json.dumps(it, ensure_ascii=False) + "\n")
+            return f.name
+
+    def test_zero_shot(self) -> None:
+        fmt = FewShotFormatter(n_shot=0)
+        assert fmt.get_prefix("any prompt") == ""
+
+    def test_load_and_prefix(self) -> None:
+        tmp = self._make_examples(10)
+        try:
+            fmt = FewShotFormatter(n_shot=3, few_shot_file=tmp, seed=42)
+            fmt.load()
+            prefix = fmt.get_prefix("some other prompt")
+            # Should contain 3 examples separated by \n\n
+            assert prefix.count("\n\n") >= 3
+            assert "Q" in prefix
+            assert "Answer: B" in prefix
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_dedup_excludes_test_prompt(self) -> None:
+        tmp = self._make_examples(10)
+        try:
+            fmt = FewShotFormatter(n_shot=3, few_shot_file=tmp, seed=42)
+            fmt.load()
+            # Get the raw prompt from one of the few-shot pool
+            test_prompt = fmt._few_shot_pool[0]["prompt"]
+            prefix_with_dedup = fmt.get_prefix(test_prompt)
+            prefix_without = fmt.get_prefix("unrelated prompt")
+            # Dedup should produce different prefixes (one fewer example)
+            # Both should have content
+            assert len(prefix_with_dedup) > 0
+            assert len(prefix_without) > 0
+            # The key invariant: formatted demo starts with raw_prompt + " " + answer
+            assert any(test_prompt in d for d in fmt._all_formatted)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_insufficient_examples(self) -> None:
+        tmp = self._make_examples(3)
+        try:
+            fmt = FewShotFormatter(n_shot=10, few_shot_file=tmp)
+            with pytest.raises(ValueError, match="Few-shot pool is too small"):
+                fmt.load()
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_load_failure_is_fatal(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing.jsonl"
+        fmt = FewShotFormatter(n_shot=1, few_shot_file=str(missing))
+
+        with pytest.raises(RuntimeError, match="Failed to load few-shot data"):
+            fmt.load()
+
+    def test_per_document_dedup_shortage_is_fatal(self) -> None:
+        fmt = FewShotFormatter(n_shot=1)
+        fmt._few_shot_pool = [{"doc_id": "same", "prompt": "question"}]
+        fmt._all_formatted = ["question A"]
+
+        with pytest.raises(ValueError, match="insufficient after excluding"):
+            fmt.get_prefix("question", "same")
+
+
+class TestContinuationScoring:
+    def test_acc_norm_uses_harness_character_counts(self, tmp_path: Path) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+
+        items = [
+            {
+                "gold": 0,
+                "logprobs": [-1.0, -1.2],
+                "choice_logprobs": [[-1.0], [-0.3, -0.3, -0.3, -0.3]],
+                "choice_tokens": ["AB", "C"],
+                "choice_token_count": [1, 4],
+                "choice_char_count": [2, 1],
+                "choice_byte_count": [2, 1],
+            }
+        ]
+        cache = tmp_path / "continuation.jsonl"
+        assert score_loglikelihood(items, cache) == 1.0
+        summary = json.loads(cache.with_suffix(".summary.json").read_text())
+        assert summary["acc_norm"] == 1.0
+
+
+# Extend existing classes with the remaining tests from tests/test_mc_eval.py.
+# Each method below was moved verbatim from that file, reusing the module-level
+# helpers already defined above.
+
+
+def _mc_client_choice_not_in_top_returns_neg_inf(self) -> None:
+    """A target letter absent from top_logprobs gets float('-inf')."""
+    client = _make_ll_client()
+    client.client.completions.create.return_value = _fake_top_probs_resp(
+        {" B": -0.5, " C": -4.2}
+    )
+    result = client.get_choices_logprobs("p", ["A", "B", "C"])
+    assert result == [float("-inf"), -0.5, -4.2]
+
+
+TestMCLoglikelihoodClient.test_choice_not_in_top_returns_neg_inf = (
+    _mc_client_choice_not_in_top_returns_neg_inf
+)
+
+
+def _mc_client_token_form_variants_are_checked(self) -> None:
+    """Letters are looked up as 'X', ' X', 'x', ' x' to handle tokenizer variance."""
+    client = _make_ll_client()
+    # Tokenizer uses lowercase form for some models.
+    client.client.completions.create.return_value = _fake_top_probs_resp(
+        {"b": -1.2, " C": -3.0}
+    )
+    result = client.get_choices_logprobs("p", ["A", "B", "C"])
+    assert result == [float("-inf"), -1.2, -3.0]
+
+
+TestMCLoglikelihoodClient.test_token_form_variants_are_checked = (
+    _mc_client_token_form_variants_are_checked
+)
+
+
+def _mc_client_4xx_aborts_without_retry(self) -> None:
+    """Non-retryable 4xx errors propagate after the first request."""
+    from llmeval.utils.retry import ClientError
+
+    client = _make_ll_client(max_retries=3)
+    client.client.completions.create.side_effect = _make_api_error("bad", 400)
+    with pytest.raises(ClientError, match="status=400"):
+        client.get_choices_logprobs("p", ["a", "b"])
+    assert client.client.completions.create.call_count == 1
+
+
+TestMCLoglikelihoodClient.test_4xx_aborts_without_retry = (
+    _mc_client_4xx_aborts_without_retry
+)
+
+
+def _mc_client_empty_top_logprobs_returns_all_neg_inf(self) -> None:
+    """An empty top_logprobs dict yields -inf for every choice."""
+    client = _make_ll_client(max_retries=0)
+    client.client.completions.create.return_value = _fake_top_probs_resp({})
+    assert client.get_choices_logprobs("p", ["A", "B"]) == [
+        float("-inf"),
+        float("-inf"),
+    ]
+
+
+TestMCLoglikelihoodClient.test_empty_top_logprobs_returns_all_neg_inf = (
+    _mc_client_empty_top_logprobs_returns_all_neg_inf
+)
+
+
+def _mc_client_complete_continuation_uses_choice_offsets(self) -> None:
+    client = _make_ll_client()
+    response = MagicMock()
+    response.choices = []
+    for text, values in (("AB", [-1.0, -2.0]), ("C", [-0.5])):
+        choice = MagicMock()
+        choice.logprobs.text_offset = [0, *range(2, 2 + len(text))]
+        choice.logprobs.token_logprobs = [None, *values]
+        choice.logprobs.tokens = ["Q:", *text]
+        choice.logprobs.token_ids = None
+        response.choices.append(choice)
+    client.client.completions.create.return_value = response
+
+    result = client.score_continuations(LoglikelihoodRequest("Q:", ("AB", "C")))
+
+    assert result.exact is True
+    assert [list(c.token_logprobs) for c in result.choices] == [
+        [-1.0, -2.0],
+        [-0.5],
+    ]
+    kwargs = client.client.completions.create.call_args.kwargs
+    assert kwargs["prompt"] == ["Q:AB", "Q:C"]
+    assert kwargs["echo"] is True
+
+
+TestMCLoglikelihoodClient.test_complete_continuation_uses_choice_offsets = (
+    _mc_client_complete_continuation_uses_choice_offsets
+)
+
+
+def _mc_process_ll_full_choice_text_uses_answer_letters(self, tmp_path: Path) -> None:
+    runner = _make_mc_runner(tmp_path)
+    runner.client = MagicMock()
+    runner.client.get_choices_logprobs.return_value = [-1.0, -5.0]
+    item = {
+        "doc_id": "test:0",
+        "prompt": "q",
+        "choices": ["Paris", "London"],
+        "gold": 0,
+    }
+    result = runner.process_loglikelihood_item(item)
+    assert result["choice_tokens"] == ["A", "B"]
+    assert result["correct"] is True
+
+
+TestProcessLoglikelihoodItem.test_full_choice_text_uses_answer_letters = (
+    _mc_process_ll_full_choice_text_uses_answer_letters
+)
+
+
+def _mc_process_ll_no_choices_returns_none(self, tmp_path: Path) -> None:
+    runner = _make_mc_runner(tmp_path)
+    assert runner.process_loglikelihood_item({"prompt": "q"}) is None
+
+
+TestProcessLoglikelihoodItem.test_no_choices_returns_none = (
+    _mc_process_ll_no_choices_returns_none
+)
+
+
+def _mc_process_gen_persistent_error_raises_after_retries(self, tmp_path: Path) -> None:
+    runner = _make_mc_runner(tmp_path, mode="generate", max_retries=0)
+    client = MagicMock()
+    client.chat.completions.create.side_effect = RuntimeError("down")
+    with pytest.raises(RuntimeError):
+        runner.process_generate_item(
+            {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+        )
+
+
+TestProcessGenerateItem.test_persistent_error_raises_after_retries = (
+    _mc_process_gen_persistent_error_raises_after_retries
+)
+
+
+def _mc_runner_failed_items_dumped_not_written(self, tmp_path: Path) -> None:
+    from llmeval.inference import mc as mc_infer
+
+    class FailLLClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_choices_logprobs(self, _prompt, choice_texts):
+            return [float("-inf")] * len(choice_texts)
+
+    inp = tmp_path / "in.jsonl"
+    out = tmp_path / "out.jsonl"
+    _write_input(inp)
+    cfg = MCInferConfig(
+        input_file=str(inp),
+        output_file=str(out),
+        mode="loglikelihood",
+        max_workers=2,
+    )
+    with patch.object(mc_infer, "MCLoglikelihoodClient", FailLLClient):
+        MCRunner(cfg).run()
+    assert not out.exists()  # nothing scored
+    failed = tmp_path / "out_failed.jsonl"
+    assert failed.exists()
+    assert len(failed.read_text().strip().split("\n")) == 2
+
+
+TestMCRunnerEndToEnd.test_failed_items_dumped_not_written = (
+    _mc_runner_failed_items_dumped_not_written
+)
+
+
+def test_few_shot_sampling_is_per_document_and_seeded(tmp_path: Path) -> None:
+    source = tmp_path / "dev.jsonl"
+    examples = [
+        {
+            "doc_id": f"dev:{index}",
+            "prompt": f"Question {index}?\nA. one\nB. two\nAnswer:",
+            "answer": "A",
+        }
+        for index in range(5)
+    ]
+    source.write_text(
+        "\n".join(json.dumps(example) for example in examples), encoding="utf-8"
+    )
+    formatter = FewShotFormatter(2, str(source), seed=9)
+    formatter.load()
+    first = formatter.get_prefix("test prompt", "test:0")
+    repeat = formatter.get_prefix("test prompt", "test:0")
+    other = formatter.get_prefix("test prompt", "test:1")
+    assert first == repeat
+    assert first != other

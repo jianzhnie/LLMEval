@@ -7,8 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from llmeval.inference.mc import FewShotFormatter
-from llmeval.tasks.postprocess import build_filter_artifacts, resolve_max_workers
 from llmeval.tasks.registry import (
     CodeTask,
     EvaluationContext,
@@ -21,20 +19,6 @@ from llmeval.tasks.registry import (
     metric_from_samples,
     persist_evaluation_result,
 )
-
-
-def test_shared_task_helpers_preserve_limits_and_filter_artifacts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("llmeval.tasks.postprocess.os.cpu_count", lambda: 8)
-
-    assert resolve_max_workers(total=20, requested=12) == 7
-    assert resolve_max_workers(total=3, requested=12) == 3
-    assert build_filter_artifacts("raw", "answer", {"pipeline": "test"}) == {
-        "raw_gen": "raw",
-        "filtered_gen": "answer",
-        "filter_trace": {"pipeline": "test"},
-    }
 
 
 def test_evaluation_result_default_serialization_is_compact(tmp_path: Path) -> None:
@@ -109,28 +93,6 @@ def test_bootstrap_is_deterministic() -> None:
         different.ci_low,
         different.ci_high,
     )
-
-
-def test_few_shot_sampling_is_per_document_and_seeded(tmp_path: Path) -> None:
-    source = tmp_path / "dev.jsonl"
-    examples = [
-        {
-            "doc_id": f"dev:{index}",
-            "prompt": f"Question {index}?\nA. one\nB. two\nAnswer:",
-            "answer": "A",
-        }
-        for index in range(5)
-    ]
-    source.write_text(
-        "\n".join(json.dumps(example) for example in examples), encoding="utf-8"
-    )
-    formatter = FewShotFormatter(2, str(source), seed=9)
-    formatter.load()
-    first = formatter.get_prefix("test prompt", "test:0")
-    repeat = formatter.get_prefix("test prompt", "test:0")
-    other = formatter.get_prefix("test prompt", "test:1")
-    assert first == repeat
-    assert first != other
 
 
 def test_registry_reports_registered_families() -> None:
