@@ -788,10 +788,6 @@ class EvalTaskArguments:
     response_key: str = field(
         default="gen", metadata={"help": "Key for model generated text."}
     )
-    output_schema: str = field(
-        default="compact",
-        metadata={"help": "Per-item result schema: compact or debug."},
-    )
     mc_aggregation: str = field(
         default="first",
         metadata={
@@ -897,11 +893,6 @@ class EvalTaskArguments:
             raise ValueError(
                 "mc_aggregation must be one of ('first', 'majority_vote', "
                 f"'any_correct', 'per_sample'), got: {self.mc_aggregation!r}"
-            )
-        if self.output_schema not in ("compact", "debug"):
-            raise ValueError(
-                "output_schema must be one of ('compact', 'debug'), "
-                f"got: {self.output_schema!r}"
             )
         if self.bootstrap_samples < 0:
             raise ValueError(

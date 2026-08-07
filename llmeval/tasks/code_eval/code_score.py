@@ -221,7 +221,7 @@ class CodeScoreResult:
     problems: int = 0
     """Number of distinct benchmark problems."""
 
-    per_item: list[dict[str, Any]] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(default_factory=list)
     """Per-item execution records (``task_id``, ``passed``, ``result``, ``stderr``)."""
 
 
@@ -722,7 +722,7 @@ def _score_code_task_result(
         total=total,
         correct=correct,
         problems=problems,
-        per_item=records,
+        records=records,
     )
     if persist_legacy:
         write_cache(result, cache_path)
@@ -825,7 +825,7 @@ def score_code_result(
     # _process_code_item / the failure builders), so classify from the stored
     # field rather than re-deriving it from the result text.
     statuses = [
-        record.get("evaluation_status", "completed") for record in result.per_item
+        record.get("evaluation_status", "completed") for record in result.records
     ]
     timeout_count = statuses.count("timeout")
     failed_count = statuses.count("failed")
@@ -838,7 +838,7 @@ def score_code_result(
     return ScorerResult(
         metrics=metrics,
         observations=observations,
-        per_item=result.per_item,
+        records=result.records,
         sample_count=result.total,
         effective_sample_count=max(
             result.total - failed_count - skipped_count - timeout_count, 0
@@ -881,13 +881,12 @@ def score_code(
 
 
 def write_cache(result: CodeScoreResult, cache_path: str | Path) -> None:
-    """Write per-item JSONL and a ``.summary.json`` metrics file.
+    """Write a ``.summary.json`` metrics file.
 
     Pattern matches :func:`llmeval.tasks.mc_eval.mc_score.write_cache`.
     """
     persist_results(
         cache_path,
-        result.per_item,
         {
             "pass_at_1": round(result.pass_at_1, 6),
             "pass_at_k": {

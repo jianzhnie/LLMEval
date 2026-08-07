@@ -337,12 +337,10 @@ def atomic_write_jsonl(path: str | Path, records: Iterable[dict[str, Any]]) -> N
 
 def persist_results(
     cache_path: str | Path,
-    records: Iterable[dict[str, Any]],
     summary: Any,
 ) -> Path:
-    """Persist per-item JSONL and its adjacent summary using atomic writes."""
+    """Persist an aggregate summary next to the configured result path."""
     destination = Path(cache_path)
-    atomic_write_jsonl(destination, records)
     summary_path = destination.with_suffix(".summary.json")
     atomic_write_json(summary_path, summary, indent=2)
     return summary_path

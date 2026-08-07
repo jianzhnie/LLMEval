@@ -120,8 +120,8 @@ class MCScoreResult:
         Number of items answered correctly under *acc_norm*.
     correct_bytes:
         Number of items answered correctly under *acc_bytes*.
-    per_item:
-        Per-item scoring records written to the JSONL result file.
+    records:
+        Internal scoring records used to build aggregate metrics.
     """
 
     acc: float = 0.0
@@ -132,7 +132,7 @@ class MCScoreResult:
     correct: int = 0
     correct_norm: int = 0
     correct_bytes: int = 0
-    per_item: list[dict[str, Any]] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ===========================================================================
@@ -590,7 +590,7 @@ def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
         correct=n_correct,
         correct_norm=n_correct_norm,
         correct_bytes=n_correct_bytes,
-        per_item=records,
+        records=records,
     )
 
 
@@ -600,7 +600,7 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         name: [] for name in ("acc", "acc_norm", "acc_bytes", "exact_match")
     }
 
-    for record in result.per_item:
+    for record in result.records:
         if record.get("evaluation_status", "completed") != "completed":
             continue
         if record.get("aggregation") == "per_sample" and isinstance(
@@ -618,8 +618,8 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         ):
             observations[name].append(float(bool(record.get(key, False))))
 
-    sample_count = sum(_sample_weight(record) for record in result.per_item)
-    excluded = _count_excluded(result.per_item, _sample_weight)
+    sample_count = sum(_sample_weight(record) for record in result.records)
+    excluded = _count_excluded(result.records, _sample_weight)
     failure_counts = {
         status: excluded[status] for status in ("failed", "timeout") if excluded[status]
     }
@@ -631,7 +631,7 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
             "exact_match": result.exact_match,
         },
         observations=observations,
-        per_item=result.per_item,
+        records=result.records,
         sample_count=sample_count,
         effective_sample_count=max(
             sample_count
@@ -895,11 +895,11 @@ MC_GENERATION_PIPELINE = MC_FILTER_REGISTRY.build_pipeline(
 
 
 def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
-    """Persist per-item records (JSONL) and an aggregated metrics summary (JSON).
+    """Persist an aggregated metrics summary (JSON).
 
     The summary is written next to the JSONL result file.
     """
-    question_total = len(result.per_item)
+    question_total = len(result.records)
 
     def sample_count(record: dict[str, Any]) -> int:
         """Count generations when available, otherwise one scored observation."""
@@ -907,12 +907,11 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
             return max(int(record["sample_total"]), 0)
         return 1
 
-    sample_total = sum(sample_count(record) for record in result.per_item)
+    sample_total = sum(sample_count(record) for record in result.records)
 
-    excluded = _count_excluded(result.per_item, sample_count)
+    excluded = _count_excluded(result.records, sample_count)
     persist_results(
         cache_path,
-        result.per_item,
         {
             "acc": round(result.acc, 6),
             "acc_norm": round(result.acc_norm, 6),
@@ -932,7 +931,7 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
             "skipped_count": excluded["skipped"],
             "timeout_count": excluded["timeout"],
             "aggregation": (
-                result.per_item[0].get("aggregation") if result.per_item else None
+                result.records[0].get("aggregation") if result.records else None
             ),
         },
     )

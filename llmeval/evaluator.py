@@ -81,7 +81,6 @@ def evaluate_task(
     allow_unsafe_code: bool = False,
     bootstrap_samples: int = 1000,
     confidence_level: float = 0.95,
-    output_schema: str = "compact",
     code_k_values: tuple[int, ...] = (1, 10, 64),
 ) -> float:
     """
@@ -119,7 +118,6 @@ def evaluate_task(
         allow_unsafe_code=allow_unsafe_code,
         bootstrap_samples=bootstrap_samples,
         confidence_level=confidence_level,
-        output_schema=output_schema,
         code_k_values=code_k_values,
     )
     return result.primary_value
@@ -164,7 +162,6 @@ def evaluate_task_result(
     allow_unsafe_code: bool = False,
     bootstrap_samples: int = 1000,
     confidence_level: float = 0.95,
-    output_schema: str = "compact",
     code_k_values: tuple[int, ...] = (1, 10, 64),
 ) -> EvaluationResult:
     """Evaluate a task through the registry and return all declared metrics."""
@@ -184,7 +181,6 @@ def evaluate_task_result(
         allow_unsafe_code=allow_unsafe_code,
         bootstrap_samples=bootstrap_samples,
         confidence_level=confidence_level,
-        output_schema=output_schema,
         code_k_values=code_k_values,
     )
     registry = _default_registry()
@@ -204,9 +200,7 @@ def evaluate_task_result(
             },
             primary_metric=task.metric_specs[0].name if task.metric_specs else None,
         )
-        persist_evaluation_result(
-            result, context.cache_path, output_schema=context.output_schema
-        )
+        persist_evaluation_result(result, context.cache_path)
     else:
         result = evaluate_registered_task(context, registry)
     for name, metric in result.metrics.items():
@@ -305,7 +299,6 @@ def main() -> int:
             args.allow_unsafe_code,
             args.bootstrap_samples,
             args.confidence_level,
-            output_schema=args.output_schema,
             code_k_values=args.code_k_values_tuple,
         )
 

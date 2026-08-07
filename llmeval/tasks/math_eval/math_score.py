@@ -698,7 +698,6 @@ def compute_scores(
     if persist_legacy:
         persist_results(
             cache_path,
-            eval_dataset,
             {"accuracy": round(accuracy, 6), **metadata},
         )
         logger.info("Results saved to %s", cache_path)
@@ -771,7 +770,7 @@ def score_math_result(
             "accuracy": observations,
             **problem_observations,
         },
-        per_item=[dict(item) for item in scoring_dataset],
+        records=[dict(item) for item in scoring_dataset],
         details={
             "problem_level": details,
             "complete_problem_count": complete_problem_count,

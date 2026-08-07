@@ -74,7 +74,7 @@ class EvaluationResult:
     skipped_count: int = 0
     timeout_count: int = 0
     failure_counts: dict[str, int] = field(default_factory=dict)
-    per_item: list[dict[str, Any]] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
     primary_metric: str | None = None
 
@@ -87,8 +87,8 @@ class EvaluationResult:
             return self.metrics[self.primary_metric].value
         return next(iter(self.metrics.values())).value
 
-    def to_dict(self, *, include_per_item: bool = False) -> dict[str, Any]:
-        """Serialize a compact result, optionally including detailed records."""
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the aggregate result."""
         payload: dict[str, Any] = {
             "schema_version": 1,
             "task_name": self.task_name,
@@ -105,8 +105,6 @@ class EvaluationResult:
             "details": self.details,
             "primary_metric": self.primary_metric,
         }
-        if include_per_item:
-            payload["per_item"] = self.per_item
         return payload
 
 
@@ -122,7 +120,7 @@ class ScorerResult:
 
     metrics: dict[str, float]
     observations: dict[str, list[float]]
-    per_item: list[dict[str, Any]] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
     sample_count: int = 0
     effective_sample_count: int = 0
@@ -271,7 +269,6 @@ class EvaluationContext(PreparationContext):
     allow_unsafe_code: bool = False
     bootstrap_samples: int = 1000
     confidence_level: float = 0.95
-    output_schema: str = "compact"
     code_k_values: tuple[int, ...] = (1, 10, 64)
 
 
@@ -335,7 +332,7 @@ def _build_evaluation_result(
         skipped_count=scored.skipped_count,
         timeout_count=scored.timeout_count,
         failure_counts=dict(scored.failure_counts),
-        per_item=[dict(item) for item in scored.per_item],
+        records=[dict(item) for item in scored.records],
         details=dict(scored.details),
         primary_metric=task.metric_specs[0].name if task.metric_specs else None,
     )
@@ -343,7 +340,7 @@ def _build_evaluation_result(
 
 def _structured_summary(result: EvaluationResult) -> dict[str, Any]:
     """Build the summary schema shared by all registered task families."""
-    payload = result.to_dict(include_per_item=True)
+    payload = result.to_dict()
     payload["summary_version"] = 1
     metric_values = {name: metric.value for name, metric in result.metrics.items()}
     payload["metric_values"] = metric_values
@@ -352,57 +349,9 @@ def _structured_summary(result: EvaluationResult) -> dict[str, Any]:
     return payload
 
 
-def _compact_per_item(item: dict[str, Any]) -> dict[str, Any]:
-    """Keep stable scoring fields while dropping prompt/generation payloads."""
-    aliases = {
-        "doc_id": ("doc_id",),
-        "gold": ("gold", "extracted_gold", "answer"),
-        "pred": ("pred", "extracted_answer", "prediction"),
-        "correct": ("correct", "passed", "accuracy"),
-        "score": ("score", "accuracy", "pass@1", "acc"),
-        "scoring_mode": ("scoring_mode", "aggregation"),
-        "evaluation_status": ("evaluation_status",),
-    }
-    compact: dict[str, Any] = {}
-    for output_key, candidates in aliases.items():
-        for key in candidates:
-            value = item.get(key)
-            if value is None or value == "" or value == []:
-                continue
-            if output_key == "correct" and key == "accuracy":
-                value = float(value) == 1.0
-            compact[output_key] = value
-            break
-    if "score" not in compact and "correct" in compact:
-        compact["score"] = 1.0 if compact["correct"] else 0.0
-    for key in ("id", "task", "task_id", "correct_norm", "correct_bytes"):
-        value = item.get(key)
-        if value is not None and value != "" and value != []:
-            compact[key] = value
-    return compact
-
-
-def _per_item_records(
-    result: EvaluationResult, output_schema: str
-) -> list[dict[str, Any]]:
-    """Build per-item records using the requested compact/debug schema."""
-    if output_schema not in {"compact", "debug"}:
-        raise ValueError("output_schema must be 'compact' or 'debug'")
-    return [
-        item if output_schema == "debug" else _compact_per_item(item)
-        for item in result.per_item
-    ]
-
-
-def persist_evaluation_result(
-    result: EvaluationResult, cache_path: Path, *, output_schema: str = "compact"
-) -> None:
-    """Persist both registry artifacts through the shared atomic entry point."""
-    persist_results(
-        cache_path,
-        _per_item_records(result, output_schema),
-        _structured_summary(result),
-    )
+def persist_evaluation_result(result: EvaluationResult, cache_path: Path) -> None:
+    """Persist only the aggregate result summary."""
+    persist_results(cache_path, _structured_summary(result))
 
 
 @dataclass
@@ -603,7 +552,5 @@ def evaluate_registered_task(
     """Evaluate through a registry and persist structured result files."""
     task = registry.resolve(context.task_name)
     result = task.score(context)
-    persist_evaluation_result(
-        result, context.cache_path, output_schema=context.output_schema
-    )
+    persist_evaluation_result(result, context.cache_path)
     return result

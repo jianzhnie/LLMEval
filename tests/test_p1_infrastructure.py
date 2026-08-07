@@ -52,7 +52,7 @@ def test_evaluation_result_default_serialization_is_compact(tmp_path: Path) -> N
 
     persist_evaluation_result(result, tmp_path / "score.jsonl")
     summary = json.loads((tmp_path / "score.summary.json").read_text())
-    assert summary["per_item"] == result.per_item
+    assert "per_item" not in summary
     assert summary["acc"] == 1.0
 
 
