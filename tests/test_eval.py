@@ -44,7 +44,7 @@ if _math_verify_absent:
 
 # Only stub transformers if it is genuinely absent — a partial stub (just
 # HfArgumentParser) would otherwise pollute sys.modules for other test modules
-# that need the real AutoTokenizer (e.g. test_verifier_infer_helpers).
+# that need the real AutoTokenizer.
 if "transformers" not in sys.modules and not importlib.util.find_spec("transformers"):
     _tf = types.ModuleType("transformers")
     _tf.HfArgumentParser = MagicMock
@@ -117,7 +117,6 @@ class TestEvaluateTask:
             {
                 "answer": "B",
                 "gen": ["Answer: B"],
-                "sample_index": 0,
                 "task": "mc_opensource/mmlu",
             }
         ]
@@ -169,7 +168,6 @@ class TestEvaluateTask:
                 "prompt": "def add(a, b):\n",
                 "answer": "\nassert add(1, 2) == 3\n",
                 "gen": ["    return a + b"],
-                "sample_index": 0,
                 "task": "code_opensource/humaneval",
             }
         ]

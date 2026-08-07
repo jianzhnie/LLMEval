@@ -189,8 +189,8 @@ class TestScoreGenerate:
         from llmeval.tasks.mc_eval.mc_score import score_generate
 
         items = [
-            {"answer": "B", "gen": ["Some text\nAnswer: B"], "sample_index": 0},
-            {"answer": "A", "gen": ["The answer is A."], "sample_index": 0},
+            {"answer": "B", "gen": ["Some text\nAnswer: B"]},
+            {"answer": "A", "gen": ["The answer is A."]},
         ]
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             cache = f.name
@@ -205,8 +205,8 @@ class TestScoreGenerate:
         from llmeval.tasks.mc_eval.mc_score import score_generate
 
         items = [
-            {"answer": "C", "gen": ["Answer: B"], "sample_index": 0},
-            {"answer": "D", "gen": ["Answer: D"], "sample_index": 0},
+            {"answer": "C", "gen": ["Answer: B"]},
+            {"answer": "D", "gen": ["Answer: D"]},
         ]
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             cache = f.name
@@ -232,11 +232,8 @@ class TestScoreGenerate:
                 "doc_id": "q0",
                 "answer": "B",
                 "gen": [generation],
-                "sample_index": sample_index,
             }
-            for sample_index, generation in enumerate(
-                ["Answer: A", "Answer: B", "Answer: B"]
-            )
+            for generation in ["Answer: A", "Answer: B", "Answer: B"]
         ]
         assert (
             score_generate(items, "answer", "gen", cache, aggregation=aggregation)
@@ -254,9 +251,8 @@ class TestScoreGenerate:
                 "doc_id": "q0",
                 "answer": "B",
                 "gen": [generation],
-                "sample_index": sample_index,
             }
-            for sample_index, generation in enumerate(["Answer: A", "Answer: B"])
+            for generation in ["Answer: A", "Answer: B"]
         ]
         assert (
             score_generate(items, "answer", "gen", cache, aggregation="per_sample")
@@ -651,7 +647,7 @@ class TestProcessGenerateItem:
         choice.message.content = "ans"
         client.chat.completions.create.return_value.choices = [choice]
         result = runner.process_generate_item(
-            {"prompt": "q", "answer": "A"}, client, []
+            {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
         )
         assert result["gen"] == ["ans"]
 
@@ -664,14 +660,18 @@ class TestProcessGenerateItem:
         choice.message.content = None
         client.chat.completions.create.return_value.choices = [choice]
         with pytest.raises(RuntimeError, match="no usable text"):
-            runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
+            runner.process_generate_item(
+                {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+            )
 
     def test_persistent_error_raises_after_retries(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate", max_retries=0)
         client = MagicMock()
         client.chat.completions.create.side_effect = RuntimeError("down")
         with pytest.raises(RuntimeError):
-            runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
+            runner.process_generate_item(
+                {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+            )
 
 
 class TestMCRunnerEndToEnd:
@@ -767,8 +767,8 @@ class TestMCScoreEdgeCases:
         from llmeval.tasks.mc_eval.mc_score import score_generate
 
         items = [
-            {"answer": "", "gen": ["no letter here"], "sample_index": 0},
-            {"answer": "B", "gen": ["Answer: B"], "sample_index": 0},
+            {"answer": "", "gen": ["no letter here"]},
+            {"answer": "B", "gen": ["Answer: B"]},
         ]
         acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
         assert acc == 1.0  # invalid-gold items are skipped from the denominator
@@ -839,7 +839,7 @@ class TestMCScoreEdgeCases:
         """A plain-string gen field (schema expects list) is scored as text."""
         from llmeval.tasks.mc_eval.mc_score import score_generate
 
-        items = [{"answer": "B", "gen": "Answer: B", "sample_index": 0}]
+        items = [{"answer": "B", "gen": "Answer: B"}]
         acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
         assert acc == 1.0
 
@@ -853,7 +853,6 @@ def test_generate_filter_trace_preserves_raw_response(tmp_path: Path) -> None:
             {
                 "answer": "B",
                 "gen": ["<think>x</think><answer>B</answer>"],
-                "sample_index": 0,
             }
         ],
         "answer",
@@ -880,21 +879,18 @@ def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None
             "prompt": "q",
             "answer": "B",
             "gen": ["Answer: A"],
-            "sample_index": 0,
         },
         {
             "doc_id": "mmlu:0",
             "prompt": "q",
             "answer": "B",
             "gen": ["Answer: B"],
-            "sample_index": 2,
         },
         {
             "doc_id": "mmlu:0",
             "prompt": "q",
             "answer": "B",
             "gen": ["Answer: B"],
-            "sample_index": 1,
         },
     ]
     cache = tmp_path / "resumed.jsonl"
@@ -917,8 +913,8 @@ def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None
 # ===========================================================================
 
 
-class TestMCSampleIndexProtocol:
-    """MC generation scoring follows the one-sample-per-row protocol."""
+class TestMCRepeatedRows:
+    """MC aggregation consumes repeated one-generation rows."""
 
     def _row(self, gens: list[str], **extra) -> dict:
         return {
@@ -929,20 +925,18 @@ class TestMCSampleIndexProtocol:
             **extra,
         }
 
-    def test_single_sample_rows_keep_explicit_indices(self) -> None:
-        """Rows with sample_index 0 and 2 keep the gap — index 1 stays missing."""
+    def test_repeated_rows_are_grouped_in_file_order(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import merge_generate_records
 
         merged = merge_generate_records(
             [
-                self._row(["Answer: A"], sample_index=0),
-                self._row(["Answer: B"], sample_index=2),
+                self._row(["Answer: A"]),
+                self._row(["Answer: B"]),
             ],
             "answer",
             "gen",
         )
         assert len(merged) == 1
-        assert "sample_index" not in merged[0]
         assert merged[0]["gen"] == ["Answer: A", "Answer: B"]
 
     def test_multi_generation_row_is_rejected(self) -> None:
@@ -950,61 +944,31 @@ class TestMCSampleIndexProtocol:
 
         with pytest.raises(ValueError, match="one generation per row"):
             merge_generate_records(
-                [self._row(["Answer: A", "Answer: B"], sample_index=0)],
+                [self._row(["Answer: A", "Answer: B"])],
                 "answer",
                 "gen",
             )
 
-    def test_single_sample_row_keeps_scalar_field(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
-
-        merged = merge_generate_records(
-            [self._row(["Answer: B"], sample_index=2)], "answer", "gen"
-        )
-        assert merged[0]["sample_index"] == 2
-
-    def test_missing_sample_index_raises(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
-
-        with pytest.raises(ValueError, match="sample_index"):
-            merge_generate_records(
-                [self._row(["Answer: B"])], "answer", "gen"
-            )
-
-    def test_invalid_scalar_sample_index_raises(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
-
-        with pytest.raises(ValueError, match="sample_index"):
-            merge_generate_records(
-                [self._row(["Answer: B"], sample_index=-1)], "answer", "gen"
-            )
-
-    def test_idempotent_duplicate_merges(self) -> None:
-        """Same index + same content merges without error."""
+    def test_identical_generations_remain_distinct_samples(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import merge_generate_records
 
         merged = merge_generate_records(
             [
-                self._row(["Answer: B"], sample_index=0),
-                self._row(["Answer: B"], sample_index=0),
+                self._row(["Answer: B"]),
+                self._row(["Answer: B"]),
             ],
             "answer",
             "gen",
         )
         assert len(merged) == 1
-        assert merged[0]["sample_index"] == 0
-        assert merged[0]["gen"] == ["Answer: B"]
+        assert merged[0]["gen"] == ["Answer: B", "Answer: B"]
 
-    def test_conflicting_duplicate_raises(self) -> None:
-        """Same index + different content is a schema conflict."""
+    def test_different_generations_remain_distinct_samples(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import merge_generate_records
 
-        with pytest.raises(ValueError, match="Conflicting duplicate"):
-            merge_generate_records(
-                [
-                    self._row(["Answer: A"], sample_index=0),
-                    self._row(["Answer: B"], sample_index=0),
-                ],
-                "answer",
-                "gen",
-            )
+        merged = merge_generate_records(
+            [self._row(["Answer: A"]), self._row(["Answer: B"])],
+            "answer",
+            "gen",
+        )
+        assert merged[0]["gen"] == ["Answer: A", "Answer: B"]

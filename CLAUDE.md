@@ -45,24 +45,21 @@ All CLI arguments use `HfArgumentParser` from `transformers` to parse into stron
 These are composed via multiple inheritance into mode-specific argument classes:
 - `OnlineInferArguments` → `DataArguments + PromptArguments + GenerationArguments + ServerArguments`
 - `OfflineInferArguments` → `DataArguments + PromptArguments + GenerationArguments + VLLMEngineArguments`
-- `VerifierInferArguments` → extends offline with verifier prompt selection
 - `EvalTaskArguments` — standalone args for the scoring step
 
-### Prompt Templates (`llmeval/utils/prompts.py`, `llmeval/utils/verifier_prompts.py`)
+### Prompt Templates (`llmeval/utils/prompts.py`)
 
-System prompts are stored in factory dictionaries (`SYSTEM_PROMPT_FACTORY`, `VERIFY_PROMPT_FACTORY`) mapping string names to prompt text. Key types: `deepseek_r1`, `amthinking`, `openr1`, `default`, `empty` (which maps to `None`). The `is_chat_template_applied()` function detects pre-formatted queries and raises an error to prevent double-application of chat templates.
+System prompts are stored in `SYSTEM_PROMPT_FACTORY`, mapping string names to prompt text. The `is_chat_template_applied()` function detects pre-formatted queries and raises an error to prevent double-application of chat templates.
 
 ### Inference Layer (`llmeval/inference/`)
 
-Four entry points, each a standalone script with its own `main()`:
+Three entry points, each a standalone script with its own `main()`:
 
-- **`online.py`** — `InferenceClient` wraps `openai.OpenAI` with exponential backoff retry logic. `InferenceRunner` orchestrates concurrent requests via `ThreadPoolExecutor`, with resume support based on stable `doc_id` and explicit sample indices. Entry: `python llmeval/inference/online.py --input_file ... --output_file ... --base_url ...`
+- **`online.py`** — `InferenceClient` wraps `openai.OpenAI` with exponential backoff retry logic. `InferenceRunner` orchestrates concurrent requests via `ThreadPoolExecutor`, with resume support based on stable `doc_id`. Entry: `python llmeval/inference/online.py --input_file ... --output_file ... --base_url ...`
 
 - **`offline.py`** — `OfflineInferenceRunner` uses vLLM's native `LLM` class for local batched inference. Converts data to chat message format, handles resume, writes results incrementally. Entry: `python llmeval/inference/offline.py --model_name_or_path ... --input_file ...`
 
 - **`mc.py`** — Multiple-choice inference. Loglikelihood mode scores each choice via the completions API (writes `choices` / `gold` / `logprobs`); generate mode produces free-form text (writes `gen`) for letter extraction at scoring time.
-
-- **`verifier.py`** — Extends offline inference with verifier-specific logic. Uses `VERIFY_PROMPT_FACTORY` prompts to have an LLM judge whether candidate answers match ground truth.
 
 ### Evaluation/Scoring Layer (`llmeval/evaluator.py`, `llmeval/tasks/`)
 
@@ -85,7 +82,7 @@ Four entry points, each a standalone script with its own `main()`:
 
 ### Resume Mechanism
 
-Online, offline, MC, and verifier inference preserve explicit sample indices. Resume computes the exact missing index set for each stable document, including holes from partially failed batched requests.
+Online, offline, and MC inference resume by counting completed output rows for each stable `doc_id`.
 
 ### Supported Task Names
 

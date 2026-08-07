@@ -35,23 +35,6 @@ def sample_jsonl_with_gen() -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def verifier_input_items() -> list[dict[str, Any]]:
-    """Items suitable for verifier inference (prompt + answer + gen)."""
-    return [
-        {
-            "prompt": "What is 1+1?",
-            "answer": "2",
-            "gen": ["Let me think...\n</think />\n\nThe answer is <answer>2</answer>"],
-        },
-        {
-            "prompt": "Solve x=3",
-            "answer": "3",
-            "gen": ["\\boxed{3}"],
-        },
-    ]
-
-
-@pytest.fixture
 def tmp_input_file(sample_jsonl_items: list[dict[str, Any]], tmp_path: Path) -> str:
     """Write sample items to a temporary JSONL file and return its path."""
     p = tmp_path / "input.jsonl"

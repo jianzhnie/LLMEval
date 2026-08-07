@@ -287,7 +287,7 @@ python -m sglang.launch_server \
 LLMEval/
 ├── llmeval/
 │   ├── evaluator.py       # 评分编排器 (math / mc / code)
-│   ├── inference/         # 推理引擎 (online / offline / mc / verifier)
+│   ├── inference/         # 推理引擎 (online / offline / mc)
 │   ├── tasks/
 │   │   ├── math_eval/     # 数学评分 (math-verify)
 │   │   ├── code_eval/     # 代码评分 (沙箱执行 pass@k)

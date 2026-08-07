@@ -169,7 +169,12 @@ class TestProcessItem:
         mock_client.get_content.return_value = "test response"
         runner.client = mock_client
 
-        item = {"prompt": "q", "answer": "a", "gen": ["existing"]}
+        item = {
+            "prompt": "q",
+            "answer": "a",
+            "gen": ["existing"],
+            "_request_seed": 1,
+        }
         original_gen = item["gen"].copy()
         result = runner.process_item(item)
 
@@ -415,7 +420,6 @@ class TestLoadData:
                         "doc_id": "test:0",
                         "prompt": "q",
                         "gen": [text],
-                        "sample_index": i,
                     }
                 )
                 + "\n"
@@ -428,10 +432,10 @@ class TestLoadData:
 
         assert len(loaded) == 2
         assert all(item["doc_id"] == "test:0" for item in loaded)
-        assert [item["sample_index"] for item in loaded] == [2, 3]
+        assert len({item["_request_seed"] for item in loaded}) == 2
         assert all(item["expected_samples"] == 4 for item in loaded)
 
-    def test_load_data_preserves_non_contiguous_missing_indices(
+    def test_load_data_uses_completed_row_count(
         self, tmp_path: Path
     ) -> None:
         runner = _make_runner(tmp_path, n_samples=4)
@@ -446,7 +450,6 @@ class TestLoadData:
                         "doc_id": "test:0",
                         "prompt": "q",
                         "gen": [text],
-                        "sample_index": i,
                     }
                 )
                 + "\n"
@@ -457,7 +460,7 @@ class TestLoadData:
 
         loaded = runner.load_data()
 
-        assert [item["sample_index"] for item in loaded] == [1, 3]
+        assert len(loaded) == 2
         assert all(item["expected_samples"] == 4 for item in loaded)
         assert all(
             not any(key.startswith("_llmeval_") for key in item) for item in loaded
@@ -482,7 +485,7 @@ class TestConcurrentProcessing:
         loaded = runner.load_data()
 
         assert len(loaded) == 3
-        assert [item["sample_index"] for item in loaded] == [0, 1, 2]
+        assert len({item["_request_seed"] for item in loaded}) == 3
         runner._process_concurrently(loaded)
 
         assert runner.client.get_content.call_count == 3
@@ -498,8 +501,8 @@ class TestConcurrentProcessing:
         runner.client.get_content.return_value = "ok"
 
         items = [
-            {"prompt": ["multimodal"], "answer": "a"},
-            {"prompt": "q", "answer": "a"},
+            {"prompt": ["multimodal"], "answer": "a", "_request_seed": 1},
+            {"prompt": "q", "answer": "a", "_request_seed": 2},
         ]
         runner._process_concurrently(items)
 
@@ -511,11 +514,15 @@ class TestConcurrentProcessing:
         runner.client = MagicMock()
         runner.client.get_content.side_effect = RuntimeError("server down")
 
-        runner._process_concurrently([{"prompt": "qq", "answer": "a"}] * 2)
+        runner._process_concurrently(
+            [
+                {"prompt": "qq", "answer": "a", "_request_seed": 1},
+                {"prompt": "qq", "answer": "a", "_request_seed": 2},
+            ]
+        )
 
         failed_file = tmp_path / "output_failed.jsonl"
         assert failed_file.exists()
         record = json.loads(failed_file.read_text().strip().split("\n")[0])
         assert record["prompt"] == "qq"
-        assert record["sample_index"] is None
         assert "server down" in record["error"]

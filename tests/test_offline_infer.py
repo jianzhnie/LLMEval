@@ -103,8 +103,8 @@ class TestOfflineInferenceRunner:
             skip_special_tokens=False,
         )
         items = [
-            {"doc_id": "doc:1", "prompt": "q", "sample_index": 0},
-            {"doc_id": "doc:1", "prompt": "q", "sample_index": 1},
+            {"doc_id": "doc:1", "prompt": "q", "_request_seed": 1},
+            {"doc_id": "doc:1", "prompt": "q", "_request_seed": 2},
         ]
 
         params = runner._sampling_params_for_items(items)
@@ -146,10 +146,10 @@ class TestOfflineInferenceRunner:
             + "\n",
             encoding="utf-8",
         )
-        # One completed sample with the strict protocol (doc_id + sample_index).
+        # One completed row leaves one generation request outstanding.
         Path(args.output_file).write_text(
             json.dumps(
-                {"doc_id": "test:0", "prompt": "q", "gen": ["one"], "sample_index": 0},
+                {"doc_id": "test:0", "prompt": "q", "gen": ["one"]},
                 ensure_ascii=False,
             )
             + "\n",
@@ -161,7 +161,7 @@ class TestOfflineInferenceRunner:
 
         assert len(remaining) == 1
         assert remaining[0]["prompt"] == "q"
-        assert remaining[0]["sample_index"] == 1
+        assert remaining[0]["expected_samples"] == 2
 
     def test_write_response_results_appends_generation(self, tmp_path: Path) -> None:
         runner = _runner(tmp_path)
@@ -202,7 +202,7 @@ class TestOfflineInferenceRunner:
         )
 
         with pytest.raises(RuntimeError, match="bad batch"):
-            runner._process_batches([{"doc_id": "d1", "sample_index": 0}])
+            runner._process_batches([{"doc_id": "d1"}])
 
     def test_process_batches_can_record_and_continue(self, tmp_path: Path) -> None:
         runner = _runner(tmp_path, batch_size=1, fail_fast=False)
@@ -212,8 +212,8 @@ class TestOfflineInferenceRunner:
 
         runner._process_batches(
             [
-                {"doc_id": "d1", "sample_index": 0},
-                {"doc_id": "d2", "sample_index": 0},
+                {"doc_id": "d1"},
+                {"doc_id": "d2"},
             ]
         )
 
@@ -222,4 +222,4 @@ class TestOfflineInferenceRunner:
         failure = json.loads(failed_path.read_text().strip())
         assert failure["error_category"] == "batch_processing"
         assert failure["batch_index"] == 0
-        assert failure["items"] == [{"doc_id": "d1", "sample_index": 0}]
+        assert failure["items"] == [{"doc_id": "d1"}]

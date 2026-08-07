@@ -336,7 +336,6 @@ LLMEval/
 │   ├── inference/           # Inference backends
 │   │   ├── online.py        #   OpenAI-compatible API
 │   │   ├── offline.py       #   vLLM local engine
-│   │   ├── verifier.py      #   Verifier inference
 │   │   └── mc.py            #   MC inference
 │   ├── tasks/               # Task-specific scoring
 │   │   ├── code_eval/       #   Code (HumanEval / MBPP / pass@k)
@@ -352,7 +351,6 @@ LLMEval/
 │       ├── log.py           #   Logging
 │       ├── retry.py         #   API retry logic
 │       ├── prompts.py       #   System prompts
-│       └── verifier_prompts.py # Verifier prompts
 ├── examples/              # Model-specific evaluation pipelines
 │   ├── longcat-flash/     # One-click evaluation
 │   │   ├── run_all.sh

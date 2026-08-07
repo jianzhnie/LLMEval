@@ -285,14 +285,12 @@ class TestProcessLoglikelihoodItem:
                 "prompt": "q",
                 "choices": ["a", "b"],
                 "gold": 1,
-                "sample_index": 2,
             }
         )
 
         assert result["pred"] == 1
         assert result["correct"] is True
         assert result["choice_tokens"] == ["A", "B"]
-        assert result["sample_index"] == 2
 
     def test_auto_uses_first_token_without_probing_continuation(
         self, tmp_path: Path
@@ -340,7 +338,7 @@ class TestProcessGenerateItem:
         ]
 
         result = runner.process_generate_item(
-            {"prompt": "q", "answer": "A"}, client, []
+            {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
         )
 
         assert result["gen"] == ["ans"]
@@ -353,7 +351,9 @@ class TestProcessGenerateItem:
             _generation_choice("ans")
         ]
 
-        runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
+        runner.process_generate_item(
+            {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+        )
 
         assert client.chat.completions.create.call_args.kwargs["tool_choice"] == "auto"
 
@@ -363,25 +363,31 @@ class TestProcessGenerateItem:
         client.chat.completions.create.return_value.choices = [_generation_choice(None)]
 
         with pytest.raises(RuntimeError, match="no usable text"):
-            runner.process_generate_item({"prompt": "q", "answer": "A"}, client, [])
+            runner.process_generate_item(
+                {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+            )
 
-    def test_single_sample_request_preserves_index(self, tmp_path: Path) -> None:
+    def test_single_request_uses_transient_seed(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         runner.config.n_samples = 3
         client = MagicMock()
         client.chat.completions.create.return_value.choices = [_generation_choice("b")]
 
         result = runner.process_generate_item(
-            {"doc_id": "q1", "prompt": "q", "answer": "A", "sample_index": 1},
+            {
+                "doc_id": "q1",
+                "prompt": "q",
+                "answer": "A",
+                "_request_seed": 123,
+            },
             client,
             [],
         )
 
         assert result["gen"] == ["b"]
-        assert result["sample_index"] == 1
         request = client.chat.completions.create.call_args.kwargs
         assert "n" not in request
-        assert request["seed"] != runner.config.seed
+        assert request["seed"] == 123
 
 
 class TestMCStableResume:
@@ -395,7 +401,8 @@ class TestMCStableResume:
         )
 
         first = runner.load_data()
-        assert [item["sample_index"] for item in first] == [0, 1, 2]
+        assert len(first) == 3
+        assert len({item["_request_seed"] for item in first}) == 3
         assert all(item["expected_samples"] == 3 for item in first)
         assert all(
             not any(key.startswith("_llmeval_") for key in item) for item in first
@@ -409,18 +416,16 @@ class TestMCStableResume:
                         "prompt": "q",
                         "answer": "A",
                         "gen": [text],
-                        "sample_index": index,
                     }
                 )
                 + "\n"
-                for index, text in ((0, "a"), (1, "b"))
+                for text in ("a", "b")
             )
         )
 
         remaining = runner.load_data()
 
         assert len(remaining) == 1
-        assert remaining[0]["sample_index"] == 2
         assert remaining[0]["expected_samples"] == 3
         assert not any(key.startswith("_llmeval_") for key in remaining[0])
 
@@ -441,7 +446,6 @@ class TestMCStableResume:
                     "doc_id": stable_id,
                     "prompt": "first",
                     "gen": ["A"],
-                    "sample_index": 0,
                 }
             )
             + "\n"
@@ -450,7 +454,6 @@ class TestMCStableResume:
                     "doc_id": "test:1",
                     "prompt": "second",
                     "gen": ["B"],
-                    "sample_index": 0,
                 }
             )
             + "\n"
@@ -458,7 +461,7 @@ class TestMCStableResume:
 
         assert runner.load_data() == []
 
-    def test_generate_resume_requests_a_missing_middle_sample(
+    def test_generate_resume_uses_completed_row_count(
         self, tmp_path: Path
     ) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
@@ -474,18 +477,16 @@ class TestMCStableResume:
                         "prompt": "q",
                         "answer": "A",
                         "gen": [text],
-                        "sample_index": index,
                     }
                 )
                 + "\n"
-                for index, text in ((0, "a"), (2, "c"))
+                for text in ("a", "c")
             )
         )
 
         remaining = runner.load_data()
 
         assert len(remaining) == 1
-        assert remaining[0]["sample_index"] == 1
         assert remaining[0]["expected_samples"] == 3
         assert not any(key.startswith("_llmeval_") for key in remaining[0])
 
