@@ -14,7 +14,7 @@ The module provides a comprehensive configuration system that supports:
 - Text generation parameters
 - vLLM engine configuration
 - Server/API configuration
-- Specialized inference modes (online, offline, verifier)
+- Specialized inference modes (online, offline, multiple choice)
 
 All configuration classes include validation logic to ensure parameter
 consistency and prevent runtime errors.
@@ -28,7 +28,6 @@ from typing import Any
 
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
-from llmeval.utils.verifier_prompts import VERIFY_PROMPT_FACTORY
 
 __all__ = [
     "DataArguments",
@@ -40,7 +39,6 @@ __all__ = [
     "PromptArguments",
     "ServerArguments",
     "VLLMEngineArguments",
-    "VerifierInferArguments",
 ]
 
 logger = init_logger("eval_config")
@@ -568,76 +566,6 @@ class OfflineInferArguments(
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)
         VLLMEngineArguments.__post_init__(self)
-
-
-@dataclass
-class VerifierInferArguments(
-    DataArguments, PromptArguments, GenerationArguments, VLLMEngineArguments
-):
-    """
-    Arguments specific to compass verifier inference using local vLLM engine.
-
-    This class extends offline inference with verifier-specific parameters
-    for answer verification tasks. It includes prompt template selection
-    and data handling options.
-
-    Attributes:
-        verifier_prompt_type: The type of verifier prompt to use.
-        keep_origin_data: Whether to keep the original data in output.
-        verifier_prompt: The resolved verifier prompt text (computed automatically).
-
-    Raises:
-        ValueError: If verifier_prompt_type is not found in VERIFY_PROMPT_FACTORY.
-    """
-
-    verifier_prompt_type: str = field(
-        default="compassverify_prompt",
-        metadata={
-            "help": (
-                "The type of verifier prompt to use. "
-                "Valid options: compassverify_prompt, compassverify_prompt_zh, "
-                "compassverify_cot_prompt, compassverify_cot_prompt_zh"
-            )
-        },
-    )
-    keep_origin_data: bool = field(
-        default=False, metadata={"help": "Will keep the original data or not."}
-    )
-    # Computed value based on verifier_prompt_type; not settable via CLI
-    verifier_prompt: str | None = field(init=False, default=None)
-
-    def __post_init__(self) -> None:
-        """
-        Validate all inherited arguments and resolve verifier prompt.
-
-        Raises:
-            ValueError: If verifier_prompt_type is not found in VERIFY_PROMPT_FACTORY.
-        """
-        DataArguments.__post_init__(self)
-        PromptArguments.__post_init__(self)
-        GenerationArguments.__post_init__(self)
-        VLLMEngineArguments.__post_init__(self)
-
-        # Validate and resolve verifier prompt
-        if (
-            self.verifier_prompt_type is not None
-            and self.verifier_prompt_type not in VERIFY_PROMPT_FACTORY
-        ):
-            raise ValueError(
-                f"Invalid verifier prompt type: {self.verifier_prompt_type}. "
-                f"Valid options are: {list(VERIFY_PROMPT_FACTORY.keys())}"
-            )
-
-        self.verifier_prompt = VERIFY_PROMPT_FACTORY.get(self.verifier_prompt_type)
-        logger.info(
-            "Using verifier_prompt_type: %s, content_length: %d",
-            self.verifier_prompt_type,
-            len(self.verifier_prompt or ""),
-        )
-        logger.info(
-            "If you want to customize the verifier prompt, please modify the "
-            "VERIFY_PROMPT_FACTORY in llmeval/utils/verifier_prompts.py"
-        )
 
 
 @dataclass

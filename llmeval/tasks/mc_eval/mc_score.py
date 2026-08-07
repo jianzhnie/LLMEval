@@ -54,11 +54,7 @@ from llmeval.tasks.postprocess import (
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.results import ScorerResult
-from llmeval.tasks.sample_index import (
-    duplicate_sample_error,
-    resolve_sample_index,
-    resolve_single_generation,
-)
+from llmeval.tasks.sample_record import resolve_single_generation
 from llmeval.utils.log import init_logger
 
 __all__ = [
@@ -217,7 +213,7 @@ def merge_generate_records(
     """
     merged: list[dict[str, Any]] = []
     positions: dict[str, int] = {}
-    samples_by_position: list[dict[int, str | None]] = []
+    samples_by_position: list[list[str]] = []
 
     for row_index, source in enumerate(eval_dataset):
         item = source.copy()
@@ -235,7 +231,7 @@ def merge_generate_records(
             position = len(merged)
             positions[identity] = position
             merged.append(item)
-            samples_by_position.append({})
+            samples_by_position.append([])
         else:
             target = merged[position]
             for key in (
@@ -253,26 +249,13 @@ def merge_generate_records(
                 if key in item and key not in target:
                     target[key] = item[key]
         target_samples = samples_by_position[position]
-        sample_index = resolve_sample_index(item, problem_id=problem_id)
         generation = resolve_single_generation(
             item, response_key, problem_id=problem_id
         )
-        if sample_index in target_samples:
-            if target_samples[sample_index] != generation:
-                raise duplicate_sample_error(problem_id, sample_index)
-            continue
-        target_samples[sample_index] = generation
+        target_samples.append(generation or "")
 
     for item, samples in zip(merged, samples_by_position, strict=True):
-        ordered_indices = sorted(samples)
-        item[response_key] = [
-            samples[index] if samples[index] is not None else ""
-            for index in ordered_indices
-        ]
-        if len(ordered_indices) == 1:
-            item["sample_index"] = ordered_indices[0]
-        else:
-            item.pop("sample_index", None)
+        item[response_key] = samples
     return merged
 
 
@@ -457,7 +440,7 @@ def _error_record(
     return {
         **{
             key: item[key]
-            for key in ("doc_id", "sample_index", "sample_total")
+            for key in ("doc_id", "sample_total")
             if key in item and item[key] is not None
         },
         "gold": gold,
@@ -512,7 +495,7 @@ def _attach_item_metadata(
     """Carry stable identity and scoring mode into the persisted score row."""
     metadata = {
         key: item[key]
-        for key in ("doc_id", "sample_index")
+        for key in ("doc_id",)
         if key in item and item[key] is not None
     }
     metadata["scoring_mode"] = item.get(

@@ -40,7 +40,7 @@ from llmeval.inference.common import (
     load_jsonl,
     load_resume_state,
     redact_config_for_logging,
-    sample_seed_for_item,
+    get_request_seed,
     save_failed_items,
 )
 from llmeval.inference.schema import (
@@ -559,6 +559,7 @@ class MCRunner:
             resume_state,
             self.config.input_key,
             target_samples,
+            base_seed=self.config.seed,
             prompt_resolver=self.build_prompt,
         )
 
@@ -752,7 +753,6 @@ class MCRunner:
         return {
             self.config.input_key: prompt,
             **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
-            "sample_index": item.get("sample_index", 0),
             "choices": choices,
             "choice_tokens": choice_tokens,
             "gold": gold,
@@ -872,7 +872,7 @@ class MCRunner:
             "max_tokens": self.config.max_tokens,
             "temperature": self.config.temperature,
             "timeout": self.config.request_timeout,
-            "seed": sample_seed_for_item(self.config.seed, item),
+            "seed": get_request_seed(item),
         }
         # tool_choice: only send when explicitly configured
         if is_explicit_tool_choice(self.config.tool_choice):
@@ -909,8 +909,6 @@ class MCRunner:
             **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
             "expected_samples": self.config.n_samples,
         }
-        if "sample_index" in item:
-            result["sample_index"] = item["sample_index"]
         return result
 
     # ------------------------------------------------------------------

@@ -31,12 +31,9 @@ def _atomic_text_writer(path: str | Path) -> Generator[TextIOBase, None, None]:
         # A failed write must never leave a partial file behind: the
         # destination keeps its previous (complete) content, and the
         # sibling temporary is removed so a later run starts clean.
+        # BaseExceptions (KeyboardInterrupt/SystemExit) propagate untouched,
+        # intentionally leaving the uniquely-named temp in place for recovery.
         temporary.unlink(missing_ok=True)
-        raise
-    except BaseException:
-        # KeyboardInterrupt / SystemExit mid-write: the temp may hold a
-        # complete payload the user still wants. Keep it (named uniquely)
-        # so it survives the interrupt instead of being silently deleted.
         raise
 
 

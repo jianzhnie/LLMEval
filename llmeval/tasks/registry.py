@@ -140,7 +140,6 @@ def _compact_per_item(item: dict[str, Any]) -> dict[str, Any]:
     """Keep stable scoring fields while dropping prompt/generation payloads."""
     aliases = {
         "doc_id": ("doc_id",),
-        "sample_index": ("sample_index",),
         "gold": ("gold", "extracted_gold", "answer"),
         "pred": ("pred", "extracted_answer", "prediction"),
         "correct": ("correct", "passed", "accuracy"),

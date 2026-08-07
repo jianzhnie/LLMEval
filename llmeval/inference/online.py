@@ -31,7 +31,7 @@ from llmeval.inference.common import (
     load_jsonl,
     load_resume_state,
     redact_config_for_logging,
-    sample_seed_for_item,
+    get_request_seed,
     save_failed_items,
 )
 from llmeval.utils.config import OnlineInferArguments
@@ -427,7 +427,7 @@ class InferenceRunner:
 
         Returns:
             List[Dict[str, Any]]: One record per remaining sample, each with a
-                stable ``sample_index``.
+                stable document identity.
 
         Raises:
             FileNotFoundError: If input file doesn't exist
@@ -461,6 +461,7 @@ class InferenceRunner:
             resume_state,
             self.args.input_key,
             self.args.n_samples,
+            base_seed=self.args.seed if type(self.args.seed) is int else 0,
         )
         total_remaining = len(prepared_data)
 
@@ -534,6 +535,7 @@ class InferenceRunner:
             return None
 
         result = item.copy()
+        result.pop("_request_seed", None)
         result[self.args.response_key] = [response]
         return result
 
@@ -565,7 +567,6 @@ class InferenceRunner:
             return None
 
         # Step 2: API Request
-        base_seed = self.args.seed if type(self.args.seed) is int else 0
         response = self.client.get_content(
             query=query,
             system_prompt=self.system_prompt,
@@ -575,7 +576,7 @@ class InferenceRunner:
             top_p=self.args.top_p,
             top_k=self.args.top_k,
             enable_thinking=self.args.enable_thinking,
-            seed=sample_seed_for_item(base_seed, item),
+            seed=get_request_seed(item),
         )
 
         # Step 3: Response Processing
@@ -612,7 +613,6 @@ class InferenceRunner:
                             failed_tasks.append(
                                 {
                                     "doc_id": item.get("doc_id"),
-                                    "sample_index": item.get("sample_index"),
                                     "error_category": "sample_processing",
                                     "error": "sample was skipped or returned an empty response",
                                 }
@@ -625,7 +625,6 @@ class InferenceRunner:
                         failed_tasks.append(
                             {
                                 "doc_id": item.get("doc_id"),
-                                "sample_index": item.get("sample_index"),
                                 self.args.input_key: (
                                     str(prompt_val)[:200]
                                     if prompt_val is not None

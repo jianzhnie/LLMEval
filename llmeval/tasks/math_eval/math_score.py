@@ -29,11 +29,7 @@ from llmeval.tasks.postprocess import (
     TextFilterPipeline,
 )
 from llmeval.tasks.results import ScorerResult
-from llmeval.tasks.sample_index import (
-    duplicate_sample_error,
-    resolve_sample_index,
-    resolve_single_generation,
-)
+from llmeval.tasks.sample_record import resolve_single_generation
 from llmeval.utils.log import init_logger
 
 # Configure a dedicated logger for the math scoring module
@@ -814,13 +810,11 @@ def _expand_math_samples(
     expanded: list[dict[str, Any]] = []
     for row_index, item in enumerate(eval_dataset):
         problem_id = _problem_identity(item, row_index)
-        sample_index = resolve_sample_index(item, problem_id=problem_id)
         response = resolve_single_generation(
             item, response_key, problem_id=problem_id
         )
         record = dict(item)
         record[response_key] = [response] if response is not None else []
-        record["sample_index"] = sample_index
         expanded.append(record)
     return expanded
 
@@ -867,16 +861,10 @@ def _build_problem_level_metrics(
 ) -> tuple[list[dict[str, Any]], dict[str, float], dict[str, list[float]]]:
     """Aggregate sample outcomes into pass@k and majority-vote metrics.
 
-    A problem is ``complete`` only when its sample indices exactly cover
-    ``0..k-1`` (each index exactly once, ``k`` being its target sample
-    count).  ``problem_pass@k``/``problem_majority@k`` aggregate complete
-    problems only, so the ``@k`` suffix always matches the actual sampling
-    depth; duplicate, negative, out-of-range, or missing indices all make a
-    problem incomplete.  When no problem of a cohort is complete, the metric
-    is reported as 0.0 with empty observations.
+    A problem is complete when its observed row count reaches the requested
+    generation count. Problem-level metrics include complete problems only.
     """
     grouped: dict[str, list[dict[str, Any]]] = {}
-    seen_samples: dict[str, dict[int, dict[str, Any]]] = {}
     for row_index, item in enumerate(scored_dataset):
         document_id = item.get("doc_id")
         item_expected = item.get("expected_samples")
@@ -892,24 +880,6 @@ def _build_problem_level_metrics(
                 "multi-sample records"
             )
         problem_id = _problem_identity(item, row_index)
-        sample_index = item.get("sample_index")
-        if isinstance(sample_index, int) and sample_index >= 0:
-            existing = seen_samples.setdefault(problem_id, {}).get(sample_index)
-            if existing is not None:
-                existing_signature = (
-                    existing.get("extracted_answer"),
-                    float(existing.get("accuracy", 0.0)),
-                    existing.get("evaluation_status"),
-                )
-                current_signature = (
-                    item.get("extracted_answer"),
-                    float(item.get("accuracy", 0.0)),
-                    item.get("evaluation_status"),
-                )
-                if existing_signature != current_signature:
-                    raise duplicate_sample_error(problem_id, sample_index)
-                continue
-            seen_samples[problem_id][sample_index] = item
         grouped.setdefault(problem_id, []).append(item)
 
     problems: list[dict[str, Any]] = []
@@ -939,8 +909,7 @@ def _build_problem_level_metrics(
             else item_expected
         )
         target_count = target_count or sample_count
-        index_set = set(seen_samples.get(problem_id, ()))
-        complete = len(items) == target_count and index_set == set(range(target_count))
+        complete = len(items) == target_count
         problems.append(
             {
                 "doc_id": problem_id,

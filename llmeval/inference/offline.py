@@ -7,7 +7,7 @@ This module provides a small, documented wrapper around vLLM to:
 - Run batched chat inference
 - Persist unified results incrementally for robustness
 
-The output schema stores one generation and one sample index per JSONL row.
+The output schema stores one generation per JSONL row.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from llmeval.inference.common import (
     load_resume_state,
     process_batches_with_policy,
     redact_config_for_logging,
-    sample_seed_for_item,
+    get_request_seed,
     save_failed_items,
 )
 from llmeval.utils.config import OfflineInferArguments
@@ -49,7 +49,7 @@ def _sample_failure(
 ) -> dict[str, Any]:
     """Build a compact failed-sample audit record."""
     return {
-        "item": {key: item[key] for key in ("doc_id", "sample_index") if key in item},
+        "item": {"doc_id": item["doc_id"]} if "doc_id" in item else {},
         "error_category": category,
         "error_type": type(error).__name__,
         "error": str(error),
@@ -135,7 +135,7 @@ class OfflineInferenceRunner:
     ) -> list[SamplingParams]:
         """Return independent, resume-stable sampling parameters per item."""
         return [
-            self._build_sampling_params(sample_seed_for_item(self.args.seed, item))
+            self._build_sampling_params(get_request_seed(item))
             for item in items
         ]
 
@@ -241,6 +241,7 @@ class OfflineInferenceRunner:
                 with open(self.args.output_file, "a", encoding="utf-8") as f:
                     for original_item, model_response in valid_pairs:
                         result = dict(original_item)
+                        result.pop("_request_seed", None)
                         result[self.args.response_key] = [model_response]
                         f.write(json.dumps(result, ensure_ascii=False) + "\n")
                     f.flush()
@@ -317,6 +318,7 @@ class OfflineInferenceRunner:
             resume_state,
             self.args.input_key,
             self.args.n_samples,
+            base_seed=self.args.seed,
         )
 
         if not expanded_data:

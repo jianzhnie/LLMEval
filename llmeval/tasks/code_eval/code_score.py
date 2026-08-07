@@ -27,11 +27,7 @@ from llmeval.tasks.postprocess import (
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.results import ScorerResult
-from llmeval.tasks.sample_index import (
-    duplicate_sample_error,
-    resolve_sample_index,
-    resolve_single_generation,
-)
+from llmeval.tasks.sample_record import resolve_single_generation
 from llmeval.utils.log import init_logger
 
 logger = init_logger("code_score")
@@ -241,7 +237,6 @@ def _failure_record(
     task_id: str,
     result: str,
     *,
-    sample_index: int = 0,
     evaluation_status: str = "completed",
 ) -> dict[str, Any]:
     """Return a uniform failure record for a single item.
@@ -252,7 +247,6 @@ def _failure_record(
     """
     return {
         "task_id": task_id,
-        "sample_index": sample_index,
         "passed": False,
         "result": result,
         "evaluation_status": evaluation_status,
@@ -263,13 +257,11 @@ def _failure_record(
 def _failure(
     task_id: str,
     reason: str,
-    sample_index: int = 0,
 ) -> dict[str, Any]:
     """Return a failure record where the generated answer caused the failure."""
     return _failure_record(
         task_id,
         reason,
-        sample_index=sample_index,
         evaluation_status="completed",
     )
 
@@ -280,7 +272,6 @@ def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
     return _failure_record(
         task_id,
         "scoring error",
-        sample_index=item.get("sample_index", 0),
         evaluation_status="failed",
     )
 
@@ -373,7 +364,6 @@ def _process_code_item(
     idx, item, label_key, response_key, exec_timeout, allow_unsafe_code = args
 
     # -- resolve identifiers ----------------------------------------------------
-    sample_index: int = int(item.get("sample_index", 0))
     task_id: str = str(item["task_id"])
     prompt: str = str(item.get("prompt", ""))
     test_code: str = str(item.get(label_key, ""))
@@ -402,7 +392,6 @@ def _process_code_item(
     if not test_code.strip():
         record = {
             "task_id": task_id,
-            "sample_index": sample_index,
             "passed": False,
             "result": f"skipped: empty test harness in label field {label_key!r}",
             "evaluation_status": "skipped",
@@ -412,12 +401,12 @@ def _process_code_item(
         return idx, record
 
     if not gen_str.strip():
-        record = _failure(task_id, "failed: empty generation", sample_index)
+        record = _failure(task_id, "failed: empty generation")
         record.update(filter_artifacts)
         return idx, record
 
     if not code.strip():
-        record = _failure(task_id, "failed: no code extracted", sample_index)
+        record = _failure(task_id, "failed: no code extracted")
         record.update(filter_artifacts)
         return idx, record
 
@@ -437,11 +426,10 @@ def _process_code_item(
         if exec_result.get("passed"):
             break
     if exec_result is None:
-        record = _failure(task_id, "failed: no executable candidate", sample_index)
+        record = _failure(task_id, "failed: no executable candidate")
         record.update(filter_artifacts)
         return idx, record
     exec_result.setdefault("task_id", task_id)
-    exec_result.setdefault("sample_index", sample_index)
     exec_result["evaluation_status"] = _code_record_status(exec_result)
     exec_result.update(filter_artifacts)
     return idx, exec_result
@@ -549,9 +537,8 @@ def _score_items(
 def _expand_code_samples(
     eval_dataset: list[dict[str, Any]], response_key: str
 ) -> list[dict[str, Any]]:
-    """Validate, deduplicate, and normalize one code sample per input row."""
+    """Validate and normalize one code generation per input row."""
     expanded: list[dict[str, Any]] = []
-    seen_samples: dict[tuple[str, int], str | None] = {}
     for item_idx, item in enumerate(eval_dataset):
         task_id = item.get("task_id")
         if task_id is None or not str(task_id).strip():
@@ -560,17 +547,9 @@ def _expand_code_samples(
                 "non-empty 'task_id'"
             )
         task_id = str(task_id)
-        sample_index = resolve_sample_index(item, problem_id=task_id)
         sample = resolve_single_generation(item, response_key, problem_id=task_id)
-        seen_key = (task_id, sample_index)
-        if seen_key in seen_samples:
-            if seen_samples[seen_key] != sample:
-                raise duplicate_sample_error(task_id, sample_index)
-            continue
-        seen_samples[seen_key] = sample
         sample_item = item.copy()
         sample_item[response_key] = [sample] if sample is not None else []
-        sample_item["sample_index"] = sample_index
         expanded.append(sample_item)
     return expanded
 

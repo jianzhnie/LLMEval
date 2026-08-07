@@ -29,11 +29,10 @@ __all__ = [
     "iter_resume_records",
     "load_jsonl",
     "load_resume_state",
-    "missing_sample_indexes",
+    "get_request_seed",
     "process_batches_with_policy",
     "redact_config_for_logging",
     "require_document_id",
-    "sample_seed_for_item",
     "save_failed_items",
     "validate_document_ids",
 ]
@@ -44,10 +43,7 @@ logger = init_logger("inference_common")
 def _batch_item_identity(item: dict[str, Any]) -> dict[str, Any]:
     """Return stable, compact identity fields for a failed batch item."""
     identity: dict[str, Any] = {}
-    for key in (
-        "doc_id",
-        "sample_index",
-    ):
+    for key in ("doc_id",):
         if key in item:
             identity[key] = item[key]
     return identity
@@ -96,15 +92,15 @@ def process_batches_with_policy(
 
 @dataclass
 class ResumeState:
-    """Completed sample indices and recorded prompts keyed by document ID."""
+    """Completed row counts and recorded prompts keyed by document ID."""
 
-    completed_indices: dict[str, set[int]] = field(default_factory=dict)
+    completed_counts: dict[str, int] = field(default_factory=dict)
     prompts: dict[str, str] = field(default_factory=dict)
 
     @property
     def completed_count(self) -> int:
         """Return the total number of completed samples represented by the state."""
-        return sum(len(indices) for indices in self.completed_indices.values())
+        return sum(self.completed_counts.values())
 
 
 def is_local_endpoint(base_url: str) -> bool:
@@ -150,25 +146,29 @@ def validate_document_ids(items: list[dict[str, Any]]) -> None:
             )
 
 
-def sample_seed_for_item(base_seed: int, item: dict[str, Any]) -> int:
-    """Derive a stable independent backend seed for one generated sample.
-
-    The document ID and sample index are part of the seed so repeated requests
-    for the same prompt do not accidentally reuse one deterministic sequence,
-    while resume runs still reproduce the same sample.
-    """
+def _derive_request_seed(
+    base_seed: int, item: dict[str, Any], generation_ordinal: int
+) -> int:
+    """Derive a stable seed for one repeated generation request."""
     if type(base_seed) is not int or base_seed < 0:
         raise ValueError(f"base_seed must be non-negative, got {base_seed}")
+    if generation_ordinal < 0:
+        raise ValueError("generation_ordinal must be non-negative")
     document_id = str(item.get("doc_id") or "")
     prompt = str(item.get("prompt") or item.get("question") or "")
-    sample_index = item.get("sample_index", 0)
-    if type(sample_index) is not int or sample_index < 0:
-        raise ValueError(f"sample_index must be a non-negative int, got {sample_index!r}")
-    payload = f"{base_seed}\0{document_id}\0{prompt}\0{sample_index}".encode(
+    payload = f"{base_seed}\0{document_id}\0{prompt}\0{generation_ordinal}".encode(
         "utf-8", errors="replace"
     )
     # Keep the value within the range accepted by common vLLM backends.
     return int.from_bytes(hashlib.sha256(payload).digest()[:4], "big") & 0x7FFFFFFF
+
+
+def get_request_seed(item: dict[str, Any]) -> int:
+    """Consume the transient seed attached during request expansion."""
+    value = item.get("_request_seed")
+    if type(value) is not int or value < 0:
+        raise ValueError("Expanded inference item is missing a valid request seed")
+    return value
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -212,7 +212,7 @@ def load_resume_state(
     *,
     repair_truncated_last_line: bool = False,
 ) -> ResumeState:
-    """Load strict ``doc_id``/``sample_index`` resume state from output JSONL."""
+    """Load completed-row counts keyed by stable document ID."""
     state = ResumeState()
     output_path = Path(output_file)
     if not output_path.exists() or output_path.stat().st_size == 0:
@@ -241,21 +241,10 @@ def load_resume_state(
                     f"Resume file {output_path} line {line_num} is missing required "
                     "'doc_id'; migrate legacy resume output before continuing"
                 )
-            sample_index = item.get("sample_index")
-            if type(sample_index) is not int or sample_index < 0:
-                raise ValueError(
-                    f"Resume file {output_path} line {line_num} sample_index must "
-                    f"be a non-negative int, got {sample_index!r}"
-                )
-
             document_key = str(document_id)
-            completed = state.completed_indices.setdefault(document_key, set())
-            if sample_index in completed:
-                raise ValueError(
-                    f"Resume file {output_path} line {line_num} duplicates "
-                    f"doc_id={document_key!r}, sample_index={sample_index}"
-                )
-            completed.add(sample_index)
+            state.completed_counts[document_key] = (
+                state.completed_counts.get(document_key, 0) + 1
+            )
 
             prompt = item.get(input_key) or item.get("prompt")
             if prompt is not None and str(prompt).strip():
@@ -277,9 +266,6 @@ def _is_completed_resume_record(
     item: dict[str, Any], response_key: str, output_path: Path, line_num: int
 ) -> bool:
     """Validate the one-result-per-row protocol and report completion."""
-    verifier_response = item.get("Verifier_response")
-    if isinstance(verifier_response, str) and verifier_response.strip():
-        return True
     if item.get("logprobs") is not None:
         return True
 
@@ -361,26 +347,16 @@ def _parse_resume_record(
     return line_num, item
 
 
-def missing_sample_indexes(target_samples: int, completed: set[int]) -> list[int]:
-    """Return the exact non-contiguous sample indices still required."""
-    if target_samples <= 0:
-        raise ValueError(f"target_samples must be positive, got {target_samples}")
-    return [index for index in range(target_samples) if index not in completed]
-
-
 def expand_data_with_resume(
     raw_data: list[dict[str, Any]],
     resume_state: ResumeState,
     input_key: str,
     n_samples: int,
     *,
+    base_seed: int,
     prompt_resolver: Callable[[dict[str, Any]], str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Expand every input into one record per missing sample index.
-
-    All inference backends consume this canonical shape and generate exactly
-    one response per record. Explicit indices preserve holes during resume.
-    """
+    """Copy each input once per remaining generation request."""
     if not input_key:
         raise ValueError("input_key must be non-empty")
     if n_samples <= 0:
@@ -407,10 +383,17 @@ def expand_data_with_resume(
                 f"Input record at index {index} changed prompt for doc_id="
                 f"{document_id!r}; use a new output file"
             )
-        completed = resume_state.completed_indices.get(document_id, set())
-        for sample_index in missing_sample_indexes(n_samples, completed):
+        completed = resume_state.completed_counts.get(document_id, 0)
+        if completed > n_samples:
+            raise ValueError(
+                f"Resume output contains {completed} rows for doc_id={document_id!r}, "
+                f"exceeding requested n_samples={n_samples}"
+            )
+        for generation_ordinal in range(completed, n_samples):
             item = copy.deepcopy(source)
-            item["sample_index"] = sample_index
+            item["_request_seed"] = _derive_request_seed(
+                base_seed, item, generation_ordinal
+            )
             item["expected_samples"] = n_samples
             expanded.append(item)
     return expanded
@@ -419,8 +402,7 @@ def expand_data_with_resume(
 def build_vllm_llm_kwargs(args: Any) -> dict[str, Any]:
     """Assemble the vLLM ``LLM(**kwargs)`` constructor arguments.
 
-    Shared by the offline and verifier runners, whose argument classes both
-    inherit the same ``VLLMEngineArguments`` fields.  Optional fields
+    Used by the offline runner. Optional fields
     (``max_num_batched_tokens``, ``quantization``, ``revision``) are only
     included when explicitly set.
     """
@@ -530,7 +512,6 @@ def _failure_id(entry: dict[str, Any]) -> str:
     source = entry.get("item") if isinstance(entry.get("item"), dict) else entry
     identity = {
         "doc_id": source.get("doc_id"),
-        "sample_index": source.get("sample_index"),
         "error_category": entry.get("error_category")
         or entry.get("error_type")
         or "unknown",
