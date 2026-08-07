@@ -466,7 +466,6 @@ class TestLoadData:
         assert len(loaded) == 2
         assert all(item["doc_id"] == "test:0" for item in loaded)
         assert len({item["_request_seed"] for item in loaded}) == 2
-        assert all(item["expected_samples"] == 4 for item in loaded)
 
     def test_load_data_uses_completed_row_count(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path, n_samples=4)
@@ -492,7 +491,6 @@ class TestLoadData:
         loaded = runner.load_data()
 
         assert len(loaded) == 2
-        assert all(item["expected_samples"] == 4 for item in loaded)
         assert all(
             not any(key.startswith("_llmeval_") for key in item) for item in loaded
         )

@@ -792,12 +792,6 @@ class EvalTaskArguments:
         default="compact",
         metadata={"help": "Per-item result schema: compact or debug."},
     )
-    expected_samples: int = field(
-        default=0,
-        metadata={
-            "help": "Expected generations per problem for multi-sample metrics (0=from output)."
-        },
-    )
     mc_aggregation: str = field(
         default="first",
         metadata={
@@ -908,10 +902,6 @@ class EvalTaskArguments:
             raise ValueError(
                 "output_schema must be one of ('compact', 'debug'), "
                 f"got: {self.output_schema!r}"
-            )
-        if self.expected_samples < 0:
-            raise ValueError(
-                f"expected_samples must be non-negative, got {self.expected_samples}"
             )
         if self.bootstrap_samples < 0:
             raise ValueError(

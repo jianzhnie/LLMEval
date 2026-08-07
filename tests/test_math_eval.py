@@ -601,42 +601,36 @@ class TestRepeatedMathRows:
 # ===========================================================================
 
 
-def _scored_sample(doc_id: str, *, correct: bool, expected: int = 64) -> dict:
+def _scored_sample(doc_id: str, *, correct: bool) -> dict:
     """Fabricate one scored sample row for _build_problem_level_metrics."""
     return {
         "doc_id": doc_id,
         "accuracy": 1.0 if correct else 0.0,
         "extracted_answer": "5" if correct else "6",
         "evaluation_status": "completed",
-        "expected_samples": expected,
     }
 
 
 class TestProblemCompleteness:
-    """@k metrics aggregate problems with the requested row count."""
+    """@k metrics use the number of rows observed for each problem."""
 
-    def test_partial_problem_excluded_from_pass_at_k(self) -> None:
-        """A problem observed at 10/64 samples must not enter problem_pass@64."""
+    def test_problem_depth_comes_from_grouped_rows(self) -> None:
+        """Ten rows for one problem produce a complete problem_pass@10 cohort."""
         from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
 
         rows = [_scored_sample("p1", correct=i == 0) for i in range(10)]
-        problems, metrics, observations = _build_problem_level_metrics(
-            rows, expected_samples=64
-        )
+        problems, metrics, observations = _build_problem_level_metrics(rows)
         assert problems[0]["sample_count"] == 10
-        assert problems[0]["complete"] is False
-        # Empty cohort: explicit 0.0 with no observations, no division error.
-        assert metrics["problem_pass@64"] == 0.0
-        assert metrics["problem_majority@64"] == 0.0
-        assert observations["problem_pass@64"] == []
-        assert observations["problem_majority@64"] == []
+        assert problems[0]["complete"] is True
+        assert metrics["problem_pass@10"] == pytest.approx(1.0)
+        assert observations["problem_pass@10"] == [1.0]
 
     def test_full_coverage_enters_pass_at_k(self) -> None:
         """64 rows aggregate normally."""
         from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
 
         rows = [_scored_sample("p1", correct=i < 63) for i in range(64)]
-        problems, metrics, _ = _build_problem_level_metrics(rows, expected_samples=64)
+        problems, metrics, _ = _build_problem_level_metrics(rows)
         assert problems[0]["complete"] is True
         assert metrics["problem_pass@64"] == pytest.approx(1.0)
         assert metrics["problem_majority@64"] == pytest.approx(1.0)
@@ -645,7 +639,7 @@ class TestProblemCompleteness:
         from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
 
         rows = [_scored_sample("p1", correct=False) for _ in range(64)]
-        problems, metrics, _ = _build_problem_level_metrics(rows, expected_samples=64)
+        problems, metrics, _ = _build_problem_level_metrics(rows)
         assert problems[0]["sample_count"] == 64
         assert problems[0]["complete"] is True
         assert metrics["problem_pass@64"] == 0.0
@@ -653,9 +647,9 @@ class TestProblemCompleteness:
     def test_failed_rows_do_not_make_problem_complete(self) -> None:
         from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
 
-        completed = _scored_sample("p1", correct=True, expected=2)
+        completed = _scored_sample("p1", correct=True)
         timeout = {
-            **_scored_sample("p1", correct=False, expected=2),
+            **_scored_sample("p1", correct=False),
             "evaluation_status": "timeout",
         }
 
@@ -666,40 +660,20 @@ class TestProblemCompleteness:
         assert problems[0]["complete"] is False
         assert metrics["problem_pass@2"] == 0.0
 
-    def test_extra_rows_keep_problem_complete(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Rows beyond the requested depth warn but no longer exclude the problem."""
-        import logging
-
-        import llmeval.tasks.math_eval.math_score as math_mod
-
-        rows = [_scored_sample("p1", correct=False) for _ in range(65)]
-        math_mod.logger.addHandler(caplog.handler)
-        try:
-            with caplog.at_level(logging.WARNING, logger="math_score"):
-                problems, metrics, _ = math_mod._build_problem_level_metrics(
-                    rows, expected_samples=64
-                )
-        finally:
-            math_mod.logger.removeHandler(caplog.handler)
-        assert problems[0]["sample_count"] == 65
-        assert problems[0]["complete"] is True
-        assert metrics["problem_pass@64"] == 0.0
-        assert any("65 completed rows" in r.message for r in caplog.records)
-
-    def test_bool_expected_samples_is_ignored(self) -> None:
-        """``True``/``False`` are not valid expected sample counts."""
+    def test_all_rows_define_problem_depth(self) -> None:
+        """Sixty-five rows form a problem_pass@65 cohort without external metadata."""
         from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
 
-        row = {**_scored_sample("p1", correct=True), "expected_samples": True}
-        problems, metrics, _ = _build_problem_level_metrics([row])
-        assert problems[0]["expected_samples"] == 1  # falls back to sample count
+        rows = [_scored_sample("p1", correct=False) for _ in range(65)]
+        problems, metrics, _ = _build_problem_level_metrics(rows)
+        assert problems[0]["sample_count"] == 65
         assert problems[0]["complete"] is True
-        assert metrics["problem_pass@1"] == pytest.approx(1.0)
+        assert metrics["problem_pass@65"] == 0.0
 
-    def test_mixed_problems_denominator_only_complete(self, tmp_path: Path) -> None:
-        """With mixed problems, pass@k/majority@k divide by complete problems."""
+    def test_mixed_sampling_depths_create_separate_cohorts(
+        self, tmp_path: Path
+    ) -> None:
+        """Problems with different row counts produce independent @k cohorts."""
         from llmeval.tasks.math_eval.math_score import score_math_result
 
         data = [
@@ -723,17 +697,16 @@ class TestProblemCompleteness:
             cache_path=str(tmp_path / "cache.jsonl"),
             max_workers=2,
             timeout=60,
-            expected_samples=2,
         )
-        # Only the complete problem enters the @2 cohort.
         assert result.metrics["problem_pass@2"] == pytest.approx(1.0)
         assert result.metrics["problem_majority@2"] == pytest.approx(1.0)
+        assert result.metrics["problem_pass@1"] == pytest.approx(1.0)
         problems = result.details["problem_level"]
         assert problems[0]["complete"] is True
-        assert problems[1]["complete"] is False
-        assert result.details["complete_problem_count"] == 1
-        assert result.details["incomplete_problem_count"] == 1
-        assert result.details["excluded_problem_doc_ids"] == ["doc:aime24:1"]
+        assert problems[1]["complete"] is True
+        assert result.details["complete_problem_count"] == 2
+        assert result.details["incomplete_problem_count"] == 0
+        assert result.details["excluded_problem_doc_ids"] == []
 
     def test_all_incomplete_reports_zero_and_summary(self, tmp_path: Path) -> None:
         """Zero complete problems: @k is 0.0 and the summary says so."""
@@ -743,7 +716,11 @@ class TestProblemCompleteness:
             {
                 **_math_item("7", ["$\\boxed{7}$"]),
                 "doc_id": "aime24:0",
-            }
+            },
+            {
+                **_math_item("7", []),
+                "doc_id": "aime24:0",
+            },
         ]
         result = score_math_result(
             eval_dataset=data,
@@ -752,7 +729,6 @@ class TestProblemCompleteness:
             cache_path=str(tmp_path / "cache.jsonl"),
             max_workers=2,
             timeout=60,
-            expected_samples=2,
         )
         assert result.metrics["problem_pass@2"] == 0.0
         assert result.metrics["problem_majority@2"] == 0.0

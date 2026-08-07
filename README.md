@@ -252,8 +252,9 @@ read-only host filesystem, a non-privileged user, and external resource limits.
 
 Multi-sample math summaries include `accuracy`, `problem_pass@k`,
 `problem_majority@k`, and per-problem `correct_samples`, `observed_samples`, and
-`expected_samples`. Pass `--expected_samples 64` when scoring legacy output that
-does not carry its target sample count.
+`sample_count`. The number of rows sharing a `doc_id` determines `k`; a problem
+with failed or timed-out rows is marked incomplete and excluded from problem-level
+metrics.
 
 ## Detailed Usage
 

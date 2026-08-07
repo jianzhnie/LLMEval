@@ -713,7 +713,6 @@ def score_math_result(
     cache_path: str,
     max_workers: int,
     timeout: int,
-    expected_samples: int | None = None,
     persist_legacy: bool = True,
 ) -> ScorerResult:
     """Return math scores through the registry's structured scorer contract.
@@ -762,7 +761,7 @@ def score_math_result(
         for item in scoring_dataset
     )
     details, extra_metrics, problem_observations = _build_problem_level_metrics(
-        scoring_dataset, expected_samples=expected_samples
+        scoring_dataset
     )
     complete_problem_count = sum(1 for problem in details if problem["complete"])
     metrics = {"accuracy": accuracy, **extra_metrics}
@@ -847,25 +846,15 @@ def _majority_cluster(items: list[dict[str, Any]]) -> tuple[str | None, bool]:
 
 def _build_problem_level_metrics(
     scored_dataset: list[dict[str, Any]],
-    expected_samples: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, float], dict[str, list[float]]]:
     """Aggregate sample outcomes into pass@k and majority-vote metrics.
 
-    A problem is complete when its observed row count reaches the requested
-    generation count. Problem-level metrics include complete problems only.
+    The number of rows sharing a ``doc_id`` defines that problem's sampling
+    depth. A problem is complete only when every row was scored successfully;
+    problem-level metrics include complete problems only.
     """
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row_index, item in enumerate(scored_dataset):
-        document_id = item.get("doc_id")
-        item_expected = item.get("expected_samples")
-        if (document_id is None or not str(document_id).strip()) and (
-            (expected_samples is not None and expected_samples > 1)
-            or (isinstance(item_expected, int) and item_expected > 1)
-        ):
-            raise ValueError(
-                "Math problem-level metrics require a non-empty 'doc_id' for "
-                "multi-sample records"
-            )
         problem_id = _problem_identity(item, row_index)
         grouped.setdefault(problem_id, []).append(item)
 
@@ -882,39 +871,13 @@ def _build_problem_level_metrics(
         majority_prediction, majority_correct = _majority_cluster(completed)
         sample_count = len(items)
         observed_samples = len(completed)
-        item_expected = max(
-            [
-                int(item["expected_samples"])
-                for item in items
-                if isinstance(item.get("expected_samples"), int)
-                and not isinstance(item["expected_samples"], bool)
-                and item["expected_samples"] > 0
-            ],
-            default=0,
-        )
-        target_count = (
-            expected_samples
-            if expected_samples and expected_samples > 0
-            else item_expected
-        )
-        target_count = target_count or sample_count
-        if observed_samples > target_count:
-            logger.warning(
-                "Problem %s has %d completed rows, %d more than the expected "
-                "sample count %d; the extra rows still enter sample-level metrics",
-                problem_id,
-                observed_samples,
-                observed_samples - target_count,
-                target_count,
-            )
-        complete = observed_samples >= target_count
+        complete = observed_samples == sample_count
         problems.append(
             {
                 "doc_id": problem_id,
                 "correct_samples": correct_samples,
                 "sample_count": sample_count,
                 "observed_samples": observed_samples,
-                "expected_samples": target_count,
                 "complete": complete,
                 "correct_fraction": correct_samples / sample_count
                 if sample_count
@@ -929,11 +892,11 @@ def _build_problem_level_metrics(
         return [], {}, {}
     metrics: dict[str, float] = {}
     observations: dict[str, list[float]] = {}
-    for k in sorted({problem["expected_samples"] for problem in problems}):
+    for k in sorted({problem["sample_count"] for problem in problems}):
         cohort = [
             problem
             for problem in problems
-            if problem["expected_samples"] == k and problem["complete"]
+            if problem["sample_count"] == k and problem["complete"]
         ]
         pass_key = f"problem_pass@{k}"
         majority_key = f"problem_majority@{k}"

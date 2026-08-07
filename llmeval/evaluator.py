@@ -82,7 +82,6 @@ def evaluate_task(
     bootstrap_samples: int = 1000,
     confidence_level: float = 0.95,
     output_schema: str = "compact",
-    expected_samples: int = 0,
     code_k_values: tuple[int, ...] = (1, 10, 64),
 ) -> float:
     """
@@ -121,7 +120,6 @@ def evaluate_task(
         bootstrap_samples=bootstrap_samples,
         confidence_level=confidence_level,
         output_schema=output_schema,
-        expected_samples=expected_samples,
         code_k_values=code_k_values,
     )
     return result.primary_value
@@ -167,7 +165,6 @@ def evaluate_task_result(
     bootstrap_samples: int = 1000,
     confidence_level: float = 0.95,
     output_schema: str = "compact",
-    expected_samples: int = 0,
     code_k_values: tuple[int, ...] = (1, 10, 64),
 ) -> EvaluationResult:
     """Evaluate a task through the registry and return all declared metrics."""
@@ -188,7 +185,6 @@ def evaluate_task_result(
         bootstrap_samples=bootstrap_samples,
         confidence_level=confidence_level,
         output_schema=output_schema,
-        expected_samples=expected_samples,
         code_k_values=code_k_values,
     )
     registry = _default_registry()
@@ -310,7 +306,6 @@ def main() -> int:
             args.bootstrap_samples,
             args.confidence_level,
             output_schema=args.output_schema,
-            expected_samples=args.expected_samples,
             code_k_values=args.code_k_values_tuple,
         )
 

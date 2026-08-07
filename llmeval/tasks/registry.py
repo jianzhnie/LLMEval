@@ -272,7 +272,6 @@ class EvaluationContext(PreparationContext):
     bootstrap_samples: int = 1000
     confidence_level: float = 0.95
     output_schema: str = "compact"
-    expected_samples: int = 0
     code_k_values: tuple[int, ...] = (1, 10, 64)
 
 
@@ -434,7 +433,6 @@ class MathTask:
             cache_path=str(context.cache_path),
             max_workers=context.max_workers,
             timeout=context.timeout,
-            expected_samples=context.expected_samples or None,
             persist_legacy=False,
         )
         return _build_evaluation_result(scored, context, self)

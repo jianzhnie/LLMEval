@@ -367,7 +367,6 @@ def prepare_sample_requests(
                 int.from_bytes(hashlib.sha256(seed_payload).digest()[:4], "big")
                 & 0x7FFFFFFF
             )
-            item["expected_samples"] = n_samples
             expanded.append(item)
     return expanded
 

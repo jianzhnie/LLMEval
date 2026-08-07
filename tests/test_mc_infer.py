@@ -595,7 +595,6 @@ class TestMCStableResume:
         first = runner.load_data()
         assert len(first) == 3
         assert len({item["_request_seed"] for item in first}) == 3
-        assert all(item["expected_samples"] == 3 for item in first)
         assert all(
             not any(key.startswith("_llmeval_") for key in item) for item in first
         )
@@ -618,7 +617,6 @@ class TestMCStableResume:
         remaining = runner.load_data()
 
         assert len(remaining) == 1
-        assert remaining[0]["expected_samples"] == 3
         assert not any(key.startswith("_llmeval_") for key in remaining[0])
 
     def test_mixed_stable_and_legacy_output_both_resume(self, tmp_path: Path) -> None:
@@ -698,7 +696,6 @@ class TestMCStableResume:
         remaining = runner.load_data()
 
         assert len(remaining) == 1
-        assert remaining[0]["expected_samples"] == 3
         assert not any(key.startswith("_llmeval_") for key in remaining[0])
 
 

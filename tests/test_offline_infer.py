@@ -177,7 +177,6 @@ class TestOfflineInferenceRunner:
 
         assert len(remaining) == 1
         assert remaining[0]["prompt"] == "q"
-        assert remaining[0]["expected_samples"] == 2
 
     def test_write_response_results_appends_generation(self, tmp_path: Path) -> None:
         runner = _runner(tmp_path)
