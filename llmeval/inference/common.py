@@ -19,25 +19,51 @@ from typing import Any
 from urllib.parse import urlparse
 
 from llmeval.utils.log import init_logger
+from llmeval.utils.prompts import is_chat_template_applied
 
 __all__ = [
     "ResumeState",
+    "append_jsonl",
     "build_vllm_llm_kwargs",
+    "ensure_raw_prompt",
     "expand_data_with_resume",
     "get_request_seed",
     "is_explicit_tool_choice",
     "is_local_endpoint",
-    "iter_resume_records",
     "load_jsonl",
     "load_resume_state",
     "process_batches_with_policy",
     "redact_config_for_logging",
     "require_document_id",
     "save_failed_items",
-    "validate_document_ids",
 ]
 
 logger = init_logger("inference_common")
+
+
+def append_jsonl(
+    path: str | Path, records: Sequence[dict[str, Any]], lock: Any
+) -> None:
+    """Append JSON objects under a caller-provided synchronization lock."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock:
+        try:
+            with output_path.open("a", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                handle.flush()
+        except Exception as exc:
+            raise OSError(f"Failed to append JSONL results to {output_path}: {exc}") from exc
+
+
+def ensure_raw_prompt(prompt: str) -> None:
+    """Reject prompts that already contain a serialized chat template."""
+    if is_chat_template_applied(prompt):
+        raise ValueError(
+            "Query already contains a chat_template; provide the raw prompt because "
+            "the inference backend applies its template automatically"
+        )
 
 
 def _batch_item_identity(item: dict[str, Any]) -> dict[str, Any]:

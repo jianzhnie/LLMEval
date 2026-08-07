@@ -269,7 +269,6 @@ declare -a PORTS                    # 存储对应的服务端口
 declare -a FILES                    # 存储发现的数据文件列表（文件名）
 declare -a READY_INSTANCE_NODES     # 存储已就绪实例所属节点（按实例展开）
 declare -a READY_INSTANCE_PORTS     # 存储已就绪实例端口
-declare -a READY_INSTANCE_IDS       # 存储已就绪实例在节点内的 index
 
 # =======================================================
 #                  工具函数区域
@@ -290,8 +289,8 @@ usage() {
 可用环境变量（可覆盖默认值）:
   SSH_USER               远程 SSH 用户名（默认：当前用户）
   MODEL_PATH             模型文件路径
-  TENSOR_PARALLEL_SIZE   张量并行卡数，支持 {1,2,4,8}（默认：4）
-  INSTANCES_PER_NODE     每节点实例数（默认：2）
+  TENSOR_PARALLEL_SIZE   张量并行卡数，支持 {1,2,4,8}（默认：8）
+  INSTANCES_PER_NODE     每节点实例数（默认：1）
   MEMORY_UTILIZATION     显存利用率（默认：0.9）
   MAX_MODEL_LEN          最大上下文长度（默认：65536）
   MAX_NUM_SEQS           vLLM 动态批并发序列数（默认：1024）
@@ -328,30 +327,6 @@ ssh_run() {
     # 使用 $@ 确保命令中的空格和引号被正确传递
     ssh ${SSH_OPTS} "${userhost}" "$@"
 }
-
-# 通过 rsync 同步文件到远程节点
-# 参数：
-#   $1: 本地源路径
-#   $2: 目标节点
-#   $3: 远程目标路径
-# 返回值：rsync 命令的退出码
-rsync_to_node() {
-    local src_path="$1"
-    local node="$2"
-    local dst_path="$3"
-    local userhost="${SSH_USER:+${SSH_USER}@}${node}"
-    local RSYNC_OPTS="-avz --checksum --partial --inplace --no-whole-file --exclude='.*'"
-
-    log_info "🔄 同步文件: ${src_path} -> ${userhost}:${dst_path}"
-
-    if ! rsync ${RSYNC_OPTS} "${src_path}" "${userhost}:${dst_path}"; then
-        log_error "❌ rsync 同步失败: ${src_path} -> ${userhost}:${dst_path}" >&2
-        return 1
-    fi
-
-    log_info "✅ 文件同步完成: ${src_path} -> ${userhost}:${dst_path}"
-}
-
 
 # 日志函数 (带有 Emoji 提示)
 # Args:

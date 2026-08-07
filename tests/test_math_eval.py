@@ -306,7 +306,7 @@ class TestComputeScores:
         assert acc == 0.0
 
     def test_structured_result_counts_with_skipped_item(self, tmp_path: Path) -> None:
-        from llmeval.tasks.math_eval.math_score import compute_score_result
+        from llmeval.tasks.math_eval.math_score import score_math_result
 
         data = [
             _math_item("5", ["$\\boxed{5}$"]),
@@ -316,7 +316,7 @@ class TestComputeScores:
                 "task": "math_opensource/aime24",
             },
         ]
-        result = compute_score_result(
+        result = score_math_result(
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
@@ -333,7 +333,7 @@ class TestComputeScores:
         assert result.metrics["accuracy"] == 1.0
 
     def test_multi_sample_problem_metrics(self, tmp_path: Path) -> None:
-        from llmeval.tasks.math_eval.math_score import compute_score_result
+        from llmeval.tasks.math_eval.math_score import score_math_result
 
         data = [
             {
@@ -362,7 +362,7 @@ class TestComputeScores:
             },
         ]
 
-        result = compute_score_result(
+        result = score_math_result(
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
@@ -434,9 +434,9 @@ class TestRepeatedMathRows:
     """Repeated rows are independent math-generation samples."""
 
     def _score(self, data: list[dict], tmp_path: Path):
-        from llmeval.tasks.math_eval.math_score import compute_score_result
+        from llmeval.tasks.math_eval.math_score import score_math_result
 
-        return compute_score_result(
+        return score_math_result(
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
@@ -575,7 +575,7 @@ class TestProblemCompleteness:
 
     def test_mixed_problems_denominator_only_complete(self, tmp_path: Path) -> None:
         """With mixed problems, pass@k/majority@k divide by complete problems."""
-        from llmeval.tasks.math_eval.math_score import compute_score_result
+        from llmeval.tasks.math_eval.math_score import score_math_result
 
         data = [
             {
@@ -591,7 +591,7 @@ class TestProblemCompleteness:
                 "doc_id": "aime24:1",
             },
         ]
-        result = compute_score_result(
+        result = score_math_result(
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
@@ -612,7 +612,7 @@ class TestProblemCompleteness:
 
     def test_all_incomplete_reports_zero_and_summary(self, tmp_path: Path) -> None:
         """Zero complete problems: @k is 0.0 and the summary says so."""
-        from llmeval.tasks.math_eval.math_score import compute_score_result
+        from llmeval.tasks.math_eval.math_score import score_math_result
 
         data = [
             {
@@ -620,7 +620,7 @@ class TestProblemCompleteness:
                 "doc_id": "aime24:0",
             }
         ]
-        result = compute_score_result(
+        result = score_math_result(
             eval_dataset=data,
             label_key="answer",
             response_key="gen",

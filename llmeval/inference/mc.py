@@ -34,6 +34,7 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
+    append_jsonl,
     expand_data_with_resume,
     get_request_seed,
     is_explicit_tool_choice,
@@ -641,20 +642,8 @@ class MCRunner:
             save_failed_items(self.config.output_file, failed_items)
 
     def _write_result(self, result: dict[str, Any]) -> None:
-        """Write result to output file in a thread-safe manner.
-
-        Args:
-            result: The result dictionary to write
-        """
-        with self._file_lock:
-            try:
-                output_path = Path(self.config.output_file)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(output_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                    f.flush()  # Ensure data is immediately written
-            except Exception as e:
-                raise OSError(f"Failed to write batch results: {e}") from e
+        """Append one result under the runner's write lock."""
+        append_jsonl(self.config.output_file, [result], self._file_lock)
 
     # ------------------------------------------------------------------
     # Loglikelihood mode

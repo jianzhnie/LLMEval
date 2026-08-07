@@ -52,7 +52,6 @@ class EvaluationContext(PreparationContext):
     allow_unsafe_code: bool = False
     bootstrap_samples: int = 1000
     confidence_level: float = 0.95
-    input_key: str = "prompt"
     output_schema: str = "compact"
     expected_samples: int = 0
     code_k_values: tuple[int, ...] = (1, 10, 64)

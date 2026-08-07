@@ -327,30 +327,6 @@ ssh_run() {
     ssh ${SSH_OPTS} "${userhost}" "$@"
 }
 
-# 通过 rsync 同步文件到远程节点
-# 参数：
-#   $1: 本地源路径
-#   $2: 目标节点
-#   $3: 远程目标路径
-# 返回值：rsync 命令的退出码
-rsync_to_node() {
-    local src_path="$1"
-    local node="$2"
-    local dst_path="$3"
-    local userhost="${SSH_USER:+${SSH_USER}@}${node}"
-    local RSYNC_OPTS="-avz --checksum --partial --inplace --no-whole-file --exclude='.*'"
-
-    log_info "🔄 同步文件: ${src_path} -> ${userhost}:${dst_path}"
-
-    if ! rsync ${RSYNC_OPTS} "${src_path}" "${userhost}:${dst_path}"; then
-        log_error "❌ rsync 同步失败: ${src_path} -> ${userhost}:${dst_path}" >&2
-        return 1
-    fi
-
-    log_info "✅ 文件同步完成: ${src_path} -> ${userhost}:${dst_path}"
-}
-
-
 # 日志函数 (带有 Emoji 提示)
 # Args:
 #   $@: msg (string) - 日志消息内容

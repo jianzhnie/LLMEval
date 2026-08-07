@@ -42,7 +42,6 @@ logger = init_logger("code_execute")
 __all__ = [
     "TimeoutException",
     "check_correctness",
-    "create_tempdir",
     "reliability_guard",
     "reliability_restore",
     "swallow_io",

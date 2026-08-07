@@ -27,7 +27,9 @@ from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 
 from llmeval.inference.common import (
+    append_jsonl,
     build_vllm_llm_kwargs,
+    ensure_raw_prompt,
     expand_data_with_resume,
     get_request_seed,
     load_jsonl,
@@ -38,7 +40,7 @@ from llmeval.inference.common import (
 )
 from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.log import init_logger
-from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
+from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
 
 # Initialize logger
 logger = init_logger("offline_vllm_infer", logging.INFO)
@@ -140,14 +142,7 @@ class OfflineInferenceRunner:
         ]
 
     def _prepare_hf_overrides(self) -> dict[str, Any]:
-        """Prepare HuggingFace model overrides from arguments.
-
-        This method processes the configuration arguments and creates a dictionary
-        of overrides that will be passed to the HuggingFace model loading process.
-
-        Returns:
-            Dictionary of overrides for HuggingFace model loading.
-        """
+        """Return explicitly configured Hugging Face model overrides."""
         hf_overrides: dict[str, Any] = {}
 
         # Use the parsed rope_scaling_dict instead of the raw string
@@ -159,28 +154,7 @@ class OfflineInferenceRunner:
     def convert_to_messages_format(
         self, item: dict[str, Any]
     ) -> list[dict[str, str]] | None:
-        """Convert an input record to the vLLM chat messages format.
-
-        This method handles the conversion of input records to the chat message format
-        required by vLLM, including:
-        - Field key resolution with fallbacks
-        - Input validation and sanitization
-        - Chat template validation to prevent double-application
-        - System prompt integration
-
-        Expected item keys:
-            - Prefer `self.args.input_key`; fallback to 'prompt'.
-            - Prefer `self.args.label_key`; fallback to 'answer'.
-
-        Args:
-            item: Input record dictionary containing prompt and label data.
-
-        Returns:
-            The messages list if conversion succeeds, otherwise None.
-
-        Raises:
-            ValueError: If required fields are missing, invalid, or chat template is already applied.
-        """
+        """Convert a raw prompt record into vLLM chat messages."""
         input_key: str = self.args.input_key
 
         # Only input_key is required for inference; prompt is the canonical fallback.
@@ -197,17 +171,7 @@ class OfflineInferenceRunner:
             logger.warning("Empty prompt field in item")
             return None
 
-        # Check if chat template is already applied
-        if is_chat_template_applied(prompt_str):
-            logger.warning(
-                "Chat template appears to be already applied to the query. "
-                "Please use the raw prompt, as vLLM will apply the Hugging Face "
-                "chat template automatically."
-            )
-            raise ValueError(
-                "Your query has been applied with chat_template, please use the raw prompt, "
-                "because the vLLM will apply the Hugging Face chat template automatically!"
-            )
+        ensure_raw_prompt(prompt_str)
 
         # Build messages list
         messages: list[dict[str, str]] = []
@@ -236,30 +200,16 @@ class OfflineInferenceRunner:
         self._handle_sample_failures(failures)
         if not valid_pairs:
             return
-        with self._file_lock:
-            try:
-                with open(self.args.output_file, "a", encoding="utf-8") as f:
-                    for original_item, model_response in valid_pairs:
-                        result = dict(original_item)
-                        result.pop("_request_seed", None)
-                        result[self.args.response_key] = [model_response]
-                        f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                    f.flush()
-            except Exception as e:
-                raise OSError(f"Failed to write batch results: {e}") from e
+        results: list[dict[str, Any]] = []
+        for original_item, model_response in valid_pairs:
+            result = dict(original_item)
+            result.pop("_request_seed", None)
+            result[self.args.response_key] = [model_response]
+            results.append(result)
+        append_jsonl(self.args.output_file, results, self._file_lock)
 
     def _extract_model_response(self, output: RequestOutput) -> str:
-        """Extract text response from vLLM output object.
-
-        This method safely extracts the generated text from vLLM's RequestOutput
-        object, handling various edge cases and potential errors.
-
-        Args:
-            output: vLLM RequestOutput object.
-
-        Returns:
-            Extracted text response, empty string if extraction fails.
-        """
+        """Extract the first vLLM response text, or return an empty string."""
         if output is None:
             return ""
 
@@ -274,32 +224,14 @@ class OfflineInferenceRunner:
             return ""
 
     def load_data(self) -> list[dict[str, Any]]:
-        """Load and expand the dataset, handling resume functionality per prompt.
-
-        This method orchestrates the complete data loading process including:
-        - Raw data loading from input file
-        - Resume functionality by checking completed samples
-        - Data expansion based on remaining samples needed
-        - Comprehensive validation and error handling
-
-        Returns:
-            Expanded dataset where each record appears as many times as its
-            remaining required generations.
-
-        Raises:
-            FileNotFoundError: If the input file does not exist.
-            json.JSONDecodeError: If an input line is not valid JSON.
-            ValueError: If the dataset is empty or invalid.
-        """
+        """Load input and expand only requests not completed by resume."""
         logger.info(f"Loading data from: {self.args.input_file}")
 
         # Load raw data
         raw_data: list[dict[str, Any]] = load_jsonl(self.args.input_file)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
-        # Check for completed samples. Track the explicit completed index set
-        # (not just a count) so a partially-failed sample in the middle of a
-        # run is regenerated instead of duplicating the highest contiguous count.
+        # Resume tracks completed output row counts per stable document.
         resume_state = load_resume_state(
             self.args.output_file,
             self.args.input_key,
@@ -328,21 +260,7 @@ class OfflineInferenceRunner:
         return expanded_data
 
     def process_and_write_batch(self, batch_data: Sequence[dict[str, Any]]) -> None:
-        """Process a single batch of data and write results to file.
-
-        This method handles the complete processing of a batch including:
-        - Conversion of items to messages format with validation
-        - Filtering out invalid items safely
-        - Running vLLM chat inference
-        - Persisting outputs for valid items
-        - Comprehensive error handling and logging
-
-        Args:
-            batch_data: Batch of input items to process.
-
-        Raises:
-            RuntimeError: If the vLLM engine is not initialized or processing fails.
-        """
+        """Validate, generate, and persist one vLLM batch."""
         if not batch_data:
             logger.warning("Empty batch data provided")
             return
@@ -396,21 +314,7 @@ class OfflineInferenceRunner:
         save_failed_items(self.args.output_file, failures)
 
     def run(self) -> None:
-        """Run the main inference process end-to-end.
-
-        This method orchestrates the complete inference process including:
-        - File path validation
-        - Data loading with resume functionality
-        - Output directory creation
-        - vLLM engine initialization
-        - Batch processing with progress tracking
-        - Comprehensive error handling
-
-        Raises:
-            FileNotFoundError: If input file doesn't exist.
-            ValueError: If output file path is not provided.
-            RuntimeError: If inference process fails.
-        """
+        """Load, resume, execute, and persist offline inference."""
         # Validate file paths
         if not self.args.input_file or not Path(self.args.input_file).exists():
             raise FileNotFoundError(f"Input file not found: {self.args.input_file}")
@@ -440,14 +344,7 @@ class OfflineInferenceRunner:
         )
 
     def _process_batches(self, eval_dataset: list[dict[str, Any]]) -> None:
-        """Process the evaluation dataset in batches.
-
-        This method handles the batch processing of the evaluation dataset with
-        progress tracking and comprehensive error handling.
-
-        Args:
-            eval_dataset: Dataset to process.
-        """
+        """Process the evaluation dataset under the configured batch policy."""
         total_batches: int = (
             len(eval_dataset) + self.args.batch_size - 1
         ) // self.args.batch_size
@@ -471,23 +368,7 @@ class OfflineInferenceRunner:
             )
 
 
-def main(args: OfflineInferArguments) -> None:
-    """Main function to run the vLLM offline inference process.
-
-    This function serves as the main entry point for the offline inference
-    process, handling initialization and execution with comprehensive error handling.
-
-    Args:
-        args: Configuration arguments for the inference process
-
-    Backend, schema, and persistence errors propagate to the CLI boundary.
-    """
-    runner = OfflineInferenceRunner(args)
-    runner.run()
-
-
 if __name__ == "__main__":
-    """Command-line interface for vLLM offline inference."""
     try:
         # Parse command line arguments
         parser = HfArgumentParser(OfflineInferArguments)  # type: ignore[arg-type]
@@ -504,8 +385,7 @@ if __name__ == "__main__":
             )
         )
 
-        # Run main inference process
-        main(eval_args)
+        OfflineInferenceRunner(eval_args).run()
 
     except ImportError as e:
         logger.error(f"❌ A required library is missing: {e}. Please install it.")

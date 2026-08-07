@@ -454,18 +454,6 @@ def process_answers(
             failure_stage="verification",
             failure_reason="timeout",
         )
-    except ValueError as ve:
-        if _math_text_equiv(gold_answer_text, generated_text):
-            logger.debug("Fallback normalization matched job %d after: %s", index, ve)
-            return result(1.0, generated_text, gold_answer_text, fallback_matched=True)
-        logger.warning("Math verification value error for job %d: %s", index, ve)
-        return result(
-            0.0,
-            None,
-            gold_answer_text,
-            failure_stage="verification",
-            failure_reason=str(ve),
-        )
     except Exception as e:
         if _math_text_equiv(gold_answer_text, generated_text):
             logger.debug("Fallback normalization matched job %d after %s", index, e)
@@ -796,11 +784,6 @@ def score_math_result(
         timeout_count=timeout_count,
         failure_counts=failure_counts,
     )
-
-
-# Compatibility alias for library callers that used the pre-registry name.
-# Keep this as a direct alias rather than a pass-through wrapper.
-compute_score_result = score_math_result
 
 
 def _expand_math_samples(

@@ -59,18 +59,13 @@ from llmeval.utils.log import init_logger
 
 __all__ = [
     "MCScoreResult",
-    "build_result",
     "extract_answer",
     "merge_generate_records",
-    "process_item",
     "score_generate",
-    "score_generate_item",
     "score_generate_result",
-    "score_items",
     "score_loglikelihood",
     "score_loglikelihood_item",
     "score_loglikelihood_result",
-    "write_cache",
 ]
 
 logger = init_logger("mc_score")
@@ -698,34 +693,18 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         isinstance(count, int | float) and count > 0 for count in byte_count_values
     )
     if has_char_counts:
-        normed = [
-            lp / float(count)
-            for lp, count in zip(logprobs, char_count_values, strict=True)
-        ]
-        is_correct_norm = max(range(len(normed)), key=normed.__getitem__) == gold
+        is_correct_norm = argmax_normalized(logprobs, char_count_values) == gold
     elif choices and len(choices) == len(logprobs):
         choice_lens = [max(len(str(choice)), 1) for choice in choices]
-        normed = [lp / length for lp, length in zip(logprobs, choice_lens, strict=True)]
-        is_correct_norm = max(range(len(normed)), key=normed.__getitem__) == gold
+        is_correct_norm = argmax_normalized(logprobs, choice_lens) == gold
     else:
         is_correct_norm = is_correct
 
     if has_byte_counts:
-        normed_bytes = [
-            lp / float(count)
-            for lp, count in zip(logprobs, byte_count_values, strict=True)
-        ]
-        is_correct_bytes = (
-            max(range(len(normed_bytes)), key=normed_bytes.__getitem__) == gold
-        )
+        is_correct_bytes = argmax_normalized(logprobs, byte_count_values) == gold
     elif choices and len(choices) == len(logprobs):
         choice_bytes = [max(len(str(choice).encode("utf-8")), 1) for choice in choices]
-        normed_bytes = [
-            lp / length for lp, length in zip(logprobs, choice_bytes, strict=True)
-        ]
-        is_correct_bytes = (
-            max(range(len(normed_bytes)), key=normed_bytes.__getitem__) == gold
-        )
+        is_correct_bytes = argmax_normalized(logprobs, choice_bytes) == gold
     else:
         is_correct_bytes = is_correct
 
@@ -736,6 +715,17 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         "correct_norm": is_correct_norm,
         "correct_bytes": is_correct_bytes,
     }
+
+
+def argmax_normalized(
+    logprobs: list[float], lengths: list[int | float]
+) -> int:
+    """Return the first argmax after dividing scores by positive lengths."""
+    normalized = [
+        score / float(length)
+        for score, length in zip(logprobs, lengths, strict=True)
+    ]
+    return max(range(len(normalized)), key=normalized.__getitem__)
 
 
 def score_generate_item(

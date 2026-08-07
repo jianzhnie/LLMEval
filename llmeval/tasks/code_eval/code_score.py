@@ -141,12 +141,7 @@ def extract_code(text: object) -> str:
     return text.rstrip()
 
 
-def _extract_code_filter(text: str) -> str:
-    """Text-filter adapter for :func:`extract_code`."""
-    return extract_code(text)
-
-
-CODE_FILTER_REGISTRY.register("extract_code", _extract_code_filter, version="1")
+CODE_FILTER_REGISTRY.register("extract_code", extract_code, version="1")
 CODE_GENERATION_PIPELINE = CODE_FILTER_REGISTRY.build_pipeline(
     "code_generation", "1", "strip_reasoning", "extract_code"
 )

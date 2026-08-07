@@ -25,6 +25,8 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
+    append_jsonl,
+    ensure_raw_prompt,
     expand_data_with_resume,
     get_request_seed,
     is_explicit_tool_choice,
@@ -36,7 +38,7 @@ from llmeval.inference.common import (
 )
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
-from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY, is_chat_template_applied
+from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
 from llmeval.utils.retry import call_with_retry
 
 logger = init_logger("online_vllm_server", logging.INFO)
@@ -126,34 +128,8 @@ class InferenceClient:
     def _prepare_messages(
         self, query: str, system_prompt: str | None
     ) -> list[dict[str, str]]:
-        """Prepare messages for the API call by formatting them into the expected structure.
-
-        This method constructs the message list in the format expected by the OpenAI API.
-        It validates the input to ensure no chat template has been pre-applied and
-        adds the system prompt if provided.
-
-        Args:
-            query: User's input query text
-            system_prompt: Optional system prompt to set conversation context and behavior
-
-        Returns:
-            List[Dict[str, str]]: A list of message dictionaries in OpenAI chat format,
-                                 each containing 'role' and 'content' keys
-
-        Raises:
-            ValueError: If chat template is already applied to the query, to prevent
-                      double-application of templates
-        """
-        if is_chat_template_applied(query):
-            logger.warning(
-                "Chat template appears to be already applied to the query. "
-                "Please use the raw prompt, as vLLM will apply the Hugging Face "
-                "chat template automatically."
-            )
-            raise ValueError(
-                "Your query has been applied with chat_template, please use the raw prompt, "
-                "because the vLLM will apply the Hugging Face chat template automatically!"
-            )
+        """Build OpenAI chat messages from a raw query."""
+        ensure_raw_prompt(query)
 
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -174,38 +150,7 @@ class InferenceClient:
         *,
         seed: int | None = None,
     ) -> str:
-        """Fetch content from the OpenAI API with comprehensive retry logic.
-
-        This method handles the core interaction with the OpenAI API, including
-        parameter validation, message preparation, and error handling. It supports
-        various generation parameters and includes built-in retry logic for
-        transient errors.
-
-        Args:
-            query: User's input query
-            system_prompt: System prompt for the conversation (optional)
-            model_name: The model to use for generation (e.g., 'gpt-3.5-turbo')
-            max_tokens: Maximum tokens to generate (1 to model's context limit)
-            temperature: The sampling temperature (0.0 to 2.0)
-            top_p: The top-p value for nucleus sampling (0.0 to 1.0)
-            top_k: The top-k value for sampling (positive integer)
-            enable_thinking: Whether to enable the "thinking" feature
-
-        Returns:
-            The generated content string. May be empty ("") when the model
-            produced no usable content (e.g. context length exceeded, or a
-            reasoning model exhausted max_tokens during the thinking phase);
-            callers treat an empty string as a failed sample.
-
-        Raises:
-            ClientError: If there's a non-retryable API issue or max retries exceeded
-            ValueError: If input parameters are invalid or out of range
-
-        Note:
-            The method includes automatic retry logic for certain types of API
-            errors (connection issues, rate limits) but will raise exceptions
-            for non-recoverable errors.
-        """
+        """Generate one response, returning an empty string for null content."""
         call_args = self._build_call_args(
             query,
             system_prompt,
@@ -342,48 +287,10 @@ class InferenceClient:
 
 
 class InferenceRunner:
-    """
-    Main class to handle the inference process with concurrent execution.
-
-    This class orchestrates the entire inference pipeline, including:
-    - Data loading and validation
-    - Resume functionality for interrupted runs
-    - Concurrent processing with thread management
-    - Progress tracking and reporting
-    - Error handling and recovery
-    - Result persistence
-
-    Attributes:
-        args (OnlineInferArguments): Configuration arguments for the inference process
-        client (InferenceClient): The inference client instance for API interactions
-        system_prompt (Optional[str]): System prompt template for conversation context
-        _file_lock (threading.Lock): Thread lock for safe file writing operations
-        _stats (Dict[str, int]): Runtime statistics for monitoring progress
-    """
+    """Concurrent OpenAI-compatible inference runner with resume support."""
 
     def __init__(self, args: OnlineInferArguments) -> None:
-        """Initialize the inference runner with comprehensive validation and setup.
-
-        Sets up the inference pipeline with the provided configuration, including:
-        - Client initialization
-        - System prompt configuration
-        - Thread safety mechanisms
-        - Progress monitoring
-
-        Args:
-            args: Configuration arguments containing all necessary settings for
-                 the inference pipeline, including API configuration, input/output
-                 paths, and generation parameters
-
-        Raises:
-            ValueError: If arguments are invalid, inconsistent, or missing required values
-            FileNotFoundError: If specified input file doesn't exist
-            EnvironmentError: If required environment variables are not set
-
-        Note:
-            The runner is designed for thread-safe concurrent execution with
-            proper resource management and progress tracking.
-        """
+        """Initialize the client, prompt, locks, and counters."""
         self.args: OnlineInferArguments = args
 
         # Initialize client with error handling
@@ -417,23 +324,7 @@ class InferenceRunner:
         self._stats_lock: threading.Lock = threading.Lock()  # Dedicated lock for stats
 
     def load_data(self) -> list[dict[str, Any]]:
-        """Load and prepare the dataset, handling resume functionality.
-
-        This method performs several key operations:
-        1. Loads and validates the input data file
-        2. Checks for previously completed samples
-        3. Expands each remaining sample into one request record
-        4. Validates data structure and content
-
-        Returns:
-            List[Dict[str, Any]]: One record per remaining sample, each with a
-                stable document identity.
-
-        Raises:
-            FileNotFoundError: If input file doesn't exist
-            json.JSONDecodeError: If input file contains invalid JSON
-            ValueError: If input data structure is invalid
-        """
+        """Load input and expand only requests not completed by resume."""
         # Input file validation and loading
         if not os.path.exists(self.args.input_file):
             raise FileNotFoundError(f"Input file not found: {self.args.input_file}")
@@ -472,32 +363,11 @@ class InferenceRunner:
         return prepared_data
 
     def _write_result(self, result: dict[str, Any]) -> None:
-        """Write result to output file in a thread-safe manner.
-
-        Args:
-            result: The result dictionary to write
-        """
-        with self._file_lock:
-            try:
-                with open(self.args.output_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                    f.flush()  # Ensure data is immediately written
-            except Exception as e:
-                raise OSError(f"Failed to write batch results: {e}") from e
+        """Append one result under the runner's write lock."""
+        append_jsonl(self.args.output_file, [result], self._file_lock)
 
     def _extract_query(self, item: Any) -> str | None:
-        """Validate the item structure and extract the query text.
-
-        Updates failure/skip statistics when the item is unusable.  Takes
-        ``Any`` (not ``dict``) because malformed input lines can surface as
-        non-dict items at runtime — that is exactly what this method rejects.
-
-        Args:
-            item: Raw data item (expected to be a dict with a prompt field)
-
-        Returns:
-            The query string, or None if the item is invalid (stats updated).
-        """
+        """Return a usable query, updating stats for malformed input."""
         if not isinstance(item, dict):
             logger.error(f"Invalid item type: {type(item)}, expected dict")
             with self._stats_lock:
@@ -515,19 +385,7 @@ class InferenceRunner:
     def _build_result(
         self, item: dict[str, Any], response: str
     ) -> dict[str, Any] | None:
-        """Validate the API response and append it to the item's gen list.
-
-        Updates failure statistics when the response is unusable. The input
-        item is never mutated; a shallow copy with a fresh gen list is returned.
-
-        Args:
-            item: The source data item
-            response: Generated content; empty string means failure
-                (get_content normalizes null content from reasoning models to "")
-
-        Returns:
-            The result dict, or None if the response is empty (stats updated).
-        """
+        """Build an output row or record an empty-response failure."""
         if not response.strip():
             logger.warning("Empty response received")
             with self._stats_lock:
@@ -540,33 +398,11 @@ class InferenceRunner:
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
-        """Process a single item through the complete inference pipeline.
-
-        This method implements a robust processing pipeline for each input item:
-        1. Input validation and query extraction
-        2. API request preparation and execution
-        3. Response validation and processing
-        4. Result persistence with thread safety
-        5. Comprehensive error handling and recovery
-
-        Args:
-            item: The data item to process containing query and metadata
-
-        Returns:
-            Optional[Dict[str, Any]]: Processed result or None if processing failed
-
-        Note:
-            - Thread-safe execution with proper resource management
-            - Detailed logging of processing steps and errors
-            - Automatic retry logic for transient failures
-            - Progress tracking and statistics collection
-        """
-        # Step 1: Input Validation
+        """Generate, persist, and account for one expanded request."""
         query = self._extract_query(item)
         if not query:
             return None
 
-        # Step 2: API Request
         response = self.client.get_content(
             query=query,
             system_prompt=self.system_prompt,
@@ -579,12 +415,10 @@ class InferenceRunner:
             seed=get_request_seed(item),
         )
 
-        # Step 3: Response Processing
         result = self._build_result(item, response)
         if not result:
             return None
 
-        # Step 4: Result Persistence
         self._write_result(result)
         with self._stats_lock:
             self._stats["processed"] += 1
@@ -642,27 +476,9 @@ class InferenceRunner:
             save_failed_items(self.args.output_file, failed_tasks)
 
     def run(self) -> None:
-        """Execute the complete inference pipeline with monitoring and reporting.
-
-        This method orchestrates the entire inference workflow:
-        1. Configuration validation
-        2. Data loading and preprocessing
-        3. Concurrent execution management
-        4. Progress monitoring and reporting
-        5. Resource cleanup and final reporting
-
-        The pipeline includes automatic resume capability and comprehensive
-        error handling at each stage.
-
-        Raises:
-            FileNotFoundError: If input file is missing
-            ValueError: If configuration is invalid
-            RuntimeError: For unrecoverable execution errors
-        """
+        """Load, resume, execute, and report online inference."""
         start_time = time.perf_counter()
 
-        if not self.args.input_file or not Path(self.args.input_file).exists():
-            raise FileNotFoundError(f"Input file not found: {self.args.input_file}")
         if not self.args.output_file:
             raise ValueError("Output file path is required")
 
@@ -700,26 +516,7 @@ class InferenceRunner:
 
 
 def main() -> None:
-    """
-    Main entry point for the online inference server.
-
-    This function serves as the primary entry point for the inference server,
-    handling:
-    1. Command line argument parsing using HfArgumentParser
-    2. Initialization of the inference runner
-    3. Execution of the inference process
-    4. Comprehensive error handling and logging
-
-    The function uses dataclasses for type-safe argument handling and provides
-    detailed logging of the initialization process and any errors that occur.
-
-    Returns:
-        None
-
-    Raises:
-        SystemExit: If initialization fails or command line arguments are invalid
-        Exception: For any unhandled errors during execution
-    """
+    """Parse online inference arguments and run the CLI."""
     start_time = time.perf_counter()
     try:
         # Parse command line arguments into a strongly typed dataclass
