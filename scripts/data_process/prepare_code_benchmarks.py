@@ -130,9 +130,11 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    failures = 0
     for name in args.benchmarks:
         if name not in BENCHMARKS:
             print(f"[ERROR] Unknown benchmark: {name}. Available: {list(BENCHMARKS)}")
+            failures += 1
             continue
 
         hf_path, hf_config, hf_split = BENCHMARKS[name]
@@ -144,6 +146,7 @@ def main() -> int:
             ds = load_dataset(hf_path, hf_config, split=hf_split)
         except Exception as exc:
             print(f"[ERROR] Failed to load {name}: {exc}")
+            failures += 1
             continue
 
         data: list[dict[str, Any]] = [dict(item) for item in ds]
@@ -163,6 +166,9 @@ def main() -> int:
 
         print(f"[OK]   {name}: {len(records)} items -> {out_path}")
 
+    if failures:
+        print(f"[FAIL] {failures} benchmark(s) failed to prepare.")
+        return 1
     print("[DONE] All code benchmarks prepared.")
     return 0
 

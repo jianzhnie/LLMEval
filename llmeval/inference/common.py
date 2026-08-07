@@ -16,6 +16,7 @@ from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import is_chat_template_applied
 
 __all__ = [
+    "CONTEXT_LENGTH_ERROR",
     "ResumeState",
     "append_jsonl",
     "build_chat_messages",
@@ -26,13 +27,18 @@ __all__ = [
     "is_local_endpoint",
     "load_jsonl",
     "load_resume_state",
-    "process_batches_with_policy",
     "prepare_sample_requests",
+    "process_batches_with_policy",
     "redact_config_for_logging",
     "save_failed_items",
 ]
 
 logger = init_logger("inference_common")
+
+# Value of the "error" field on a permanent-failure result row: the prompt
+# can never fit the model context, so the row is written once (empty
+# response) and resume treats it as completed instead of rerunning it.
+CONTEXT_LENGTH_ERROR = "context_length_exceeded"
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +141,9 @@ def save_failed_items(
     with failed_path.open("a", encoding="utf-8") as handle:
         for entry in failed_items:
             nested_item = entry.get("item")
-            source: dict[str, Any] = nested_item if isinstance(nested_item, dict) else entry
+            source: dict[str, Any] = (
+                nested_item if isinstance(nested_item, dict) else entry
+            )
             identity = {
                 "doc_id": source.get("doc_id"),
                 "error_category": entry.get("error_category")
@@ -246,7 +254,21 @@ def _is_completed_record(
     item: dict[str, Any], response_key: str, output_path: Path, line_num: int
 ) -> bool:
     """Validate the one-result-per-row protocol and report completion."""
-    if item.get("logprobs") is not None:
+    # Permanent-failure rows (e.g. context-length rejections) are written
+    # once with an empty response; they count as completed so resume skips
+    # them instead of rerunning a request that can never succeed.
+    if item.get("error") == CONTEXT_LENGTH_ERROR:
+        return True
+
+    # Only a non-empty list of per-choice numeric scores marks completion;
+    # an input record that happens to carry some other "logprobs" value
+    # must not be mistaken for a finished result row.
+    logprobs = item.get("logprobs")
+    if (
+        isinstance(logprobs, list)
+        and logprobs
+        and all(isinstance(value, int | float) for value in logprobs)
+    ):
         return True
 
     response = item.get(response_key)
@@ -400,10 +422,7 @@ def process_batches_with_policy(
                     "error": str(exc),
                     "batch_index": batch_index,
                     "batch_size": len(batch),
-                    "items": [
-                        {"doc_id": item["doc_id"]} if "doc_id" in item else {}
-                        for item in batch
-                    ],
+                    "items": [{"doc_id": item["doc_id"]} for item in batch],
                 }
             )
         finally:
@@ -441,9 +460,8 @@ def build_vllm_llm_kwargs(args: Any) -> dict[str, Any]:
         llm_kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
     if args.quantization is not None:
         llm_kwargs["quantization"] = args.quantization
-    model_revision = getattr(args, "model_revision", None)
-    if model_revision is not None:
-        llm_kwargs["revision"] = model_revision
+    if args.model_revision is not None:
+        llm_kwargs["revision"] = args.model_revision
     return llm_kwargs
 
 

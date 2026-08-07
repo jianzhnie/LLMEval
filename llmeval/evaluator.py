@@ -62,7 +62,7 @@ def _resolve_cache_path(cache_path: str | Path, task_name: str) -> Path:
     """Resolve legacy directory-style cache paths to a JSONL output file."""
     raw_path = str(cache_path)
     path = Path(cache_path)
-    if (path.exists() and path.is_dir()) or raw_path.endswith((os.sep, "/")):
+    if (path.exists() and path.is_dir()) or raw_path.endswith(os.sep):
         filename = task_name.replace("/", "_") or "evaluation"
         return path / f"{filename}.jsonl"
     return path
@@ -267,10 +267,6 @@ def main() -> int:
                 default=str,
             )
         )
-
-        # Ensure the result output directory exists.
-        output_dir = Path(args.cache_path).parent
-        output_dir.mkdir(parents=True, exist_ok=True)
 
         # Load and validate input data
         try:

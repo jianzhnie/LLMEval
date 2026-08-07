@@ -38,7 +38,6 @@ BENCHMARKS: dict[str, dict] = {
 # Aligned with lm-evaluation-harness prompt format
 MC_PROMPT_TEMPLATE = {
     "mmlu": "{question}\nA. {A}\nB. {B}\nC. {C}\nD. {D}\nAnswer:",
-    "mmlu_pro": "{question}\nA. {A}\nB. {B}\nC. {C}\nD. {D}\nE. {E}\nF. {F}\nG. {G}\nH. {H}\nI. {I}\nJ. {J}\nAnswer:",
     "ceval": "{question}\nA. {A}\nB. {B}\nC. {C}\nD. {D}\n答案：",
 }
 
@@ -166,11 +165,17 @@ def _format_mc_row(
             answer = letters[answer_idx]
         else:
             raw = example.get("answer", "")
-            answer = (
-                raw if raw in letters else letters[int(raw)] if raw.isdigit() else raw
-            )
-            if answer not in letters:
-                raise ValueError(f"mmlu_pro answer label is invalid: {answer!r}")
+            if not isinstance(raw, str):
+                raise ValueError(
+                    f"mmlu_pro answer must be a string, got "
+                    f"{type(raw).__name__}: {raw!r}"
+                )
+            if raw in letters:
+                answer = raw
+            elif raw.isdigit() and 0 <= int(raw) < len(letters):
+                answer = letters[int(raw)]
+            else:
+                raise ValueError(f"mmlu_pro answer label is invalid: {raw!r}")
             answer_idx = letters.index(answer)
         fmt = {"question": example["question"]}
         for i, c in enumerate(choices):

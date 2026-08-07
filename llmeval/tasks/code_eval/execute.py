@@ -87,6 +87,10 @@ _FORBIDDEN_OS_FUNCTIONS: tuple[str, ...] = (
     "lchmod",
     "lchown",
     "open",
+    # Without this, candidate code calling ``os._exit()`` kills the worker
+    # before it writes its result file, turning a wrong answer into an
+    # infrastructure failure excluded from the Pass@k denominator.
+    "_exit",
 )
 
 #: ``shutil`` functions that are disabled by ``reliability_guard``.
@@ -425,11 +429,6 @@ def unsafe_execute(
         exec_globals.setdefault("__name__", "__main__")
 
     with create_tempdir():
-        # Save clean-up helpers before reliability_guard disables them.
-        _saved_rmtree = shutil.rmtree
-        _saved_os_rmdir = os.rmdir
-        _saved_os_chdir = os.chdir
-
         reliability_guard()
         try:
             with swallow_io(), time_limit(timeout) as timeout_state:
@@ -446,9 +445,6 @@ def unsafe_execute(
             return (f"failed: {type(exc).__name__}", _stack)
         finally:
             reliability_restore()
-            shutil.rmtree = _saved_rmtree  # type: ignore[assignment]
-            os.rmdir = _saved_os_rmdir  # type: ignore[assignment]
-            os.chdir = _saved_os_chdir  # type: ignore[assignment]
 
 
 # ===========================================================================

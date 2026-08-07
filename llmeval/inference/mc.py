@@ -35,6 +35,7 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
+    CONTEXT_LENGTH_ERROR,
     append_jsonl,
     build_chat_messages,
     get_request_seed,
@@ -53,7 +54,11 @@ from llmeval.inference.schema import (
 )
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.log import init_logger
-from llmeval.utils.retry import ClientError, call_with_retry
+from llmeval.utils.retry import (
+    ClientError,
+    MalformedResponseError,
+    call_with_retry,
+)
 
 logger = init_logger("mc_infer")
 
@@ -106,23 +111,6 @@ def _aligned_continuation_tokens(
     )
 
 
-class ContinuationLogprobs(list[list[float]]):
-    """Aligned continuation scores plus optional backend token metadata."""
-
-    def __init__(
-        self,
-        scores: list[list[float]],
-        *,
-        token_texts: list[list[str]] | None = None,
-        token_ids: list[list[int] | None] | None = None,
-        error: str | None = None,
-    ) -> None:
-        super().__init__(scores)
-        self.token_texts = token_texts or [[] for _ in scores]
-        self.token_ids = token_ids or [None for _ in scores]
-        self.error = error
-
-
 # ===========================================================================
 # Few-shot formatter (MC-specific)
 # ===========================================================================
@@ -131,8 +119,10 @@ class ContinuationLogprobs(list[list[float]]):
 class FewShotFormatter:
     """Load and format few-shot examples for MC prompts.
 
-    Each few-shot example is formatted as:
-        question\nA. ...\nB. ...\nC. ...\nD. ...\nAnswer: X\n\n
+    Each demonstration is formatted by :meth:`_format_demo` as
+    ``f"{prompt} {answer}"`` — the stored prompt already ends with
+    "Answer:", so only the answer text is appended. Demonstrations are
+    joined with a blank line in :meth:`get_prefix`.
     """
 
     def __init__(self, n_shot: int, few_shot_file: str = "", seed: int = 42) -> None:
@@ -294,7 +284,7 @@ class MCLoglikelihoodClient:
                 logprobs=20,
                 echo=False,
                 timeout=self.timeout,
-                seed=getattr(self, "seed", 0),
+                seed=self.seed,
             )
             top_dict: dict[str, float] = (
                 resp.choices[0].logprobs.top_logprobs[0]
@@ -326,7 +316,14 @@ class MCLoglikelihoodClient:
         return choice_logprobs
 
     def score_continuations(self, request: LoglikelihoodRequest) -> LoglikelihoodResult:
-        """Score complete continuations and return a validated typed result."""
+        """Score complete continuations and return a validated typed result.
+
+        Structurally malformed responses (missing fields, mismatched choice
+        counts) raise :class:`MalformedResponseError` inside the retry loop
+        and are retried; deterministic token-offset mismatches
+        (:class:`ContinuationAlignmentError`) and exhausted retries return a
+        failed (non-exact) result instead.
+        """
 
         def do_request() -> LoglikelihoodResult:
             prompts = [
@@ -341,11 +338,13 @@ class MCLoglikelihoodClient:
                 logprobs=20,
                 echo=True,
                 timeout=self.timeout,
-                seed=getattr(self, "seed", 0),
+                seed=self.seed,
             )
             completions = getattr(response, "choices", []) or []
             if len(completions) != len(request.continuations):
-                raise ValueError("completion count does not match continuation count")
+                raise MalformedResponseError(
+                    "completion count does not match continuation count"
+                )
 
             ordered_completions: list[Any | None] = [None] * len(request.continuations)
             for fallback_index, completion in enumerate(completions):
@@ -360,7 +359,9 @@ class MCLoglikelihoodClient:
                     or index >= len(request.continuations)
                     or ordered_completions[index] is not None
                 ):
-                    raise ValueError("completion indices are invalid or duplicated")
+                    raise MalformedResponseError(
+                        "completion indices are invalid or duplicated"
+                    )
                 ordered_completions[index] = completion
 
             choice_results: list[ChoiceLoglikelihood] = []
@@ -375,18 +376,24 @@ class MCLoglikelihoodClient:
                 if not isinstance(offsets, list | tuple) or not isinstance(
                     token_logprobs, list | tuple
                 ):
-                    raise ValueError("completion is missing token offsets or logprobs")
+                    raise MalformedResponseError(
+                        "completion is missing token offsets or logprobs"
+                    )
                 if len(offsets) != len(token_logprobs) or any(
                     offset is not None and not isinstance(offset, int)
                     for offset in offsets
                 ):
-                    raise ValueError("completion token offsets are malformed")
+                    raise MalformedResponseError(
+                        "completion token offsets are malformed"
+                    )
 
                 tokens = getattr(logprobs, "tokens", None)
                 if not isinstance(tokens, list | tuple) or len(tokens) != len(
                     token_logprobs
                 ):
-                    raise ValueError("completion is missing aligned token text")
+                    raise MalformedResponseError(
+                        "completion is missing aligned token text"
+                    )
                 scored_text = request.scored_continuation(choice_index)
                 selected_indices, selected_tokens = _aligned_continuation_tokens(
                     offsets,
@@ -401,7 +408,7 @@ class MCLoglikelihoodClient:
                     not isinstance(backend_ids, list | tuple)
                     or len(backend_ids) != len(token_logprobs)
                 ):
-                    raise ValueError("completion token IDs are malformed")
+                    raise MalformedResponseError("completion token IDs are malformed")
                 selected_ids = (
                     tuple(int(backend_ids[index]) for index in selected_indices)
                     if backend_ids is not None
@@ -430,7 +437,7 @@ class MCLoglikelihoodClient:
                 self.max_retries,
                 fail_fast_exceptions=(ContinuationAlignmentError,),
             )
-        except (ContinuationAlignmentError, ValueError) as exc:
+        except ValueError as exc:
             logger.debug("Continuation scoring fallback: %s", exc)
             return LoglikelihoodResult.failure(request, str(exc))
         except ClientError as exc:
@@ -440,24 +447,8 @@ class MCLoglikelihoodClient:
             logger.warning("Continuation logprob request failed: %s", exc)
             return LoglikelihoodResult.failure(request, str(exc))
         if result is None:
-            return LoglikelihoodResult.failure(request, "context_length_exceeded")
+            return LoglikelihoodResult.failure(request, CONTEXT_LENGTH_ERROR)
         return result
-
-    def get_choices_continuation_logprobs(
-        self, prompt: str, choice_texts: list[str]
-    ) -> ContinuationLogprobs:
-        """Compatibility wrapper returning aligned token score lists."""
-        request = LoglikelihoodRequest(prompt, tuple(choice_texts))
-        result = self.score_continuations(request)
-        return ContinuationLogprobs(
-            [list(choice.token_logprobs) for choice in result.choices],
-            token_texts=[list(choice.token_texts) for choice in result.choices],
-            token_ids=[
-                list(choice.token_ids) if choice.token_ids is not None else None
-                for choice in result.choices
-            ],
-            error=result.error,
-        )
 
 
 # ===========================================================================
@@ -559,7 +550,7 @@ class MCRunner:
             self.config.output_file,
             self.config.input_key,
             self.config.response_key,
-            repair_truncated_last_line=getattr(self.config, "repair_resume", False),
+            repair_truncated_last_line=self.config.repair_resume,
         )
         target_samples = self.config.n_samples if self.config.mode == "generate" else 1
         remaining = prepare_sample_requests(
@@ -682,7 +673,10 @@ class MCRunner:
 
         Returns:
             Result dict with choices, per-choice logprobs, prediction, and
-            correctness; None when the item has no choices (counted as skipped)
+            correctness; None when the item has no choices (counted as skipped).
+            A context-length rejection returns a permanent-failure row
+            (empty logprobs, "error" marker) that scores as incorrect and is
+            treated as completed by resume.
 
         Raises:
             RuntimeError: When every choice scored -inf, i.e. the batched
@@ -711,6 +705,20 @@ class MCRunner:
             )
             if not continuation_result.exact:
                 reason = continuation_result.error or "unknown reason"
+                if reason == CONTEXT_LENGTH_ERROR:
+                    # The prompt can never fit: write a permanent-failure row
+                    # (empty logprobs score as incorrect) so resume skips it.
+                    return {
+                        self.config.input_key: prompt,
+                        "doc_id": item["doc_id"],
+                        "choices": choices,
+                        "choice_tokens": choice_tokens,
+                        "gold": gold,
+                        "logprobs": [],
+                        "pred": -1,
+                        "correct": False,
+                        "error": CONTEXT_LENGTH_ERROR,
+                    }
                 raise RuntimeError(f"Continuation logprob request failed: {reason}")
             choice_logprobs = [
                 list(choice.token_logprobs) for choice in continuation_result.choices
@@ -731,7 +739,7 @@ class MCRunner:
                 [score] if score != float("-inf") else [] for score in logprobs
             ]
             choice_scored_tokens = [[] for _ in choice_tokens]
-        else:
+        elif scoring_mode == "continuation":
             logprobs = [
                 sum(scores) if scores else float("-inf") for scores in choice_logprobs
             ]
@@ -742,7 +750,7 @@ class MCRunner:
         is_correct = pred == gold
         return {
             self.config.input_key: prompt,
-            **({"doc_id": item["doc_id"]} if "doc_id" in item else {}),
+            "doc_id": item["doc_id"],
             "choices": choices,
             "choice_tokens": choice_tokens,
             "gold": gold,
@@ -838,17 +846,22 @@ class MCRunner:
             base_messages: Pre-built system messages prepended to every request
 
         Returns:
-            Result dict with the generated text in the gen list. The 'correct'
-            key is intentionally absent — generate mode extracts answers at
-            scoring time; only loglikelihood mode computes correctness inline.
+            Result dict with the generated text as a string under the
+            configured response key. The 'correct' key is intentionally
+            absent — generate mode extracts answers at scoring time; only
+            loglikelihood mode computes correctness inline. A context-length
+            rejection returns a permanent-failure row (empty gen plus an
+            "error" marker) that scores as a wrong answer and is treated as
+            completed by resume.
 
         Raises:
             RuntimeError: When generation produced no usable text (retries
-                exhausted, non-retryable 4xx, or null/empty content). An empty
-                gen must NOT be written: it would be scored as a wrong answer
-                AND mark the prompt as completed so resume never retries it.
-                Raising keeps it consistent with the loglikelihood mode's
-                all-"-inf" guard (failed, dumped, retried on next run).
+                exhausted, non-retryable 4xx, or null/empty content). An
+                empty gen from such a transient failure must NOT be written:
+                it would be scored as a wrong answer AND mark the prompt as
+                completed so resume never retries it. Raising keeps it
+                consistent with the loglikelihood mode's all-"-inf" guard
+                (failed, dumped, retried on next run).
         """
         prompt = self.build_prompt(item)
         gold = item.get(self.config.label_key, "")
@@ -875,7 +888,7 @@ class MCRunner:
                 except (IndexError, TypeError):
                     raw_choices = []
             if not raw_choices:
-                raise RuntimeError("Generate returned no choices")
+                raise MalformedResponseError("Generate returned no choices")
             content = getattr(getattr(raw_choices[0], "message", None), "content", None)
             if not content:
                 raise RuntimeError("Generate returned empty content")
@@ -884,10 +897,20 @@ class MCRunner:
         generation: str | None = None
         try:
             generation = call_with_retry(do_request, self.config.max_retries)
-        except (ClientError, RuntimeError) as e:
+        except RuntimeError as e:
             raise RuntimeError(f"Generate produced no usable text: {e}") from e
+        if generation is None:
+            # Context-length rejection can never succeed on retry: persist a
+            # permanent-failure row so resume treats the sample as completed.
+            result = dict(item)
+            result.pop("_request_seed", None)
+            result[self.config.input_key] = prompt
+            result[self.config.label_key] = gold
+            result[self.config.response_key] = ""
+            result["error"] = CONTEXT_LENGTH_ERROR
+            return result
         if not generation:
-            # Context-length rejection (None) or null/empty content ("")
+            # Null/empty content from a completed request
             raise RuntimeError("Generate produced no usable text (empty response)")
 
         result = dict(item)

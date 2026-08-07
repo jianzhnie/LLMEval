@@ -16,11 +16,7 @@ from pathlib import Path
 from statistics import fmean, pstdev
 from typing import Any, Protocol
 
-from llmeval.tasks.persistence import (
-    atomic_write_json,
-    atomic_write_jsonl,
-    persist_results,
-)
+from llmeval.tasks.persistence import persist_results
 from llmeval.utils.log import init_logger
 
 logger = init_logger("task_registry")
@@ -35,13 +31,10 @@ __all__ = [
     "PreparationContext",
     "ScorerResult",
     "TaskRegistry",
-    "aggregate_metric_values",
     "build_default_registry",
     "evaluate_registered_task",
     "metric_from_samples",
     "persist_evaluation_result",
-    "write_per_item_results",
-    "write_structured_summary",
 ]
 
 
@@ -244,50 +237,6 @@ def metric_from_samples(
     )
 
 
-def aggregate_metric_values(
-    values: Iterable[MetricValue],
-    *,
-    mode: str = "micro",
-    seed: int = 0,
-    n_resamples: int = 1000,
-    confidence_level: float = 0.95,
-) -> MetricValue:
-    """Aggregate metric values using a documented macro or micro denominator.
-
-    ``micro`` treats each source observation as one observation and therefore
-    weights inputs by ``count``. ``macro`` gives every input metric equal
-    weight. The input values are already summaries, so uncertainty is
-    recomputed from the available values rather than combining incompatible
-    standard errors.
-    """
-    metrics = list(values)
-    if mode not in {"macro", "micro"}:
-        raise ValueError("mode must be 'macro' or 'micro'")
-    if not metrics:
-        return MetricValue(value=0.0, count=0)
-
-    if mode == "micro":
-        total_count = sum(max(metric.count, 0) for metric in metrics)
-        if total_count == 0:
-            return MetricValue(value=0.0, count=0)
-        weighted = [metric.value for metric in metrics for _ in range(metric.count)]
-        return metric_from_samples(
-            weighted,
-            seed,
-            n_resamples=n_resamples,
-            confidence_level=confidence_level,
-            higher_is_better=all(metric.higher_is_better for metric in metrics),
-        )
-
-    return metric_from_samples(
-        (metric.value for metric in metrics),
-        seed,
-        n_resamples=n_resamples,
-        confidence_level=confidence_level,
-        higher_is_better=all(metric.higher_is_better for metric in metrics),
-    )
-
-
 StructuredScorer = Callable[..., ScorerResult]
 
 
@@ -404,15 +353,6 @@ def _structured_summary(result: EvaluationResult) -> dict[str, Any]:
     return payload
 
 
-def write_structured_summary(result: EvaluationResult, cache_path: Path) -> None:
-    """Write the registry result in one schema shared by all task families."""
-    atomic_write_json(
-        cache_path.with_suffix(".summary.json"),
-        _structured_summary(result),
-        indent=2,
-    )
-
-
 def _compact_per_item(item: dict[str, Any]) -> dict[str, Any]:
     """Keep stable scoring fields while dropping prompt/generation payloads."""
     aliases = {
@@ -453,13 +393,6 @@ def _per_item_records(
         item if output_schema == "debug" else _compact_per_item(item)
         for item in result.per_item
     ]
-
-
-def write_per_item_results(
-    result: EvaluationResult, cache_path: Path, *, output_schema: str = "compact"
-) -> None:
-    """Persist per-item records using the requested compact/debug schema."""
-    atomic_write_jsonl(cache_path, _per_item_records(result, output_schema))
 
 
 def persist_evaluation_result(

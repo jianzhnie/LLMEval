@@ -63,6 +63,7 @@ class DataArguments:
             )
         },
     )
+
     def __post_init__(self) -> None:
         """Validate the input path without creating output-side directories."""
         if not Path(self.input_file).exists():
@@ -215,6 +216,8 @@ class GenerationArguments:
             raise ValueError(
                 f"Number of samples must be positive, but got {self.n_samples}."
             )
+
+
 @dataclass
 class VLLMEngineArguments:
     """
@@ -226,7 +229,7 @@ class VLLMEngineArguments:
     Attributes:
         model_name_or_path (str): Path or name of the model to load.
         trust_remote_code (bool): Whether to trust remote code.
-        dtype (str): Data type for model execution (e.g., "fp16", "auto", "bfloat16").
+        dtype (str): Data type for model execution (e.g., "float16", "auto", "bfloat16").
         max_model_len (int): Maximum context length for the model.
         rope_scaling (str): RoPE scaling configuration as a JSON string. If empty,
             no scaling is applied. Parsed into `rope_scaling_dict`.
@@ -261,7 +264,7 @@ class VLLMEngineArguments:
     dtype: str = field(
         default="auto",
         metadata={
-            "help": 'Data type for model execution (e.g., "fp16", "auto", "bfloat16").'
+            "help": 'Data type for model execution (e.g., "float16", "auto", "bfloat16").'
         },
     )
     max_model_len: int = field(
@@ -336,7 +339,7 @@ class VLLMEngineArguments:
             )
 
         # Validate dtype
-        valid_dtypes = ["auto", "float16", "float32", "bfloat16", "fp16"]
+        valid_dtypes = ["auto", "float16", "float32", "bfloat16"]
         if self.dtype not in valid_dtypes:
             logger.warning(f"Unknown dtype {self.dtype}. Valid options: {valid_dtypes}")
 
@@ -409,17 +412,17 @@ class ServerArguments:
     )
     base_url: str = field(
         default="https://api.openai.com/v1",
-        metadata={"help": "Base URL of VLLM server"},
+        metadata={"help": "Base URL of the OpenAI-compatible API endpoint"},
     )
     model_name: str = field(
-        default="gpt-4o", metadata={"help": "Model name of VLLM server"}
+        default="gpt-4o", metadata={"help": "Model name served by the API endpoint"}
     )
     max_retries: int = field(
         default=3,
-        metadata={"help": "Maximum number of retries for requests to VLLM server."},
+        metadata={"help": "Maximum number of retries for failed API requests."},
     )
     request_timeout: int = field(
-        default=99999, metadata={"help": "Timeout for requests to VLLM server."}
+        default=99999, metadata={"help": "Timeout (seconds) for API requests."}
     )
     api_key: str | None = field(
         default=None,

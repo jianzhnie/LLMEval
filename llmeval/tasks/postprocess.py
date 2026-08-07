@@ -3,12 +3,12 @@
 The task scorers use these helpers explicitly so the response-cleanup chain is
 easy to inspect and test.  The helpers are intentionally small and composable:
 
-* ``build_text_pipeline`` collects the ordered filters.
-* ``apply_text_pipeline`` runs the pipeline on a response value.
 * ``strip_reasoning_wrappers`` removes common ``<think>`` / ``<answer>``
   wrappers used by reasoning models.
 * ``resolve_single_generation`` validates the one-generation-per-row protocol
   and extracts the single generation from an inference output record.
+* ``dedupe_repeated_samples`` skips exact duplicate rows from resumed runs
+  and rejects rows that conflict on problem-level fields.
 * ``resolve_max_workers`` clamps the process-pool size to the workload,
   requested workers, and available CPUs.
 """
@@ -26,10 +26,9 @@ __all__ = [
     "FilterRegistry",
     "TextFilter",
     "TextFilterPipeline",
-    "apply_text_pipeline",
     "apply_text_pipeline_with_trace",
     "build_filter_artifacts",
-    "build_text_pipeline",
+    "dedupe_repeated_samples",
     "expand_single_generation_samples",
     "resolve_max_workers",
     "resolve_single_generation",
@@ -111,10 +110,6 @@ class TextFilterPipeline:
     version: str
     filters: tuple[RegisteredTextFilter, ...]
 
-    def apply(self, value: Any) -> str:
-        """Apply all filters and return the final text."""
-        return apply_text_pipeline(value, self)
-
     def apply_with_trace(self, value: Any) -> tuple[str, dict[str, Any]]:
         """Apply all filters and return a JSON-compatible step trace."""
         return apply_text_pipeline_with_trace(value, self)
@@ -154,30 +149,6 @@ def strip_reasoning_wrappers(text: str) -> str:
         if tail:
             return tail
 
-    return text
-
-
-def build_text_pipeline(*filters: TextFilter) -> tuple[TextFilter, ...]:
-    """Collect an ordered tuple of text filters."""
-    return tuple(filters)
-
-
-def apply_text_pipeline(
-    value: Any,
-    pipeline: Sequence[TextFilter | RegisteredTextFilter]
-    | TextFilterPipeline
-    | None = None,
-) -> str:
-    """Apply a text-filter pipeline to a single response value."""
-    text = _coerce_text(value)
-    if not pipeline:
-        return text
-
-    filters = pipeline.filters if isinstance(pipeline, TextFilterPipeline) else pipeline
-    for filter_fn in filters:
-        text = filter_fn(text)
-        if not isinstance(text, str):
-            text = _coerce_text(text)
     return text
 
 
@@ -256,6 +227,47 @@ def resolve_single_generation(
     return value
 
 
+def dedupe_repeated_samples(
+    eval_dataset: list[dict[str, Any]],
+    response_key: str,
+    *,
+    problem_identity: Callable[[dict[str, Any], int], str],
+    conflict_keys: tuple[str, ...] = (),
+    record_kind: str = "document",
+) -> list[dict[str, Any]]:
+    """Drop exact duplicate rows while rejecting conflicting resumed rows.
+
+    Rows that share one problem identity are independent samples, except
+    exact duplicates (same response payload) produced when a resumed run
+    re-appends an identical record — those are skipped idempotently.  Rows
+    that repeat an identity while disagreeing on *conflict_keys* signal a
+    corrupted resume and raise ``ValueError`` (mirroring the MC conflict
+    detection in ``mc_score.merge_generate_records``).
+    """
+    first_seen: dict[str, dict[str, Any]] = {}
+    seen_responses: dict[str, list[Any]] = {}
+    deduped: list[dict[str, Any]] = []
+    for row_index, item in enumerate(eval_dataset):
+        identity = problem_identity(item, row_index)
+        first = first_seen.get(identity)
+        if first is None:
+            first_seen[identity] = item
+            seen_responses[identity] = [item.get(response_key)]
+            deduped.append(item)
+            continue
+        for key in conflict_keys:
+            if key in item and key in first and item[key] != first[key]:
+                raise ValueError(
+                    f"Conflicting {key!r} for resumed {record_kind} {identity!r}"
+                )
+        response = item.get(response_key)
+        if any(response == seen for seen in seen_responses[identity]):
+            continue
+        seen_responses[identity].append(response)
+        deduped.append(item)
+    return deduped
+
+
 def expand_single_generation_samples(
     eval_dataset: list[dict[str, Any]],
     response_key: str,
@@ -265,8 +277,8 @@ def expand_single_generation_samples(
     """Validate and normalize one generation per input row.
 
     Each output record carries exactly one generation under *response_key*
-    (or an empty list when the response failed), keyed by the stable identity
-    returned by *problem_identity*.
+    (or an empty list when the response failed); *problem_identity* supplies
+    the stable problem id used in validation error messages.
     """
     expanded: list[dict[str, Any]] = []
     for row_index, item in enumerate(eval_dataset):

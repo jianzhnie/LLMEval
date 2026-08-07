@@ -21,14 +21,12 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
-from llmeval.tasks.persistence import (
-    atomic_write_jsonl,
-    persist_results,
-)
+from llmeval.tasks.persistence import persist_results
 from llmeval.tasks.postprocess import (
     DEFAULT_FILTER_REGISTRY,
     TextFilterPipeline,
     build_filter_artifacts,
+    dedupe_repeated_samples,
     expand_single_generation_samples,
     resolve_max_workers,
 )
@@ -322,11 +320,10 @@ def process_answers(
             - response_key: Key for model response in input_data
 
     Returns:
-        A tuple containing:
-            - Original job index
-            - Verification score (1.0=correct, 0.0=incorrect)
-            - Extracted predicted answer (None if failed)
-            - Extracted gold answer (None if failed)
+        A ``MathAnswerResult`` carrying the original job index, the
+        verification grade (1.0=correct, 0.0=incorrect), the extracted
+        predicted and gold answers (None when extraction failed), plus
+        fallback/filter diagnostics.
 
     Note:
         Uses math-verify library with configurable precision for answer verification.
@@ -345,7 +342,6 @@ def process_answers(
     # Parse the ground truth answer from the input data
     # The first return value (cot_answer) is unused for this metric
     try:
-        # The first return value (cot_answer) is unused for this metric.
         _, gold_answer_text = parse_ground_truth(input_data, data_name, label_key)
     except (ValueError, NotImplementedError, KeyError) as e:
         logger.error(f"❌ [Error] Parsing gold truth for job {index} failed: {e}")
@@ -420,18 +416,8 @@ def process_answers(
             )
 
         # Extract answers with validation
-        try:
-            gold_ans = extracted_answers[0] if len(extracted_answers) > 0 else None
-            pred_ans = extracted_answers[1] if len(extracted_answers) > 1 else None
-        except IndexError:
-            logger.error(f"❌ [Error] Invalid extraction format for job {index}")
-            return result(
-                0.0,
-                None,
-                gold_answer_text,
-                failure_stage="extraction",
-                failure_reason="invalid extraction format",
-            )
+        gold_ans = extracted_answers[0] if len(extracted_answers) > 0 else None
+        pred_ans = extracted_answers[1] if len(extracted_answers) > 1 else None
 
         # Validate grade value
         if not (isinstance(grade, int | float) and 0 <= grade <= 1):
@@ -539,12 +525,11 @@ def compute_scores(
         timeout (int, optional): Maximum seconds allowed per job. Defaults to 20.
 
     Returns:
-        float: Average accuracy score across all processed jobs (0.0 to 1.0)
+        float: Average accuracy score across all processed jobs (0.0 to 1.0);
+        an empty dataset returns 0.0.
 
     Raises:
-        ValueError: On empty dataset or missing required data fields
-        IOError: When the result file cannot be written
-        RuntimeError: On critical parallel processing failures
+        OSError: When the result file cannot be written
 
     Note:
         Results are saved in JSONL format with additional metadata including:
@@ -631,7 +616,7 @@ def compute_scores(
                     stats.correct += 1
                 if status == "timeout":
                     stats.timeout += 1
-                    failure_counts["verification_failed"] += 1
+                    failure_counts["timeout"] += 1
                 elif status == "failed":
                     stats.error += 1
                     failure_counts[f"{failure_stage}_failed"] += 1
@@ -655,7 +640,7 @@ def compute_scores(
                 }
             )
             stats.timeout += 1
-            failure_counts["verification_failed"] += 1
+            failure_counts["timeout"] += 1
 
     logger.info(f"Summary: {total} eval_dataset processed.")
 
@@ -667,6 +652,7 @@ def compute_scores(
     Correct: {stats.correct} ({stats.correct_rate:.1f}%)
     Timeouts: {stats.timeout} ({stats.timeout_rate:.1f}%)
     Errors: {stats.error} ({stats.error_rate:.1f}%)
+    Skipped: {stats.skipped}
     Workers Used: {optimal_workers}
     """)
 
@@ -721,7 +707,7 @@ def score_math_result(
     """
     # Each inference row carries one generation; normalize its representation
     # before scoring and problem-level aggregation.
-    scoring_dataset = _normalize_math_samples(eval_dataset, response_key)
+    scoring_dataset = _normalize_math_samples(eval_dataset, label_key, response_key)
     accuracy = compute_scores(
         eval_dataset=scoring_dataset,
         label_key=label_key,
@@ -751,7 +737,7 @@ def score_math_result(
         if item.get("evaluation_status") == "failed":
             failure_counts[f"{stage}_failed"] += 1
         elif item.get("evaluation_status") == "timeout":
-            failure_counts["verification_failed"] += 1
+            failure_counts["timeout"] += 1
     failure_counts["wrong_answer"] = sum(
         item.get("evaluation_status", "completed") == "completed"
         and float(item.get("accuracy", 0.0)) != 1.0
@@ -761,12 +747,11 @@ def score_math_result(
         scoring_dataset, expected_samples=expected_samples
     )
     complete_problem_count = sum(1 for problem in details if problem["complete"])
-    metrics = {"accuracy": accuracy, "sample_accuracy": accuracy, **extra_metrics}
+    metrics = {"accuracy": accuracy, **extra_metrics}
     return ScorerResult(
         metrics=metrics,
         observations={
             "accuracy": observations,
-            "sample_accuracy": observations,
             **problem_observations,
         },
         per_item=[dict(item) for item in scoring_dataset],
@@ -788,11 +773,23 @@ def score_math_result(
 
 
 def _normalize_math_samples(
-    eval_dataset: list[dict[str, Any]], response_key: str
+    eval_dataset: list[dict[str, Any]], label_key: str, response_key: str
 ) -> list[dict[str, Any]]:
-    """Validate and normalize one math generation per input row."""
+    """Validate and normalize one math generation per input row.
+
+    Exact duplicate rows (a resumed run re-appending an identical record)
+    are skipped idempotently; rows that repeat a ``doc_id`` with a
+    conflicting gold answer or prompt raise ``ValueError``.
+    """
+    deduped = dedupe_repeated_samples(
+        eval_dataset,
+        response_key,
+        problem_identity=_problem_identity,
+        conflict_keys=(label_key, "prompt"),
+        record_kind="math document",
+    )
     return expand_single_generation_samples(
-        eval_dataset, response_key, problem_identity=_problem_identity
+        deduped, response_key, problem_identity=_problem_identity
     )
 
 
@@ -873,6 +870,7 @@ def _build_problem_level_metrics(
                 int(item["expected_samples"])
                 for item in items
                 if isinstance(item.get("expected_samples"), int)
+                and not isinstance(item["expected_samples"], bool)
                 and item["expected_samples"] > 0
             ],
             default=0,
@@ -883,7 +881,16 @@ def _build_problem_level_metrics(
             else item_expected
         )
         target_count = target_count or sample_count
-        complete = len(items) == target_count
+        if len(items) > target_count:
+            logger.warning(
+                "Problem %s has %d observed rows, %d more than the expected "
+                "sample count %d; the extra rows still enter sample-level metrics",
+                problem_id,
+                len(items),
+                len(items) - target_count,
+                target_count,
+            )
+        complete = len(items) >= target_count
         problems.append(
             {
                 "doc_id": problem_id,
@@ -929,22 +936,3 @@ def _filter_artifacts(response: Any) -> dict[str, Any]:
     return build_filter_artifacts(
         "" if raw_response is None else str(raw_response), filtered, trace
     )
-
-
-def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:
-    """
-    Save evaluation results and metadata to a JSONL file.
-
-    Args:
-        eval_dataset: Evaluation results to save
-        cache_path: Output file path for JSONL data
-
-    Raises:
-        IOError: If the result file cannot be written
-    """
-    try:
-        atomic_write_jsonl(cache_path, eval_dataset)
-        logger.info(f"✅ Results saved to {cache_path}")
-    except OSError as e:
-        logger.error(f"❌ Failed to save results: {e}")
-        raise

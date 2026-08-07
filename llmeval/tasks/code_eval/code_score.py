@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import re
+from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
     build_filter_artifacts,
+    dedupe_repeated_samples,
     expand_single_generation_samples,
     resolve_max_workers,
     strip_reasoning_wrappers,
@@ -251,12 +253,27 @@ def _failure_record(
 
 
 def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
-    """Build a placeholder record for items that could not be scored."""
+    """Build a placeholder record for items whose worker raised."""
     task_id = str(item.get("task_id", ""))
     return _failure_record(
         task_id,
         "scoring error",
         evaluation_status="failed",
+    )
+
+
+def _timeout_code_record(item: dict[str, Any]) -> dict[str, Any]:
+    """Build a placeholder record for items lost to a pool-level timeout.
+
+    Worker-internal errors are already converted into ``failed`` records by
+    :func:`_process_code_item`, so a missing pool result means the worker was
+    killed by the pool-level timeout (matching the math/MC classification).
+    """
+    task_id = str(item.get("task_id", ""))
+    return _failure_record(
+        task_id,
+        "pool timeout",
+        evaluation_status="timeout",
     )
 
 
@@ -450,7 +467,9 @@ def _score_items(
     -------
     list[dict[str, Any]]
         One scored record per input item, in the same order.  Items whose
-        scoring failed are represented by :func:`_failure_code_record`.
+        worker raised are represented by :func:`_failure_code_record`; items
+        whose result never arrived (pool-level timeout) are represented by
+        :func:`_timeout_code_record`.
     """
     total = len(eval_dataset)
     if total == 0:
@@ -512,7 +531,7 @@ def _score_items(
             pbar.update(1)
 
     return [
-        results_by_index.get(i) or _failure_code_record(item)
+        results_by_index.get(i) or _timeout_code_record(item)
         for i, item in enumerate(eval_dataset)
     ]
 
@@ -529,11 +548,23 @@ def _code_identity(item: dict[str, Any], row_index: int) -> str:
 
 
 def _normalize_code_samples(
-    eval_dataset: list[dict[str, Any]], response_key: str
+    eval_dataset: list[dict[str, Any]], label_key: str, response_key: str
 ) -> list[dict[str, Any]]:
-    """Validate and normalize one code generation per input row."""
+    """Validate and normalize one code generation per input row.
+
+    Exact duplicate rows (a resumed run re-appending an identical record)
+    are skipped idempotently; rows that repeat a ``task_id`` with a
+    conflicting prompt or test harness raise ``ValueError``.
+    """
+    deduped = dedupe_repeated_samples(
+        eval_dataset,
+        response_key,
+        problem_identity=_code_identity,
+        conflict_keys=(label_key, "prompt"),
+        record_kind="code task",
+    )
     return expand_single_generation_samples(
-        eval_dataset, response_key, problem_identity=_code_identity
+        deduped, response_key, problem_identity=_code_identity
     )
 
 
@@ -549,18 +580,15 @@ def _pass_at_k_scores(grouped: dict[str, list[dict[str, Any]]], k: int) -> list[
 
 
 def _compute_pass_at_k(
-    records: list[dict[str, Any]], k_values: tuple[int, ...]
-) -> tuple[dict[str, float], int]:
-    """Aggregate sample records into problem-level pass@k metrics."""
-    grouped = _completed_code_groups(records)
-
+    grouped: dict[str, list[dict[str, Any]]], k_values: tuple[int, ...]
+) -> dict[str, float]:
+    """Aggregate completed problem groups into problem-level pass@k metrics."""
     metrics: dict[str, float] = {}
     for k in sorted(set(k_values)):
         scores = _pass_at_k_scores(grouped, k)
         if scores:
             metrics[f"pass@{k}"] = sum(scores) / len(scores)
-
-    return metrics, len(grouped)
+    return metrics
 
 
 def _completed_code_groups(
@@ -592,8 +620,11 @@ def _score_code_task_result(
     k_values: tuple[int, ...] = (1, 10, 64),
     allow_unsafe_code: bool = False,
     persist_legacy: bool = True,
-) -> CodeScoreResult:
+) -> tuple[CodeScoreResult, dict[str, list[dict[str, Any]]]]:
     """Score a code-generation dataset and return task-native details.
+
+    Returns the aggregate result together with the completed problem groups,
+    so metric and observation aggregation share one grouping pass.
 
     Parameters
     ----------
@@ -623,7 +654,7 @@ def _score_code_task_result(
     """
     if not eval_dataset:
         logger.warning("Empty dataset — returning 0.0")
-        return CodeScoreResult()
+        return CodeScoreResult(), {}
     if not allow_unsafe_code:
         raise PermissionError(
             "Code evaluation executes generated code. Pass "
@@ -636,7 +667,7 @@ def _score_code_task_result(
         raise ValueError(
             f"k_values must contain only positive integers, got {k_values}"
         )
-    expanded_dataset = _normalize_code_samples(eval_dataset, response_key)
+    expanded_dataset = _normalize_code_samples(eval_dataset, label_key, response_key)
     total = len(expanded_dataset)
 
     logger.info(
@@ -658,13 +689,15 @@ def _score_code_task_result(
     )
 
     correct = sum(1 for r in records if r.get("passed"))
-    pass_at_k, problems = _compute_pass_at_k(records, k_values)
+    completed_groups = _completed_code_groups(records)
+    pass_at_k = _compute_pass_at_k(completed_groups, k_values)
+    problems = len(completed_groups)
     # pass@1 is always computable (every completed group has n >= 1), so
     # derive it independently of ``k_values`` rather than defaulting to 0.0
     # when the caller did not request k=1.
     pass_at_1 = pass_at_k.get("pass@1")
     if pass_at_1 is None:
-        pass_at_1 = _compute_pass_at_k(records, (1,))[0].get("pass@1", 0.0)
+        pass_at_1 = _compute_pass_at_k(completed_groups, (1,)).get("pass@1", 0.0)
 
     # Log failures for diagnostics (up to 10).
     failures = [r for r in records if not r.get("passed")]
@@ -694,13 +727,13 @@ def _score_code_task_result(
         correct,
         total,
     )
-    return result
+    return result, completed_groups
 
 
-def _code_observations(result: CodeScoreResult) -> dict[str, list[float]]:
+def _code_observations(
+    result: CodeScoreResult, grouped: dict[str, list[dict[str, Any]]]
+) -> dict[str, list[float]]:
     """Return problem-level observations for every available pass@k metric."""
-    grouped = _completed_code_groups(result.per_item)
-
     observations: dict[str, list[float]] = {}
     # pass@1 is always observable (n >= 1 for every group), even when the
     # caller's ``k_values`` did not include it.
@@ -764,7 +797,7 @@ def score_code_result(
     persist_legacy: bool = True,
 ) -> ScorerResult:
     """Score code and return the registry's structured scorer contract."""
-    result = _score_code_task_result(
+    result, completed_groups = _score_code_task_result(
         eval_dataset,
         label_key,
         response_key,
@@ -778,7 +811,7 @@ def score_code_result(
     )
     metrics = dict(result.pass_at_k)
     metrics.setdefault("pass@1", result.pass_at_1)
-    observations = _code_observations(result)
+    observations = _code_observations(result, completed_groups)
     observations.setdefault("pass@1", [])
     # Every record from _score_items carries its evaluation_status (set by
     # _process_code_item / the failure builders), so classify from the stored
@@ -789,6 +822,11 @@ def score_code_result(
     timeout_count = statuses.count("timeout")
     failed_count = statuses.count("failed")
     skipped_count = statuses.count("skipped")
+    failure_counts: dict[str, int] = {}
+    if failed_count:
+        failure_counts["failed"] = failed_count
+    if timeout_count:
+        failure_counts["timeout"] = timeout_count
     return ScorerResult(
         metrics=metrics,
         observations=observations,
@@ -800,6 +838,7 @@ def score_code_result(
         failed_count=failed_count,
         skipped_count=skipped_count,
         timeout_count=timeout_count,
+        failure_counts=failure_counts,
     )
 
 

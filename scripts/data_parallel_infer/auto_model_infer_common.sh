@@ -44,14 +44,13 @@
 # 配置建议：
 #   1. TENSOR_PARALLEL_SIZE: 根据实际显卡数量设置
 #   2. MAX_NUM_SEQS: 结合显存大小调整
-#   3. MAX_JOBS: 依据系统资源调整并发数
-#   4. HEALTH_TIMEOUT: 根据网络情况调整检查超时
+#   3. HEALTH_TIMEOUT: 根据网络情况调整检查超时
 #
 # 使用方法：
 #   由 auto_model_infer.sh 或 auto_model_infer_tp8.sh 调用
 #
 # 环境要求：
-#   - bash 4.0+
+#   - bash 4.3+（使用了 local -n nameref）
 #   - ssh 免密配置
 #   - python 3.9+
 #   - vLLM
@@ -153,7 +152,8 @@ get_remote_device_count() {
     local output
     if ! output=$(ssh_run "$node" "npu-smi info 2>/dev/null" 2>/dev/null); then
         # 如果ssh命令失败（例如连接超时），则直接判定为不可用
-        echo "🔴 节点 $node: 连接失败或命令执行失败"
+        # 诊断信息输出到 stderr，避免污染命令替换捕获的 stdout 返回值
+        echo "🔴 节点 $node: 连接失败或命令执行失败" >&2
         echo "0"
         return 0
     fi
@@ -161,14 +161,14 @@ get_remote_device_count() {
     # 检查输出中是否包含"No running processes found in NPU"
     # 我们可以通过统计"No running processes found"的行数来判断所有卡是否都空闲
     local device_count
-    device_count=$(echo "$output" | grep -c "No running processes found in NPU")
+    device_count=$(printf '%s\n' "$output" | awk '/No running processes found in NPU/ { count++ } END { print count + 0 }')
 
     # 检查是否有错误信息
     local error_lines
-    error_lines=$(echo "$output" | grep -c "Error")
+    error_lines=$(printf '%s\n' "$output" | awk '/Error/ { count++ } END { print count + 0 }')
 
     if [ "$error_lines" -gt 0 ]; then
-        echo "❌ 节点 $node: NPU命令执行出错"
+        echo "❌ 节点 $node: NPU命令执行出错" >&2
         echo "0"
         return 0
     fi
@@ -196,9 +196,9 @@ verify_node_device_capacity() {
     # 根据硬件/驱动输出情况应用修正系数（Ascend 910B 常见为 2）
     local device_count=$((device_count_raw * DEVICE_COUNT_MULTIPLIER))
 
-    # 确保所有NPU都空闲
-    if [[ -z "$device_count" || "$device_count" -lt "$required_devices" ]]; then
-        handle_error 1 "节点 ${node} 可用设备数量 (${device_count:-0}) 少于运行 ${INSTANCES_PER_NODE} 个实例所需的 ${required_devices} 张设备 (TP=${TENSOR_PARALLEL_SIZE})"
+    # 确保所有NPU都空闲（device_count 由算术展开得出，恒为数字）
+    if [[ "$device_count" -lt "$required_devices" ]]; then
+        handle_error 1 "节点 ${node} 可用设备数量 (${device_count}) 少于运行 ${INSTANCES_PER_NODE} 个实例所需的 ${required_devices} 张设备 (TP=${TENSOR_PARALLEL_SIZE})"
     fi
     log_info "✅ 节点 ${node} 可用设备数 ${device_count} 满足 ${INSTANCES_PER_NODE} 实例 * TP=${TENSOR_PARALLEL_SIZE} 的需求"
 }
@@ -386,33 +386,39 @@ handle_error() {
 }
 
 # 文件锁管理 (使用 PID)
-LOCK_FILE="$LOG_DIR/vllm_deploy.lock"
+# 使用 mkdir 实现原子加锁：mkdir 对已存在路径返回非零，是原子操作。
+# 锁目录内的 pid 文件记录持锁进程，供占用锁诊断（kill -0 验证）使用。
+LOCK_DIR="$LOG_DIR/vllm_deploy.lock"
+LOCK_PID_FILE="${LOCK_DIR}/pid"
 
 acquire_lock() {
-    if [ -e "$LOCK_FILE" ]; then
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
         local pid
-        pid=$(cat "$LOCK_FILE")
-        # 检查 PID 是否仍在运行
-        if kill -0 "$pid" 2>/dev/null; then
+        pid=$(cat "$LOCK_PID_FILE" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             handle_error 1 "另一个部署进程 (PID: $pid) 正在运行"
         fi
-        # 如果 PID 不存在，删除旧锁
-        rm -f "$LOCK_FILE"
+        # 不能在检查后自动删除：另一个进程可能已在两步之间取得同一路径的
+        # 新锁。保留现场并要求显式清理，避免误删活跃部署的锁。
+        handle_error 1 "检测到无有效持有者的部署锁: ${LOCK_DIR}，请确认没有部署进程运行后手动删除该目录"
     fi
-    echo $$ > "$LOCK_FILE"
+    printf '%s\n' "$$" > "$LOCK_PID_FILE"
 }
 
 release_lock() {
-    # 仅当锁文件中的 PID 等于当前进程 PID 时才删除锁文件，
+    # 仅当锁内的 PID 等于当前进程 PID 时才删除锁，
     # 避免未持锁的进程（如发现他人正在运行而报错退出时）误删持锁进程的锁，
     # 导致第三个进程可以并发进入
-    if [[ -f "$LOCK_FILE" ]]; then
+    if [[ -d "$LOCK_DIR" ]]; then
         local lock_pid
-        lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || true)
+        lock_pid=$(cat "$LOCK_PID_FILE" 2>/dev/null || true)
         if [[ -n "$lock_pid" && "$lock_pid" == "$$" ]]; then
-            rm -f "$LOCK_FILE"
+            rm -f "$LOCK_PID_FILE"
+            if ! rmdir "$LOCK_DIR" 2>/dev/null; then
+                log_warn "锁目录包含非预期内容，未自动删除: ${LOCK_DIR}"
+            fi
         else
-            log_warn "锁文件不属于当前进程 (锁内 PID: '${lock_pid:-空}', 当前 PID: $$)，跳过删除"
+            log_warn "锁不属于当前进程 (锁内 PID: '${lock_pid:-空}', 当前 PID: $$)，跳过删除"
         fi
     fi
 }
@@ -436,8 +442,9 @@ check_permissions() {
 #   0: 成功，1: 失败
 validate_node() {
     local node="$1"
-    # 使用 -q (quiet) 避免输出，通过退出码判断连通性
-    if ssh -q "${SSH_USER:+${SSH_USER}@}${node}" exit 2>/dev/null; then
+    # 复用 ssh_run（带 BatchMode/ConnectTimeout），避免密钥认证失败时
+    # 交互式密码提示导致脚本永久挂起；通过退出码判断连通性
+    if ssh_run "$node" exit 2>/dev/null; then
         log_info "✅ 节点 ${node} 连通性检查通过"
         return 0
     else
@@ -792,9 +799,16 @@ discover_remote_dataset_files() {
         exit 1
     fi
 
-    # 将结果存储到全局数组 FILES
+    # out 为空时直接判失败：printf "%s\n" "" 也会输出一个空行，
+    # 使 mapfile 得到含空元素的单元素数组，绕过下方"未发现文件"检查
+    if [[ -z "$out" ]]; then
+        log_error "❌ 未发现任何匹配的数据文件 (模式: ${DATASET_GLOB})，请检查 ${DATASET_DIR} 和 ${DATASET_GLOB} 配置"
+        exit 1
+    fi
+
+    # 将结果存储到全局数组 FILES（过滤可能的空行）
     # Bash 技巧: mapfile -t < <(...) 避免创建 subshell 导致变量无法修改
-    mapfile -t FILES < <(printf "%s\n" "$out" || true)
+    mapfile -t FILES < <(printf "%s\n" "$out" | grep -v -e '^[[:space:]]*$' || true)
 
     if [[ ${#FILES[@]} -eq 0 ]]; then
         log_error "❌ 未发现任何匹配的数据文件 (模式: ${DATASET_GLOB})，请检查 ${DATASET_DIR} 和 ${DATASET_GLOB} 配置"
@@ -832,7 +846,7 @@ check_and_prepare_remote_dirs() {
 
         if ! ssh_run "$node" "$prep_cmd"; then
             log_error "❌ 无法在节点 ${node} 上准备目录，请检查SSH连接和权限"
-                exit 1 # 在 subshell 中退出
+                exit 1 # 直接终止整个部署流程
         fi
     done
 
@@ -930,8 +944,10 @@ check_service_ready() {
         return 1
     fi
 
-    # 1. 检查服务进程是否存在
-    if ! ssh_run "$node" "pgrep -f 'vllm serve.*--port ${port}' > /dev/null"; then
+    # 1. 检查服务进程是否存在（使用带端口边界的共享模式，避免 6000 误匹配 60001）
+    local search_pattern
+    search_pattern=$(build_vllm_kill_pattern "$port")
+    if ! ssh_run "$node" "pgrep -f '${search_pattern}' > /dev/null"; then
         log_warn "⚠️ 节点 ${node}/port${port}/instance-${instance_id} 上的服务进程未运行或已退出"
         return 1
     fi
@@ -1071,7 +1087,7 @@ assign_data_to_instances() {
 #   $4: base_url (string) - 服务 URL (如 http://127.0.0.1:port/v1)
 #   $@: files (string array) - 分配给该节点的全部文件列表
 # Returns:
-#   None (任务在远程后台启动，不等待完成)
+#   None (提交后会调用 wait_for_batch_completion_and_cleanup 等待本节点任务完成)
 run_task_batch_parallel() {
     local node="$1"
     local port="$2"
@@ -1234,9 +1250,12 @@ distribute_and_launch_jobs() {
         pids+=($!)
     done
 
-    # 3. 等待所有节点的任务提交完成（不等待远端具体推理完成）
+    # 3. 等待所有节点的任务批次完成（run_task_batch_parallel 内部会等待
+    #    远端推理完成并清理对应实例的服务）；任一节点失败则整体失败
     if [[ ${#pids[@]} -gt 0 ]]; then
-        wait "${pids[@]}" || true
+        if ! wait_for_pids "${pids[@]}"; then
+            handle_error 1 "部分节点的推理任务执行失败，请检查各节点任务日志: ${LOG_DIR}"
+        fi
     fi
     log_info "✅ 所有推理任务已启动，进入远端任务监控阶段, 请查看推理结果: ${OUTPUT_DIR}"
 }
@@ -1289,7 +1308,7 @@ main() {
 
     log_info "发现 ${#NODES[@]} 个节点: ${NODES[*]}"
 
-    # 自动生成端口列表（节点间间隔 10 端口），存入全局 PORTS
+    # 自动生成端口列表（节点间间隔 100 端口、实例间间隔 20 端口），存入全局 PORTS
     PORTS=()
     local start_port=6000
     for ((i=0; i<${#NODES[@]}; i++)); do
@@ -1396,12 +1415,10 @@ main() {
     local actual_total_instances=${#READY_INSTANCE_PORTS[@]}
     log_info "将使用 ${actual_total_instances} 个可用实例 (覆盖 ${ready_node_count} 个节点) 进行推理"
 
-    # 步骤6: 使用可用节点分发并启动推理任务
+    # 步骤6: 使用可用节点分发并启动推理任务（内部等待远端推理完成并清理对应实例服务）
     distribute_and_launch_jobs
-    # 步骤7: 等待推理任务完成
-    # wait_for_inference_completion
 
-    # 步骤8: 优雅关闭服务（由 EXIT 陷阱调用 stop_services）
+    # 步骤7: 优雅关闭服务（由 EXIT 陷阱调用 stop_services）
     log_info "✅ 分布式推理部署和任务执行完成，正在退出并清理资源..."
 
     log_info "📊 部署统计:"

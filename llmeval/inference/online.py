@@ -25,6 +25,7 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
+    CONTEXT_LENGTH_ERROR,
     append_jsonl,
     build_chat_messages,
     ensure_raw_prompt,
@@ -39,7 +40,7 @@ from llmeval.inference.common import (
 )
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
-from llmeval.utils.retry import call_with_retry
+from llmeval.utils.retry import MalformedResponseError, call_with_retry
 
 logger = init_logger("online_vllm_server", logging.INFO)
 
@@ -68,21 +69,19 @@ class InferenceClient:
         seed: int = 0,
         organization: str | None = None,
     ) -> None:
-        """Initialize the inference client with API configuration and validation.
+        """Initialize the inference client with API configuration.
 
-        Creates a new OpenAI client instance configured with the provided base URL
-        and timeout settings. Validates the configuration and ensures required
-        environment variables are set.
+        Creates a new OpenAI client instance configured with the provided
+        base URL and timeout settings. No range validation happens here —
+        argument values are validated by the configuration dataclasses at
+        parse time.
 
         Args:
             base_url: Base URL for the OpenAI-compatible API endpoint
-            timeout: Request timeout in seconds (must be positive)
-            max_retries: Maximum number of retries for requests to VLLM server (must be non-negative)
+            timeout: Request timeout in seconds
+            max_retries: Maximum number of retries for failed requests
             tool_choice: Tool calling mode: 'none' (default, disables tools), 'auto', or tool name.
             api_key: API key; falls back to the OPENAI_API_KEY env var and then EMPTY.
-
-        Raises:
-            ValueError: If timeout is invalid (<=0) or base_url is empty
         """
         self.base_url: str = base_url  # Store for potential reconnection
         self.timeout: int = timeout
@@ -136,8 +135,13 @@ class InferenceClient:
         enable_thinking: bool,
         *,
         seed: int | None = None,
-    ) -> str:
-        """Generate one response, returning an empty string for null content."""
+    ) -> str | None:
+        """Generate one response.
+
+        Returns the response text (null content is normalized to ""), or
+        None for a context-length rejection — a deterministic failure the
+        caller persists as a permanent-failure row so resume skips it.
+        """
         call_args = self._build_call_args(
             query,
             system_prompt,
@@ -151,7 +155,7 @@ class InferenceClient:
         )
         completion = self._request_with_retry(call_args)
         if completion is None:
-            return ""  # context length exceeded (logged in _request_with_retry)
+            return None  # context length exceeded (logged in retry.should_retry)
         # Reasoning models may return content=None (thinking exhausted
         # max_tokens); normalize to "" so callers can treat it uniformly
         return completion.choices[0].message.content or ""
@@ -203,7 +207,7 @@ class InferenceClient:
                 "chat_template_kwargs": {"enable_thinking": enable_thinking},
             },
             "timeout": self.timeout,
-            "seed": getattr(self, "seed", 0) if seed is None else seed,
+            "seed": self.seed if seed is None else seed,
         }
         # tool_choice: only send when explicitly configured (vLLM 0.23+ supports it)
         if is_explicit_tool_choice(self.tool_choice):
@@ -233,7 +237,12 @@ class InferenceClient:
         def do_request() -> Any:
             completion = self.client.chat.completions.create(**call_args)
             # Probe the structure so malformed responses are retried too
-            _ = completion.choices[0].message
+            try:
+                _ = completion.choices[0].message
+            except (AttributeError, IndexError, TypeError) as exc:
+                raise MalformedResponseError(
+                    f"Malformed response structure: {exc}"
+                ) from exc
             self._record_usage(completion)
             return completion
 
@@ -253,13 +262,9 @@ class InferenceClient:
             completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
         except (TypeError, ValueError):
             return
-        usage_lock = getattr(self, "_usage_lock", None)
-        usage_stats = getattr(self, "usage_stats", None)
-        if usage_lock is None or not isinstance(usage_stats, dict):
-            return
-        with usage_lock:
-            usage_stats["prompt_tokens"] += prompt_tokens
-            usage_stats["completion_tokens"] += completion_tokens
+        with self._usage_lock:
+            self.usage_stats["prompt_tokens"] += prompt_tokens
+            self.usage_stats["completion_tokens"] += completion_tokens
 
     def usage_snapshot(self) -> dict[str, int]:
         """Return a consistent copy of accumulated token usage."""
@@ -317,7 +322,7 @@ class InferenceRunner:
             self.args.output_file,
             self.args.input_key,
             self.args.response_key,
-            repair_truncated_last_line=getattr(self.args, "repair_resume", False),
+            repair_truncated_last_line=self.args.repair_resume,
         )
 
         if resume_state.completed_count > 0:
@@ -331,7 +336,7 @@ class InferenceRunner:
             resume_state,
             self.args.input_key,
             self.args.n_samples,
-            base_seed=self.args.seed if type(self.args.seed) is int else 0,
+            base_seed=self.args.seed,
         )
         total_remaining = len(prepared_data)
 
@@ -393,6 +398,18 @@ class InferenceRunner:
             enable_thinking=self.args.enable_thinking,
             seed=get_request_seed(item),
         )
+
+        if response is None:
+            # Context-length rejection can never succeed on retry: persist a
+            # permanent-failure row so resume treats the sample as completed.
+            result = item.copy()
+            result.pop("_request_seed", None)
+            result[self.args.response_key] = ""
+            result["error"] = CONTEXT_LENGTH_ERROR
+            self._write_result(result)
+            with self._stats_lock:
+                self._stats["failed"] += 1
+            return result
 
         result = self._build_result(item, response)
         if not result:
@@ -480,10 +497,10 @@ class InferenceRunner:
         self._process_concurrently(eval_dataset)
 
         duration = time.perf_counter() - start_time
-        success_rate = (self._stats["processed"] / max(total_samples, 1)) * 100
+        success_rate = (self._stats["processed"] / total_samples) * 100
 
         logger.info("\n=== Execution Summary ===")
-        logger.info(f"Total samples in dataset: {total_samples}")
+        logger.info(f"Samples to process this run: {total_samples}")
         logger.info(f"Successfully processed: {self._stats['processed']}")
         logger.info(f"Failed: {self._stats['failed']}")
         logger.info(f"Skipped: {self._stats['skipped']}")

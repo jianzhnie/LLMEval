@@ -37,12 +37,9 @@ export INPUT_KEY="${INPUT_KEY:-prompt}"                            # 输入字�
 # Client concurrency
 export SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-amthinking}"
 export MAX_WORKERS="${MAX_WORKERS:-128}"
-export MAX_JOBS="${MAX_JOBS:-128}"
 
 # Server
 export DISABLE_LOG_REQUESTS="${DISABLE_LOG_REQUESTS:-1}"
-export DISABLE_STATE_DUMP="${DISABLE_STATE_DUMP:-1}"
-export API_WORKERS="${API_WORKERS:-1}"
 export MAX_WAIT_TIME="${MAX_WAIT_TIME:-600}"
 export HEALTH_PATH="${HEALTH_PATH:-/health}"
 export HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-3}"

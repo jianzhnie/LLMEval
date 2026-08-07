@@ -38,6 +38,16 @@ class ClientError(RuntimeError):
         self.original_error = original_error
 
 
+class MalformedResponseError(RuntimeError):
+    """The API response payload is structurally malformed.
+
+    Raised by response-structure probes (empty choices, missing fields) to
+    mark a non-APIError failure that IS worth retrying: a malformed payload
+    is a transient backend quirk, not a programming error, so it follows the
+    normal bounded retry path instead of being re-raised immediately.
+    """
+
+
 def error_message(e: APIError) -> str:
     """Best-effort human-readable message from an APIError (message may be None)."""
     return getattr(e, "message", None) or str(e)
@@ -108,9 +118,11 @@ def should_retry(exc: Exception, attempt: int, max_retries: int) -> bool | None:
         Non-retryable 4xx (retrying cannot succeed — fail fast), or
         *max_retries* exhausted.
     Exception
-        Any non-APIError (TypeError, KeyError, ...) is re-raised as-is:
-        these are programming errors, not transient failures, and retrying
-        them would only hide the root cause.
+        Any other non-APIError (TypeError, KeyError, ...) is re-raised
+        as-is: these are programming errors, not transient failures, and
+        retrying them would only hide the root cause. The one exception is
+        :class:`MalformedResponseError`, which marks a structurally broken
+        response payload and follows the normal bounded retry path.
     """
     # Connection / rate-limit errors are APIError subclasses, so they must be
     # excluded from the fatal-4xx checks (a 429 is always worth retrying).
@@ -125,15 +137,18 @@ def should_retry(exc: Exception, attempt: int, max_retries: int) -> bool | None:
         if non_retryable:
             raise ClientError(non_retryable, exc) from exc
 
-    # Non-APIError exceptions are programming errors, not transient API
-    # failures — surface them immediately instead of retrying.
-    if not isinstance(exc, APIError):
+    # Non-APIError exceptions other than malformed-response probes are
+    # programming errors, not transient API failures — surface them
+    # immediately instead of retrying.
+    if not isinstance(exc, APIError | MalformedResponseError):
         raise exc
 
     if attempt >= max_retries:
         raise ClientError(f"Max retries exceeded: {exc!s}", exc) from exc
 
-    if isinstance(exc, APIConnectionError | RateLimitError):
+    if isinstance(exc, MalformedResponseError):
+        reason = f"Malformed response: {exc!s}"
+    elif isinstance(exc, APIConnectionError | RateLimitError):
         reason = f"{type(exc).__name__}: {exc!s}"
     else:
         reason = f"API error: {exc!s}"

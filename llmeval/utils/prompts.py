@@ -85,8 +85,5 @@ def is_chat_template_applied(query: str) -> bool:
     # sides of a serialized conversation before rejecting the prompt.
     return bool(
         _HASHED_CHAT_ROLE_LINE_RE.search(query)
-        or (
-            _HUMAN_ROLE_LINE_RE.search(query)
-            and _ASSISTANT_ROLE_LINE_RE.search(query)
-        )
+        or (_HUMAN_ROLE_LINE_RE.search(query) and _ASSISTANT_ROLE_LINE_RE.search(query))
     )

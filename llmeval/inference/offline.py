@@ -53,7 +53,7 @@ def _sample_failure(
 ) -> dict[str, Any]:
     """Build a compact failed-sample audit record."""
     return {
-        "item": {"doc_id": item["doc_id"]} if "doc_id" in item else {},
+        "item": {"doc_id": item["doc_id"]},
         "error_category": category,
         "error_type": type(error).__name__,
         "error": str(error),
@@ -114,8 +114,6 @@ class OfflineInferenceRunner:
         llm_kwargs = build_vllm_llm_kwargs(self.args)
         llm_kwargs["hf_overrides"] = hf_overrides
         llm: LLM = LLM(**llm_kwargs)
-        logger.info("✅ vLLM engine loaded successfully")
-
         logger.info("✅ vLLM engine initialization completed")
         return llm
 
@@ -143,14 +141,12 @@ class OfflineInferenceRunner:
         hf_overrides: dict[str, Any] = {}
 
         # Use the parsed rope_scaling_dict instead of the raw string
-        if hasattr(self.args, "rope_scaling_dict") and self.args.rope_scaling_dict:
+        if self.args.rope_scaling_dict:
             hf_overrides["rope_scaling"] = self.args.rope_scaling_dict
 
         return hf_overrides
 
-    def convert_to_messages_format(
-        self, item: dict[str, Any]
-    ) -> list[dict[str, str]] | None:
+    def convert_to_messages_format(self, item: dict[str, Any]) -> list[dict[str, str]]:
         """Convert a raw prompt record into vLLM chat messages."""
         input_key: str = self.args.input_key
 
@@ -160,11 +156,12 @@ class OfflineInferenceRunner:
             raise ValueError(
                 f"Prompt under {input_key!r} or 'prompt' must be a non-empty string"
             )
-        prompt_str = prompt.strip()
 
-        ensure_raw_prompt(prompt_str)
+        # Send the prompt verbatim (no strip): both backends must feed the
+        # model exactly the text recorded in the result row, like online.py.
+        ensure_raw_prompt(prompt)
 
-        messages = build_chat_messages(prompt_str, self.system_prompt)
+        messages = build_chat_messages(prompt, self.system_prompt)
         logger.debug(f"Converted to messages format: {len(messages)} messages")
         return messages
 
@@ -222,7 +219,7 @@ class OfflineInferenceRunner:
             self.args.output_file,
             self.args.input_key,
             self.args.response_key,
-            repair_truncated_last_line=getattr(self.args, "repair_resume", False),
+            repair_truncated_last_line=self.args.repair_resume,
         )
 
         if resume_state.completed_count > 0:
@@ -265,11 +262,6 @@ class OfflineInferenceRunner:
             except ValueError as exc:
                 invalid_items.append(_sample_failure(item, "input_validation", exc))
                 continue
-            if messages is None:
-                invalid_items.append(
-                    _sample_failure(item, "input_validation", "invalid or empty prompt")
-                )
-                continue
             valid_items.append(item)
             valid_messages.append(messages)
         self._handle_sample_failures(invalid_items)
@@ -280,9 +272,7 @@ class OfflineInferenceRunner:
             valid_messages,
             self._sampling_params_for_items(valid_items),
             use_tqdm=False,
-            chat_template_kwargs={
-                "enable_thinking": getattr(self.args, "enable_thinking", False)
-            },
+            chat_template_kwargs={"enable_thinking": self.args.enable_thinking},
         )
         responses = [self._extract_model_response(output) for output in outputs]
         self._write_response_results(valid_items, responses)
@@ -343,7 +333,7 @@ class OfflineInferenceRunner:
                 eval_dataset,
                 self.args.batch_size,
                 self.process_and_write_batch,
-                fail_fast=getattr(self.args, "fail_fast", True),
+                fail_fast=self.args.fail_fast,
                 on_batch_complete=lambda: pbar.update(1),
             )
         if failures:

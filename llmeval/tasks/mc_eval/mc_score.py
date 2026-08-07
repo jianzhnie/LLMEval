@@ -415,7 +415,9 @@ def score_items(
     for i, item in enumerate(eval_dataset):
         record = results_by_index.get(i)
         if record is None:
-            record = _error_record(item, mode, label_key, aggregation, "timeout")
+            record = _error_record(
+                item, mode, label_key, response_key, aggregation, "timeout"
+            )
         records.append(record)
     return records
 
@@ -424,6 +426,7 @@ def _error_record(
     item: dict[str, Any],
     mode: Literal["loglikelihood", "generate"],
     label_key: str,
+    response_key: str,
     aggregation: str,
     status: str,
 ) -> dict[str, Any]:
@@ -437,7 +440,7 @@ def _error_record(
     else:
         gold = _normalize_generate_gold(item.get(label_key))
         pred = ""
-    return {
+    record = {
         **{
             key: item[key]
             for key in ("doc_id", "sample_total")
@@ -455,6 +458,12 @@ def _error_record(
             "unknown_legacy" if mode == "loglikelihood" else aggregation,
         ),
     }
+    if mode == "generate" and "sample_total" not in record:
+        # Keep the generation count visible so per_sample weighting does not
+        # drop the item from every count when its worker was lost.
+        response = item.get(response_key)
+        record["sample_total"] = len(response) if isinstance(response, list) else 1
+    return record
 
 
 def process_item(
@@ -483,7 +492,9 @@ def process_item(
         return idx, _attach_item_metadata(record, item, mode, aggregation)
     except Exception as exc:
         logger.warning("MC scoring worker failed for item %d: %s", idx, exc)
-        return idx, _error_record(item, mode, label_key, aggregation, "failed")
+        return idx, _error_record(
+            item, mode, label_key, response_key, aggregation, "failed"
+        )
 
 
 def _attach_item_metadata(
@@ -607,6 +618,9 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
 
     sample_count = sum(_sample_weight(record) for record in result.per_item)
     excluded = _count_excluded(result.per_item, _sample_weight)
+    failure_counts = {
+        status: excluded[status] for status in ("failed", "timeout") if excluded[status]
+    }
     return ScorerResult(
         metrics={
             "acc": result.acc,
@@ -627,6 +641,7 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         failed_count=excluded["failed"],
         skipped_count=excluded["skipped"],
         timeout_count=excluded["timeout"],
+        failure_counts=failure_counts,
     )
 
 
@@ -883,10 +898,10 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
         cache_path,
         result.per_item,
         {
-            "acc": round(result.acc, 4),
-            "acc_norm": round(result.acc_norm, 4),
-            "acc_bytes": round(result.acc_bytes, 4),
-            "exact_match": round(result.exact_match, 4),
+            "acc": round(result.acc, 6),
+            "acc_norm": round(result.acc_norm, 6),
+            "acc_bytes": round(result.acc_bytes, 6),
+            "exact_match": round(result.exact_match, 6),
             "total": result.total,
             "question_total": question_total,
             "sample_total": sample_total,
