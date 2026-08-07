@@ -1,32 +1,19 @@
----
-Bug 与优化排查报告(不改代码,仅报告)
 
-基于 4 个审查 agent + 我的独立验证。当前基线:428 测试全绿(你 IDE 的 config 改动加了新测试)。注:审查过程中 HEAD 从 f06dd41 移到 0583c38(你的并发提交),我验证的是当前 HEAD 状态。
+🔴 新增问题(工作区引入)
 
-🔴 高严重度
+NEW-1 — normalize_single_generation_samples 改了行为但 test_postprocess 断言没跟上
+合并后函数对重复样本不再去重(保留每个独立样本)。但 tests/test_postprocess.py 仍直接从 postprocess import normalize_single_generation_samples 并测它 —— 我核对了,测试断言的语义(相同 response 也保留)与函数一致。结论:不是 bug,但需要确认 —— 你是否知道这组 test 是从 test_math_eval/test_code_eval 挪过来的,还是新写的?
 
-BUG-1 — shell wait_for_batch_completion_and_cleanup 永远检测不到任务结束,脚本挂 ~10 天
-auto_model_infer_common.sh:1157:ssh_run "$node" "pgrep -f '${INFER_SCRIPT}' | wc -l"。远端 bash -c 包装进程的 cmdline 本身就含脚本路径,pgrep -f 恒≥1 → current_running_tasks -le 0 永不触发 → 所有推理结束后 vLLM 服务空转,直到 864000s(10天)上限才强制停止。修复:用 pgrep -f "[o]nline.py" 括号技巧或匹配 python argv。
+NEW-2 — mc generate 模式与 math/code 的"重复样本"语义仍不一致
+math/code 用统一的 normalize_single_generation_samples 保留重复行(冲突才报错);mc 的 merge_generate_records 也保留重复行、冲突报错 —— 但冲突键不同:mc 检查 label_key/gold/prompt/query/choices/choice_tokens 6 个,math/code 只检查 (label_key, "prompt") 2 个。行为上 mc 更严格,但三种任务对 resume 冲突的容忍度不统一。建议:要么统一冲突键清单,要么在 CLAUDE.md 注明这是有意的(每类任务的"问题身份"不同)。
 
-BUG-2 — ssh-keyscan 在 set -e 下让首个不可达节点中止整个部署
-auto_model_infer_common.sh:152:ssh-keyscan -H "$node" 无 || true,脚本有 set -euo pipefail(line 69)。节点不可达 → keyscan 退出码 1 → 脚本在进入"连接失败→跳过"优雅 fallback 前就 abort(触发 EXIT trap 清理)。与文档声称的"失败节点自动跳过"不符。
+🟡 低严重度优化点(建议但不阻塞)
 
-🟠 中严重度
+OPT-1 — score_continuations 的 except Exception 兜底与 first-token 路径不一致
+get_choices_logprobs 让 RuntimeError 传播,score_continuations 转 failure。测试已锁定该行为(test_programming_error_propagates 测的是 first-token 路径)。这是有意的:continuation 是批量评分,一个 item 挂不该 kill 整个 batch。建议保留,但加一行注释说明为何与 first-token 路径不同。
 
-BUG-3 — unsafe_execute 用 exec(code, {}),__name__ == "builtins" 而非 "__main__"
-execute.py:422 + _worker 不传 exec_globals。任何用 if __name__ == "__main__": 门控测试的 harness 断言永远不执行,unsafe_execute 返回 ("passed","") → 假阳性正确分。内置 HumanEval/MBPP harness 顶层调用 check() 所以不受影响,但 extract_code 的 _STOP_MARKERS 又专门在 if __name__ 截断——埋了雷。修复:exec_globals 注入 {"__name__": "__main__"}。
+OPT-2 — merge_generate_records 的 key in item and key in target 与 mc.py 的其它冲突检测重复
+已有 _mc_schema(registry.py)+ score_items 校验,merge_generate_records 内部又手写了一遍 6-key 冲突循环。_count_excluded 之前就是从这种重复里抽出来的 —— 这里是否也值得抽一个 _check_conflict helper?
 
-BUG-4 — mc generate 模式 None gold 被计为错误而非跳过
-mc_score.py:745:str(item.get(label_key, "")) → str(None) = "NONE"(truthy)→ 不 skipped,进分母拉低 acc。loglikelihood 模式(gold→-1→skipped)和 math 模式(label is None→skipped)都跳过。不一致:2 题含 1 个 null-gold 会报 0.5 而非 1.0。
-
-BUG-5 — _sample_weight 对 per_sample 模式的下池超时/崩溃记录权重为 0,结构化计数看不见
-mc_score.py:501-510 + _to_scorer_result:_error_record 产物无 sample_total,per_sample 模式 _sample_weight 返回 0 → ScorerResult.timeout_count/failed_count 恒 0。而 write_cache 的 summary 报 1。同一事件两个输出不一致(metric 本身不受影响)。
-
-🟡 低严重度 / 优化建议
-
-- BUG-6 check_remote_port_free 的 pkill -f 'vllm serve.*--port ${port}' 无端口边界,共享节点上 --port 6000 会误杀 --port 60001(脚本自己的 build_vllm_kill_pattern 已加边界,这处漏了)。
-- BUG-7 MCLoglikelihoodClient.get_choices_logprobs 的宽 except Exception 吞掉非重试错误(401/编程错误)→ 全变成 -inf failed 行,root cause 只在 warning。与 retry.py 明确"re-raise 非 APIError"的意图相悖。
-- BUG-8 code_score._score_items 串行路径无 per-item 异常隔离,并行路径有 → 同样数据 max_workers=1 时一个异常 abort 整个评分,max_workers>1 时被吸收。不一致。
-- BUG-9 time_limit 一次性 ITIMER_REAL 可被 try/except BaseException 中和(SIGALRM 只在 Unix)。handle_error/cleanup_and_exit 在错误路径清理跑两遍(幂等但多一轮 ssh 往返)。
-- 已知设计限制(非 bug):resume 的按行计数 completed_counts 假设已完成行是连续前缀,fail_fast=False/online 模式下失败样本会留空洞 → resume 重复尾部样本、丢失失败序号(你此前确认"sample_index 功能已删除"是有意设计)。
-- 优化:pass@1 日志 correct/total 是 micro 计数但 pass@1 是 macro 平均,数字对不上(展示误导,metric 正确);is_chat_template_applied 的 Human:/Assistant: 正则对对话式 prompt 误判;non-ASCII 在 continuation 模式走 failed(影响小)。
+OPT-3 — score_loglikelihood/score_generate 兼容 wrapper
+两行转发壳,仅 evaluator.py 用,但 __init__.py 导出。是否保留由 CLAUDE.md 的"CLI
