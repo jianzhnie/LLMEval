@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from llmeval.tasks.persistence import atomic_write_json, atomic_write_jsonl
+from llmeval.tasks.persistence import (
+    atomic_write_json,
+    atomic_write_jsonl,
+    persist_results,
+)
 from llmeval.tasks.results import (
     EvaluationResult,
     MetricValue,
@@ -123,16 +127,24 @@ def _build_evaluation_result(
     )
 
 
-def write_structured_summary(result: EvaluationResult, cache_path: Path) -> None:
-    """Write the registry result in one schema shared by all task families."""
-    summary_path = cache_path.with_suffix(".summary.json")
+def _structured_summary(result: EvaluationResult) -> dict[str, Any]:
+    """Build the summary schema shared by all registered task families."""
     payload = result.to_dict(include_per_item=True)
     payload["summary_version"] = 1
     metric_values = {name: metric.value for name, metric in result.metrics.items()}
     payload["metric_values"] = metric_values
     for name, value in metric_values.items():
         payload.setdefault(name, value)
-    atomic_write_json(summary_path, payload, indent=2)
+    return payload
+
+
+def write_structured_summary(result: EvaluationResult, cache_path: Path) -> None:
+    """Write the registry result in one schema shared by all task families."""
+    atomic_write_json(
+        cache_path.with_suffix(".summary.json"),
+        _structured_summary(result),
+        indent=2,
+    )
 
 
 def _compact_per_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -165,17 +177,34 @@ def _compact_per_item(item: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _per_item_records(
+    result: EvaluationResult, output_schema: str
+) -> list[dict[str, Any]]:
+    """Build per-item records using the requested compact/debug schema."""
+    if output_schema not in {"compact", "debug"}:
+        raise ValueError("output_schema must be 'compact' or 'debug'")
+    return [
+        item if output_schema == "debug" else _compact_per_item(item)
+        for item in result.per_item
+    ]
+
+
 def write_per_item_results(
     result: EvaluationResult, cache_path: Path, *, output_schema: str = "compact"
 ) -> None:
     """Persist per-item records using the requested compact/debug schema."""
-    if output_schema not in {"compact", "debug"}:
-        raise ValueError("output_schema must be 'compact' or 'debug'")
-    records = (
-        item if output_schema == "debug" else _compact_per_item(item)
-        for item in result.per_item
+    atomic_write_jsonl(cache_path, _per_item_records(result, output_schema))
+
+
+def persist_evaluation_result(
+    result: EvaluationResult, cache_path: Path, *, output_schema: str = "compact"
+) -> None:
+    """Persist both registry artifacts through the shared atomic entry point."""
+    persist_results(
+        cache_path,
+        _per_item_records(result, output_schema),
+        _structured_summary(result),
     )
-    atomic_write_jsonl(cache_path, records)
 
 
 @dataclass
@@ -373,8 +402,7 @@ def evaluate_registered_task(
     """Evaluate through a registry and persist structured result files."""
     task = registry.resolve(context.task_name)
     result = task.score(context)
-    write_per_item_results(
+    persist_evaluation_result(
         result, context.cache_path, output_schema=context.output_schema
     )
-    write_structured_summary(result, context.cache_path)
     return result

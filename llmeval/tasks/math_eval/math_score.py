@@ -9,7 +9,6 @@ mathematical evaluation tasks while providing detailed logging and progress trac
 
 from __future__ import annotations
 
-import os
 import re
 from collections import Counter
 from collections.abc import Iterator
@@ -22,11 +21,17 @@ from typing import Any
 from pebble import ProcessPool
 from tqdm import tqdm
 
+from llmeval.tasks.execution import resolve_max_workers
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
-from llmeval.tasks.persistence import atomic_write_json, atomic_write_jsonl
+from llmeval.tasks.persistence import (
+    atomic_write_json,
+    atomic_write_jsonl,
+    persist_results,
+)
 from llmeval.tasks.postprocess import (
     DEFAULT_FILTER_REGISTRY,
     TextFilterPipeline,
+    build_filter_artifacts,
 )
 from llmeval.tasks.results import ScorerResult
 from llmeval.tasks.sample_record import resolve_single_generation
@@ -558,11 +563,7 @@ def compute_scores(
     processed_indices = set()
     failure_counts: dict[str, int] = Counter()
 
-    # Optimize worker count based on system resources.
-    # Use min(total, max_workers, cpu_count-1) to avoid over-provisioning
-    # for small datasets (e.g., AIME24 has only 30 items).
-    cpu_count = os.cpu_count() or 1
-    optimal_workers = min(total, max_workers, max(1, cpu_count - 1))
+    optimal_workers = resolve_max_workers(total, max_workers)
 
     with (
         tqdm(total=total, desc="Processing jobs", unit="job") as pbar,
@@ -618,9 +619,11 @@ def compute_scores(
                         "failure_stage": failure_stage,
                         "failure_reason": failure_reason,
                         "fallback_matched": fallback_matched,
-                        "raw_gen": result.filter_trace.get("raw", ""),
-                        "filtered_gen": result.filtered_gen,
-                        "filter_trace": result.filter_trace,
+                        **build_filter_artifacts(
+                            result.filter_trace.get("raw", ""),
+                            result.filtered_gen,
+                            result.filter_trace,
+                        ),
                     }
                 )
                 processed_indices.add(idx)
@@ -683,10 +686,6 @@ def compute_scores(
     }
 
     logger.debug(f"Processing metadata: {metadata}")
-    # Save the detailed result records.
-    if persist_legacy:
-        save_cache(eval_dataset, cache_path)
-
     # Calculate and return the average accuracy
     eligible_accuracy = [
         float(data["accuracy"])
@@ -695,7 +694,12 @@ def compute_scores(
     ]
     accuracy = mean(eligible_accuracy) if eligible_accuracy else 0.0
     if persist_legacy:
-        save_summary(accuracy=accuracy, metadata=metadata, cache_path=cache_path)
+        persist_results(
+            cache_path,
+            eval_dataset,
+            {"accuracy": round(accuracy, 6), **metadata},
+        )
+        logger.info("Results saved to %s", cache_path)
     logger.info(f"Final Accuracy: {accuracy:.4f}")
     return accuracy
 
@@ -793,9 +797,7 @@ def _expand_math_samples(
     expanded: list[dict[str, Any]] = []
     for row_index, item in enumerate(eval_dataset):
         problem_id = _problem_identity(item, row_index)
-        response = resolve_single_generation(
-            item, response_key, problem_id=problem_id
-        )
+        response = resolve_single_generation(item, response_key, problem_id=problem_id)
         record = dict(item)
         record[response_key] = [response] if response is not None else []
         expanded.append(record)
@@ -851,12 +853,9 @@ def _build_problem_level_metrics(
     for row_index, item in enumerate(scored_dataset):
         document_id = item.get("doc_id")
         item_expected = item.get("expected_samples")
-        if (
-            (document_id is None or not str(document_id).strip())
-            and (
-                (expected_samples is not None and expected_samples > 1)
-                or (isinstance(item_expected, int) and item_expected > 1)
-            )
+        if (document_id is None or not str(document_id).strip()) and (
+            (expected_samples is not None and expected_samples > 1)
+            or (isinstance(item_expected, int) and item_expected > 1)
         ):
             raise ValueError(
                 "Math problem-level metrics require a non-empty 'doc_id' for "
@@ -935,11 +934,9 @@ def _filter_artifacts(response: Any) -> dict[str, Any]:
     """Return the raw response, filtered response, and task pipeline trace."""
     raw_response = response[0] if isinstance(response, list) and response else response
     filtered, trace = MATH_RESPONSE_PIPELINE.apply_with_trace(raw_response)
-    return {
-        "raw_gen": "" if raw_response is None else str(raw_response),
-        "filtered_gen": filtered,
-        "filter_trace": trace,
-    }
+    return build_filter_artifacts(
+        "" if raw_response is None else str(raw_response), filtered, trace
+    )
 
 
 def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:

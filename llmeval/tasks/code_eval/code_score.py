@@ -10,7 +10,6 @@ Architecture matches ``mc_score.py``:
 from __future__ import annotations
 
 import ast
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,10 +19,12 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.code_eval.execute import check_correctness
-from llmeval.tasks.persistence import atomic_write_json, atomic_write_jsonl
+from llmeval.tasks.execution import resolve_max_workers
+from llmeval.tasks.persistence import persist_results
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
+    build_filter_artifacts,
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.results import ScorerResult
@@ -374,11 +375,7 @@ def _process_code_item(
         gen_str = ""
 
     code, filter_trace = CODE_GENERATION_PIPELINE.apply_with_trace(gen_str)
-    filter_artifacts = {
-        "raw_gen": gen_str,
-        "filtered_gen": code,
-        "filter_trace": filter_trace,
-    }
+    filter_artifacts = build_filter_artifacts(gen_str, code, filter_trace)
 
     # -- guard: missing test harness ---------------------------------------------
     # An empty test harness is a dataset problem, not a model failure: without
@@ -482,8 +479,7 @@ def _score_items(
         return records
 
     # -- parallel path ---------------------------------------------------------
-    cpu_count = os.cpu_count() or 1
-    optimal_workers = min(total, max_workers, max(1, cpu_count - 1))
+    optimal_workers = resolve_max_workers(total, max_workers)
     results_by_index: dict[int, dict[str, Any]] = {}
 
     iterable = [
@@ -849,12 +845,9 @@ def write_cache(result: CodeScoreResult, cache_path: str | Path) -> None:
 
     Pattern matches :func:`llmeval.tasks.mc_eval.mc_score.write_cache`.
     """
-    cache_path = Path(cache_path)
-    atomic_write_jsonl(cache_path, result.per_item)
-
-    summary_path = cache_path.with_suffix(".summary.json")
-    atomic_write_json(
-        summary_path,
+    persist_results(
+        cache_path,
+        result.per_item,
         {
             "pass_at_1": round(result.pass_at_1, 6),
             "pass_at_k": {
@@ -864,5 +857,4 @@ def write_cache(result: CodeScoreResult, cache_path: str | Path) -> None:
             "correct": result.correct,
             "problems": result.problems,
         },
-        indent=2,
     )

@@ -59,3 +59,16 @@ def atomic_write_jsonl(path: str | Path, records: Iterable[dict[str, Any]]) -> N
     with _atomic_text_writer(path) as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def persist_results(
+    cache_path: str | Path,
+    records: Iterable[dict[str, Any]],
+    summary: Any,
+) -> Path:
+    """Persist per-item JSONL and its adjacent summary using atomic writes."""
+    destination = Path(cache_path)
+    atomic_write_jsonl(destination, records)
+    summary_path = destination.with_suffix(".summary.json")
+    atomic_write_json(summary_path, summary, indent=2)
+    return summary_path

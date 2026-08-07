@@ -48,8 +48,7 @@ from llmeval.tasks.registry import (
     TaskRegistry,
     build_default_registry,
     evaluate_registered_task,
-    write_per_item_results,
-    write_structured_summary,
+    persist_evaluation_result,
 )
 from llmeval.tasks.results import MetricValue
 from llmeval.utils.config import EvalTaskArguments
@@ -226,10 +225,9 @@ def evaluate_task_result(
             },
             primary_metric=task.metric_specs[0].name if task.metric_specs else None,
         )
-        write_per_item_results(
+        persist_evaluation_result(
             result, context.cache_path, output_schema=context.output_schema
         )
-        write_structured_summary(result, context.cache_path)
     else:
         result = evaluate_registered_task(context, registry)
     for name, metric in result.metrics.items():

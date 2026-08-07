@@ -36,7 +36,6 @@ Generate:       {"gold": str, "pred": str, "correct": bool}
 
 from __future__ import annotations
 
-import os
 import re
 from collections import Counter
 from concurrent.futures import TimeoutError
@@ -47,10 +46,12 @@ from typing import Any, Literal
 from pebble import ProcessPool
 from tqdm import tqdm
 
-from llmeval.tasks.persistence import atomic_write_json, atomic_write_jsonl
+from llmeval.tasks.execution import resolve_max_workers
+from llmeval.tasks.persistence import persist_results
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
+    build_filter_artifacts,
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.results import ScorerResult
@@ -369,9 +370,7 @@ def score_items(
             for i, item in enumerate(eval_dataset)
         ]
 
-    # Clamp worker count: never more than items, available CPUs, or requested max.
-    cpu_count = os.cpu_count() or 1
-    optimal_workers = min(total, max_workers, max(1, cpu_count - 1))
+    optimal_workers = resolve_max_workers(total, max_workers)
     results_by_index: dict[int, dict[str, Any]] = {}
 
     with (
@@ -489,9 +488,7 @@ def _attach_item_metadata(
 ) -> dict[str, Any]:
     """Carry stable identity and scoring mode into the persisted score row."""
     metadata = {
-        key: item[key]
-        for key in ("doc_id",)
-        if key in item and item[key] is not None
+        key: item[key] for key in ("doc_id",) if key in item and item[key] is not None
     }
     metadata["scoring_mode"] = item.get(
         "scoring_mode",
@@ -717,13 +714,10 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def argmax_normalized(
-    logprobs: list[float], lengths: list[int | float]
-) -> int:
+def argmax_normalized(logprobs: list[float], lengths: list[int | float]) -> int:
     """Return the first argmax after dividing scores by positive lengths."""
     normalized = [
-        score / float(length)
-        for score, length in zip(logprobs, lengths, strict=True)
+        score / float(length) for score, length in zip(logprobs, lengths, strict=True)
     ]
     return max(range(len(normalized)), key=normalized.__getitem__)
 
@@ -798,9 +792,11 @@ def score_generate_item(
         "correct_bytes": is_correct,
         "aggregation": aggregation,
         "predictions": predictions,
-        "raw_gen": generation_texts,
-        "filtered_gen": predictions,
-        "filter_trace": [trace for _, trace in filtered],
+        **build_filter_artifacts(
+            generation_texts,
+            predictions,
+            [trace for _, trace in filtered],
+        ),
         "evaluation_status": status,
         "sample_correct": sample_correct,
         "sample_total": len(predictions),
@@ -859,12 +855,6 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
 
     The summary is written next to the JSONL result file.
     """
-    cache_path = Path(cache_path)
-    # Per-item records (JSONL).
-    atomic_write_jsonl(cache_path, result.per_item)
-
-    # Aggregated metrics summary (JSON).
-    summary_path = cache_path.with_suffix(".summary.json")
     question_total = len(result.per_item)
 
     def sample_count(record: dict[str, Any]) -> int:
@@ -890,8 +880,9 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
         for record in result.per_item
         if record.get("evaluation_status") == "timeout"
     )
-    atomic_write_json(
-        summary_path,
+    persist_results(
+        cache_path,
+        result.per_item,
         {
             "acc": round(result.acc, 4),
             "acc_norm": round(result.acc_norm, 4),
@@ -910,5 +901,4 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
                 result.per_item[0].get("aggregation") if result.per_item else None
             ),
         },
-        indent=2,
     )

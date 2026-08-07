@@ -24,11 +24,23 @@ __all__ = [
     "TextFilterPipeline",
     "apply_text_pipeline",
     "apply_text_pipeline_with_trace",
+    "build_filter_artifacts",
     "build_text_pipeline",
     "strip_reasoning_wrappers",
 ]
 
 TextFilter = Callable[[str], str]
+
+
+def build_filter_artifacts(
+    raw_gen: Any, filtered_gen: Any, filter_trace: Any
+) -> dict[str, Any]:
+    """Build the common auditable output produced by task filter pipelines."""
+    return {
+        "raw_gen": raw_gen,
+        "filtered_gen": filtered_gen,
+        "filter_trace": filter_trace,
+    }
 
 
 @dataclass(frozen=True)
