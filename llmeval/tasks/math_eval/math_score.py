@@ -14,7 +14,6 @@ from collections import Counter
 from collections.abc import Iterator
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
-from pathlib import Path
 from statistics import mean
 from typing import Any
 
@@ -23,7 +22,6 @@ from tqdm import tqdm
 
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
 from llmeval.tasks.persistence import (
-    atomic_write_json,
     atomic_write_jsonl,
     persist_results,
 )
@@ -956,17 +954,3 @@ def save_cache(eval_dataset: list[dict[str, Any]], cache_path: str) -> None:
     except OSError as e:
         logger.error(f"❌ Failed to save results: {e}")
         raise
-
-
-def save_summary(
-    accuracy: float,
-    metadata: dict[str, Any],
-    cache_path: str,
-) -> None:
-    """Save aggregated math metrics next to the JSONL result file."""
-    summary_path = Path(cache_path).with_suffix(".summary.json")
-    atomic_write_json(
-        summary_path,
-        {"accuracy": round(accuracy, 6), **metadata},
-        indent=2,
-    )

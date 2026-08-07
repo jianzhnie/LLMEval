@@ -56,8 +56,6 @@ class DataArguments:
         input_file (str): Path to the input JSONL file containing prompts.
         cache_dir (str): Path to the directory for caching models and data.
         output_file (str): Path to the output JSONL file to save results.
-        task (str): Optional evaluation task name. Callers should pass the
-            actual benchmark when task-specific handling is needed.
         batch_size (int): The number of samples to process in each batch.
     """
 
@@ -70,9 +68,6 @@ class DataArguments:
     )
     output_file: str = field(
         default="output.jsonl", metadata={"help": "Output JSONL file to save results."}
-    )
-    task: str = field(
-        default="", metadata={"help": "Optional name of the evaluation task."}
     )
     repair_resume: bool = field(
         default=False,
@@ -653,6 +648,8 @@ class MCInferConfig:
         default="empty",
         metadata={"help": "System prompt template key ('empty' disables it)."},
     )
+    # Computed value based on system_prompt_type; not settable via CLI.
+    system_prompt: str | None = field(init=False, default=None)
     tool_choice: str = field(
         default="none",
         metadata={"help": "Tool calling mode: 'none', 'auto', or a tool name."},
@@ -758,6 +755,12 @@ class MCInferConfig:
                 "few_shot_file is required when n_shot is greater than zero; "
                 "do not sample demonstrations from the evaluation set"
             )
+        if self.system_prompt_type not in SYSTEM_PROMPT_FACTORY:
+            raise ValueError(
+                f"Invalid system prompt type: {self.system_prompt_type}. "
+                f"Valid options are: {list(SYSTEM_PROMPT_FACTORY.keys())}"
+            )
+        self.system_prompt = SYSTEM_PROMPT_FACTORY.get(self.system_prompt_type)
 
 
 @dataclass

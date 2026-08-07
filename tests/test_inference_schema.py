@@ -28,10 +28,10 @@ def test_choice_counts_original_text_and_validates_token_alignment() -> None:
         token_ids=(11, 12),
     )
 
-    assert choice.total_logprob == pytest.approx(-0.6)
-    assert choice.token_count == 2
-    assert choice.char_count == 2
-    assert choice.byte_count == 6
+    assert sum(choice.token_logprobs) == pytest.approx(-0.6)
+    assert len(choice.token_logprobs) == 2
+    assert len(choice.continuation) == 2
+    assert len(choice.continuation.encode("utf-8")) == 6
 
     with pytest.raises(ValueError, match="reconstruct"):
         ChoiceLoglikelihood(

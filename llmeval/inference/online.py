@@ -26,6 +26,7 @@ from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
     append_jsonl,
+    build_chat_messages,
     ensure_raw_prompt,
     expand_data_with_resume,
     get_request_seed,
@@ -38,7 +39,6 @@ from llmeval.inference.common import (
 )
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
-from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
 from llmeval.utils.retry import call_with_retry
 
 logger = init_logger("online_vllm_server", logging.INFO)
@@ -46,10 +46,7 @@ logger = init_logger("online_vllm_server", logging.INFO)
 
 def _config_for_logging(args: OnlineInferArguments) -> dict[str, Any]:
     """Return online configuration without misleading empty optional fields."""
-    payload = redact_config_for_logging(dataclasses.asdict(args))
-    if not payload.get("task"):
-        payload.pop("task", None)
-    return payload
+    return redact_config_for_logging(dataclasses.asdict(args))
 
 
 class InferenceClient:
@@ -130,12 +127,7 @@ class InferenceClient:
     ) -> list[dict[str, str]]:
         """Build OpenAI chat messages from a raw query."""
         ensure_raw_prompt(query)
-
-        messages: list[dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": query})
-        return messages
+        return build_chat_messages(query, system_prompt)
 
     def get_content(
         self,
@@ -307,16 +299,8 @@ class InferenceRunner:
         except (OSError, ValueError) as e:
             raise RuntimeError(f"Failed to initialize inference client: {e}") from e
 
-        # Set up system prompt with validation
-        self.system_prompt: str | None = SYSTEM_PROMPT_FACTORY.get(
-            args.system_prompt_type
-        )
-        if (
-            args.system_prompt_type
-            and args.system_prompt_type != "empty"
-            and not self.system_prompt
-        ):
-            logger.warning(f"Unknown system_prompt_type: {args.system_prompt_type}")
+        # System prompt is resolved and validated by PromptArguments at parse time.
+        self.system_prompt: str | None = args.system_prompt
 
         # Initialize thread safety and monitoring
         self._file_lock: threading.Lock = threading.Lock()

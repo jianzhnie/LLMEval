@@ -250,18 +250,6 @@ def _failure_record(
     }
 
 
-def _failure(
-    task_id: str,
-    reason: str,
-) -> dict[str, Any]:
-    """Return a failure record where the generated answer caused the failure."""
-    return _failure_record(
-        task_id,
-        reason,
-        evaluation_status="completed",
-    )
-
-
 def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
     """Build a placeholder record for items that could not be scored."""
     task_id = str(item.get("task_id", ""))
@@ -393,12 +381,12 @@ def _process_code_item(
         return idx, record
 
     if not gen_str.strip():
-        record = _failure(task_id, "failed: empty generation")
+        record = _failure_record(task_id, "failed: empty generation")
         record.update(filter_artifacts)
         return idx, record
 
     if not code.strip():
-        record = _failure(task_id, "failed: no code extracted")
+        record = _failure_record(task_id, "failed: no code extracted")
         record.update(filter_artifacts)
         return idx, record
 
@@ -418,7 +406,7 @@ def _process_code_item(
         if exec_result.get("passed"):
             break
     if exec_result is None:
-        record = _failure(task_id, "failed: no executable candidate")
+        record = _failure_record(task_id, "failed: no executable candidate")
         record.update(filter_artifacts)
         return idx, record
     exec_result.setdefault("task_id", task_id)

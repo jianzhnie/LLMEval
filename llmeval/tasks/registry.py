@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import fmean, pstdev
@@ -29,17 +29,13 @@ __all__ = [
     "CodeTask",
     "EvaluationContext",
     "EvaluationResult",
-    "EvaluationTask",
     "MCTask",
     "MathTask",
-    "MetricSpec",
     "MetricValue",
     "PreparationContext",
     "ScorerResult",
-    "StructuredScorer",
     "TaskRegistry",
     "aggregate_metric_values",
-    "bootstrap_metric",
     "build_default_registry",
     "evaluate_registered_task",
     "metric_from_samples",
@@ -527,16 +523,25 @@ class MCTask:
         MetricSpec("exact_match"),
     )
 
+    @staticmethod
+    def _mc_schema(data: Sequence[dict[str, Any]]) -> bool:
+        """Return whether *data* is uniformly loglikelihood schema.
+
+        Raises ValueError when the dataset mixes loglikelihood and generate items.
+        """
+        has_logprobs = ["logprobs" in item for item in data]
+        if any(has_logprobs) and not all(has_logprobs):
+            raise ValueError(
+                "Mixed MC dataset detected: all items must use loglikelihood or "
+                "generate schema"
+            )
+        return all(has_logprobs)
+
     def prepare_dataset(
         self, data: list[dict[str, Any]], context: PreparationContext
     ) -> list[dict[str, Any]]:
-        has_logprobs = ["logprobs" in item for item in data]
-        if all(has_logprobs):
+        if self._mc_schema(data):
             return [{**item, "task": context.task_name} for item in data]
-        if any(has_logprobs):
-            raise ValueError(
-                "Mixed MC dataset detected: all items must use loglikelihood or generate schema"
-            )
         return [
             _annotate_item(
                 item, context.task_name, context.label_key, context.response_key
@@ -545,12 +550,7 @@ class MCTask:
         ]
 
     def score(self, context: EvaluationContext) -> EvaluationResult:
-        has_logprobs = ["logprobs" in item for item in context.eval_dataset]
-        if any(has_logprobs) and not all(has_logprobs):
-            raise ValueError(
-                "Mixed MC dataset detected: all items must use loglikelihood or generate schema"
-            )
-        is_loglikelihood = all(has_logprobs)
+        is_loglikelihood = self._mc_schema(context.eval_dataset)
         scorer = self.loglikelihood_scorer if is_loglikelihood else self.generate_scorer
         kwargs: dict[str, Any] = {
             "eval_dataset": context.eval_dataset,

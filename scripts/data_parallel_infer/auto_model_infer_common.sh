@@ -702,44 +702,13 @@ stop_services() {
 
     local pids=()
 
-    # 遍历当前已知的节点列表 (可能已被 main 函数更新为 available_nodes)
+    # 遍历当前已知的节点列表 (可能已被 main 函数更新为 available_nodes),
+    # 每个节点在并行子 shell 中调用 stop_service_on_node,由该函数统一负责
+    # 端口定位(get_node_ports)与优雅/强制终止。
     for ((i = 0; i < ${#NODES[@]}; i++)); do
         local node="${NODES[i]}"
-        # 仅匹配本任务在该节点上使用的端口，避免裸 'vllm serve' 模式
-        # 误杀节点上其他任务/用户的 vLLM 进程
-        local -a node_ports=()
-        if [[ ${#PORTS[@]} -gt 0 ]]; then
-            for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
-                local port_idx=$((i * INSTANCES_PER_NODE + instance_idx))
-                node_ports+=("${PORTS[port_idx]}")
-            done
-        fi
-
-        if [[ ${#node_ports[@]} -eq 0 ]]; then
-            log_warn "⚠️ 无法确定节点 ${node} 上本任务使用的端口，跳过清理以避免误杀其他 vLLM 进程"
-            continue
-        fi
-
-        local search_pattern
-        search_pattern=$(build_vllm_kill_pattern "${node_ports[@]}")
-
-        log_info "正在停止节点 ${node} 上的 vLLM 进程 (端口: ${node_ports[*]})..."
         (
-            # 使用 pkill 优雅地发送 SIGTERM，并忽略错误（如果进程已停止）
-            ssh_run "$node" "pkill -f '${search_pattern}' || true"
-            # 等待一段时间确保进程完全停止
-            sleep 3
-            # 再次检查是否还有相关进程在运行
-            local remaining_processes
-            if ! remaining_processes=$(ssh_run "$node" "pgrep -f '${search_pattern}' | wc -l" 2>/dev/null); then
-                log_error "❌ 节点 ${node} 进程状态查询失败"
-                exit 1
-            fi
-            if [[ "${remaining_processes:-0}" -gt 0 ]]; then
-                log_warn "节点 ${node} 上仍有 ${remaining_processes} 个 vLLM 进程在运行，尝试强制终止..."
-                ssh_run "$node" "pkill -9 -f '${search_pattern}' || true"
-            fi
-            log_info "✅ 节点 ${node} 服务已停止"
+            stop_service_on_node "$node"
         ) &
         pids+=($!)
     done

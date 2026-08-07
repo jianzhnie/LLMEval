@@ -35,6 +35,7 @@ from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
     append_jsonl,
+    build_chat_messages,
     expand_data_with_resume,
     get_request_seed,
     is_explicit_tool_choice,
@@ -51,7 +52,6 @@ from llmeval.inference.schema import (
 )
 from llmeval.utils.config import MCInferConfig
 from llmeval.utils.log import init_logger
-from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
 from llmeval.utils.retry import ClientError, call_with_retry
 
 logger = init_logger("mc_infer")
@@ -488,14 +488,8 @@ class MCRunner:
             except (OSError, ValueError) as e:
                 raise RuntimeError(f"Failed to initialize MC client: {e}") from e
 
-        # Set up system prompt with validation (generate mode)
-        self.system_prompt: str | None = None
-        if config.system_prompt_type and config.system_prompt_type != "empty":
-            self.system_prompt = SYSTEM_PROMPT_FACTORY.get(config.system_prompt_type)
-            if not self.system_prompt:
-                logger.warning(
-                    f"Unknown system_prompt_type: {config.system_prompt_type}"
-                )
+        # System prompt is resolved and validated by MCInferConfig at parse time.
+        self.system_prompt: str | None = config.system_prompt
 
         # Few-shot formatter (per-item dedup)
         self._few_shot_fmt: FewShotFormatter | None = None
@@ -659,10 +653,7 @@ class MCRunner:
             "effective_loglikelihood_mode=%s",
             self.effective_loglikelihood_mode,
         )
-        logger.info(
-            f"⏳ Processing {len(remaining)} items "
-            f"({len(remaining)} batched loglikelihood requests)"
-        )
+        logger.info("⏳ Processing %d loglikelihood items", len(remaining))
         self._process_concurrently(remaining, self.process_loglikelihood_item)
         self.log_stats()
 
@@ -720,9 +711,9 @@ class MCRunner:
                     token_ids is not None for token_ids in candidate_token_ids
                 ):
                     choice_token_ids = candidate_token_ids
-                scoring_mode = "continuation"
             else:
-                raise RuntimeError("Continuation logprob request failed")
+                reason = getattr(candidate_scores, "error", None) or "unknown reason"
+                raise RuntimeError(f"Continuation logprob request failed: {reason}")
 
         if scoring_mode == "first_token":
             logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)
@@ -801,11 +792,9 @@ class MCRunner:
         Args:
             remaining: Items left after resume filtering (see load_data)
         """
-        total_samples = len(remaining)
         logger.info(
-            "⏳ Processing %d item(s), %d generation sample(s)",
+            "⏳ Processing %d generation request(s)",
             len(remaining),
-            total_samples,
         )
         gen_client: openai.OpenAI = openai.OpenAI(
             api_key=self.config.api_key or os.environ.get("OPENAI_API_KEY", "EMPTY"),
@@ -853,7 +842,7 @@ class MCRunner:
         """
         prompt = self.build_prompt(item)
         gold = item.get(self.config.label_key, "")
-        messages = [*base_messages, {"role": "user", "content": prompt}]
+        messages = [*base_messages, *build_chat_messages(prompt, None)]
 
         call_args: dict[str, Any] = {
             "model": self.config.model_name,

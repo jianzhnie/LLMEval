@@ -18,6 +18,7 @@ from llmeval.utils.prompts import is_chat_template_applied
 __all__ = [
     "ResumeState",
     "append_jsonl",
+    "build_chat_messages",
     "build_vllm_llm_kwargs",
     "ensure_raw_prompt",
     "expand_data_with_resume",
@@ -357,6 +358,15 @@ def ensure_raw_prompt(prompt: str) -> None:
         )
 
 
+def build_chat_messages(prompt: str, system_prompt: str | None) -> list[dict[str, str]]:
+    """Build chat messages with an optional leading system message."""
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
 def process_batches_with_policy(
     items: Sequence[dict[str, Any]],
     batch_size: int,
@@ -456,8 +466,7 @@ def redact_config_for_logging(
             return [redact(item) for item in value]
         return value
 
-    result = redact(payload)
-    return result if isinstance(result, dict) else {}
+    return redact(payload)
 
 
 def is_explicit_tool_choice(tool_choice: str | None) -> bool:

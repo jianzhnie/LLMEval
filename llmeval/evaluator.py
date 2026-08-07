@@ -87,27 +87,11 @@ def evaluate_task(
     code_k_values: tuple[int, ...] = (1, 10, 64),
 ) -> float:
     """
-    Evaluate model outputs against ground truth data for a specific task.
+    Evaluate model outputs and return the primary metric value.
 
-    Dispatches on the task family (the part before ``/`` in *task_name*):
-
-    - ``math_opensource`` → :func:`compute_scores` (math-verify)
-    - ``mc_opensource``   → :func:`score_loglikelihood` when items carry
-      ``logprobs``, otherwise :func:`score_generate`
-    - ``code_opensource`` → :func:`score_code` (sandboxed pass@1)
-
-    Args:
-        eval_dataset: List of dictionaries containing the evaluation data
-        task_name: Identifier for the evaluation task (format: 'source/specific_task')
-        label_key: Dictionary key for accessing ground truth answers
-        response_key: Dictionary key for accessing model responses
-        cache_path: Legacy name for the evaluation result JSONL output path
-        max_workers: Maximum number of parallel workers for processing
-        timeout: Maximum time in seconds to wait for each evaluation (default: 20)
-        exec_timeout: Per-item code execution timeout in seconds (code tasks only)
-        seed: Random seed for bootstrap uncertainty
-        mc_aggregation: Generate-mode MC aggregation strategy.
-        allow_unsafe_code: Explicit opt-in required for code execution.
+    Thin wrapper over :func:`evaluate_task_result`; the task registry dispatches
+    on the family prefix in *task_name* (``math_opensource`` / ``mc_opensource`` /
+    ``code_opensource``). See :func:`evaluate_task_result` for parameter docs.
 
     Returns:
         The task's primary metric value.

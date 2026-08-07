@@ -244,12 +244,9 @@ def _fake_completion(contents: list[str | None]) -> MagicMock:
 def test_empty_task_is_omitted_from_online_config_log(tmp_path: Path) -> None:
     input_file = tmp_path / "input.jsonl"
     input_file.write_text('{"prompt": "q"}\n', encoding="utf-8")
-    args = OnlineInferArguments(input_file=str(input_file), task="")
+    args = OnlineInferArguments(input_file=str(input_file))
 
     assert "task" not in _config_for_logging(args)
-
-    args.task = "code_opensource/humaneval"
-    assert _config_for_logging(args)["task"] == "code_opensource/humaneval"
 
 
 def test_online_config_log_redacts_api_key(tmp_path: Path) -> None:

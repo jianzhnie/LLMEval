@@ -28,6 +28,7 @@ from vllm.outputs import RequestOutput
 
 from llmeval.inference.common import (
     append_jsonl,
+    build_chat_messages,
     build_vllm_llm_kwargs,
     ensure_raw_prompt,
     expand_data_with_resume,
@@ -40,7 +41,6 @@ from llmeval.inference.common import (
 )
 from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.log import init_logger
-from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
 
 # Initialize logger
 logger = init_logger("offline_vllm_infer", logging.INFO)
@@ -86,9 +86,8 @@ class OfflineInferenceRunner:
         self.args: OfflineInferArguments = args
         self._file_lock: threading.Lock = threading.Lock()
         self.llm: LLM | None = None
-        self.system_prompt: str | None = SYSTEM_PROMPT_FACTORY.get(
-            args.system_prompt_type
-        )
+        # System prompt is resolved and validated by PromptArguments at parse time.
+        self.system_prompt: str | None = args.system_prompt
 
     def setup_vllm_engine(self) -> LLM:
         """Initialize and return the configured vLLM engine."""
@@ -170,12 +169,7 @@ class OfflineInferenceRunner:
 
         ensure_raw_prompt(prompt_str)
 
-        # Build messages list
-        messages: list[dict[str, str]] = []
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
-        messages.append({"role": "user", "content": prompt_str})
-
+        messages = build_chat_messages(prompt_str, self.system_prompt)
         logger.debug(f"Converted to messages format: {len(messages)} messages")
         return messages
 

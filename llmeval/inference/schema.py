@@ -78,23 +78,6 @@ class ChoiceLoglikelihood:
         """Whether this choice has a complete, aligned token score."""
         return self.error is None
 
-    @property
-    def total_logprob(self) -> float:
-        """Sum token logprobs for the complete continuation."""
-        return sum(self.token_logprobs) if self.complete else float("-inf")
-
-    @property
-    def token_count(self) -> int:
-        return len(self.token_logprobs)
-
-    @property
-    def char_count(self) -> int:
-        return len(self.continuation)
-
-    @property
-    def byte_count(self) -> int:
-        return len(self.continuation.encode("utf-8"))
-
     @classmethod
     def failure(
         cls, continuation: str, scored_text: str, error: str
@@ -128,11 +111,6 @@ class LoglikelihoodResult:
     @property
     def complete_choices(self) -> tuple[bool, ...]:
         return tuple(choice.complete for choice in self.choices)
-
-    @property
-    def complete(self) -> bool:
-        """Whether the result is exact and every requested choice was scored."""
-        return self.exact and self.error is None and all(self.complete_choices)
 
     @classmethod
     def failure(cls, request: LoglikelihoodRequest, error: str) -> LoglikelihoodResult:

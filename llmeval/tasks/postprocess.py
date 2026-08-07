@@ -24,7 +24,6 @@ from typing import Any
 __all__ = [
     "DEFAULT_FILTER_REGISTRY",
     "FilterRegistry",
-    "RegisteredTextFilter",
     "TextFilter",
     "TextFilterPipeline",
     "apply_text_pipeline",

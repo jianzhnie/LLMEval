@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -509,6 +510,20 @@ def _sample_weight(record: dict[str, Any]) -> int:
     return 1
 
 
+def _count_excluded(
+    records: list[dict[str, Any]], weight: Callable[[dict[str, Any]], int]
+) -> dict[str, int]:
+    """Tally records by non-completed status using the given per-record weight."""
+    return {
+        status: sum(
+            weight(record)
+            for record in records
+            if record.get("evaluation_status") == status
+        )
+        for status in ("failed", "skipped", "timeout")
+    }
+
+
 def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
     """Aggregate per-item records into :class:`MCScoreResult`.
 
@@ -583,21 +598,7 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
             observations[name].append(float(bool(record.get(key, False))))
 
     sample_count = sum(_sample_weight(record) for record in result.per_item)
-    failed_count = sum(
-        _sample_weight(record)
-        for record in result.per_item
-        if record.get("evaluation_status") == "failed"
-    )
-    skipped_count = sum(
-        _sample_weight(record)
-        for record in result.per_item
-        if record.get("evaluation_status") == "skipped"
-    )
-    timeout_count = sum(
-        _sample_weight(record)
-        for record in result.per_item
-        if record.get("evaluation_status") == "timeout"
-    )
+    excluded = _count_excluded(result.per_item, _sample_weight)
     return ScorerResult(
         metrics={
             "acc": result.acc,
@@ -609,11 +610,15 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         per_item=result.per_item,
         sample_count=sample_count,
         effective_sample_count=max(
-            sample_count - failed_count - skipped_count - timeout_count, 0
+            sample_count
+            - excluded["failed"]
+            - excluded["skipped"]
+            - excluded["timeout"],
+            0,
         ),
-        failed_count=failed_count,
-        skipped_count=skipped_count,
-        timeout_count=timeout_count,
+        failed_count=excluded["failed"],
+        skipped_count=excluded["skipped"],
+        timeout_count=excluded["timeout"],
     )
 
 
@@ -865,21 +870,7 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
 
     sample_total = sum(sample_count(record) for record in result.per_item)
 
-    failed_count = sum(
-        sample_count(record)
-        for record in result.per_item
-        if record.get("evaluation_status") == "failed"
-    )
-    skipped_count = sum(
-        sample_count(record)
-        for record in result.per_item
-        if record.get("evaluation_status") == "skipped"
-    )
-    timeout_count = sum(
-        sample_count(record)
-        for record in result.per_item
-        if record.get("evaluation_status") == "timeout"
-    )
+    excluded = _count_excluded(result.per_item, sample_count)
     persist_results(
         cache_path,
         result.per_item,
@@ -892,11 +883,15 @@ def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
             "question_total": question_total,
             "sample_total": sample_total,
             "effective_sample_count": max(
-                sample_total - failed_count - skipped_count - timeout_count, 0
+                sample_total
+                - excluded["failed"]
+                - excluded["skipped"]
+                - excluded["timeout"],
+                0,
             ),
-            "failed_count": failed_count,
-            "skipped_count": skipped_count,
-            "timeout_count": timeout_count,
+            "failed_count": excluded["failed"],
+            "skipped_count": excluded["skipped"],
+            "timeout_count": excluded["timeout"],
             "aggregation": (
                 result.per_item[0].get("aggregation") if result.per_item else None
             ),

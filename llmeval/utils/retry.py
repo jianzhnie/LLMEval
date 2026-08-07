@@ -173,4 +173,3 @@ def call_with_retry(
                 raise
             if should_retry(e, attempt, max_retries) is None:
                 return None  # context-length rejection → empty result
-    return None  # unreachable: should_retry raises once retries are exhausted
