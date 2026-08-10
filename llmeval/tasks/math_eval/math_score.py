@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Iterator
-from concurrent.futures import TimeoutError
+from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 from dataclasses import dataclass, field
 from statistics import mean
 from typing import Any
@@ -34,6 +34,12 @@ from llmeval.utils.log import init_logger
 
 # Configure a dedicated logger for the math scoring module
 logger = init_logger("math_score")
+
+# Python < 3.11: builtins.TimeoutError and concurrent.futures.TimeoutError
+# are distinct classes.  Catch both so timeouts from math-verify internals
+# (builtin) and from pebble (concurrent.futures) are handled identically.
+# In Python 3.11+ they are the same class, so the tuple deduplicates naturally.
+_TIMEOUT_ERRORS: tuple[type[Exception], ...] = (TimeoutError, ConcurrentTimeoutError)
 
 
 def _is_math_task_name(task_name: Any) -> bool:
@@ -432,8 +438,8 @@ def _process_answers_impl(
         return result(float(grade), pred_ans, gold_ans)
 
     # Note: Pebble enforces timeouts at the pool level (terminating subprocess),
-    # so TimeoutError here is a safety net for timeouts from math_verify internals.
-    except TimeoutError:
+    # so a timeout here is a safety net for timeouts from math_verify internals.
+    except _TIMEOUT_ERRORS:
         logger.warning(f"⏰ [Timeout] Job {index} timed out")
         return result(
             0.0,
@@ -584,7 +590,7 @@ def compute_scores(
                 result = next(iterator)
             except StopIteration:
                 break
-            except TimeoutError:
+            except _TIMEOUT_ERRORS:
                 # Handle timeout for individual task — skip and continue
                 logger.warning("Individual task timed out, skipping and continuing")
                 pbar.update(1)
