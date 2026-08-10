@@ -9,7 +9,7 @@ documentation style so the two can be reviewed side by side with a file diff:
 Shared utilities (ClientError, retry classification, backoff) live in
 llmeval/utils/retry.py; shared JSONL and resume helpers live in
 llmeval/inference/common.py; the configuration dataclass lives in
-llmeval/utils/config.py (MCInferConfig).
+llmeval/utils/config.py (MCInferArguments).
 MC-specific pieces (kept deliberately): FewShotFormatter, answer-token
 logprobs, and per-mode worker methods.
 """
@@ -52,7 +52,7 @@ from llmeval.inference.schema import (
     LoglikelihoodRequest,
     LoglikelihoodResult,
 )
-from llmeval.utils.config import MCInferConfig
+from llmeval.utils.config import MCInferArguments
 from llmeval.utils.log import init_logger
 from llmeval.utils.retry import (
     ClientError,
@@ -484,16 +484,16 @@ class MCRunner:
     thread-safety primitives, and the same failed-item persistence.
     """
 
-    def __init__(self, config: MCInferConfig) -> None:
+    def __init__(self, config: MCInferArguments) -> None:
         """Initialize the runner with client, prompts, and thread safety setup.
 
         Args:
-            config: MC inference configuration (see MCInferConfig)
+            config: MC inference configuration (see MCInferArguments)
 
         Raises:
             RuntimeError: If the loglikelihood client fails to initialize
         """
-        self.config: MCInferConfig = config
+        self.config: MCInferArguments = config
 
         # Initialize client with error handling (loglikelihood mode only;
         # generate mode builds a plain OpenAI client per run)
@@ -513,7 +513,7 @@ class MCRunner:
             except (OSError, ValueError) as e:
                 raise RuntimeError(f"Failed to initialize MC client: {e}") from e
 
-        # System prompt is resolved and validated by MCInferConfig at parse time.
+        # System prompt is resolved and validated by MCInferArguments at parse time.
         self.system_prompt: str | None = config.system_prompt
 
         # Few-shot formatter (per-item dedup)
@@ -1045,7 +1045,7 @@ class MCRunner:
 def main() -> None:
     """Main entry point for the MC inference CLI.
 
-    Mirrors main() in online.py: HfArgumentParser builds MCInferConfig
+    Mirrors main() in online.py: HfArgumentParser builds MCInferArguments
     directly from the dataclass (field names == CLI flags), then the runner
     executes with standardized exit-code handling.
 
@@ -1055,11 +1055,11 @@ def main() -> None:
     start_time = time.perf_counter()
     try:
         # Parse command line arguments into a strongly typed dataclass
-        parser = HfArgumentParser(MCInferConfig)  # type: ignore[arg-type]
+        parser = HfArgumentParser(MCInferArguments)  # type: ignore[arg-type]
         (config,) = parser.parse_args_into_dataclasses()
 
         # Log initialization with formatted argument display
-        logger.info("Initializing MCInferConfig with parsed command line arguments...")
+        logger.info("Initializing MCInferArguments with parsed command line arguments...")
         logger.info("\n--- Parsed Arguments ---")
         logger.info(
             json.dumps(redact_config_for_logging(dataclasses.asdict(config)), indent=2)

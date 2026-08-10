@@ -8,10 +8,12 @@ from pathlib import Path
 import pytest
 
 from llmeval.utils.config import (
+    CodeEvalArguments,
     DataArguments,
-    EvalTaskArguments,
     GenerationArguments,
-    MCInferConfig,
+    MathEvalArguments,
+    MCEvalArguments,
+    MCInferArguments,
     OfflineInferArguments,
     OnlineInferArguments,
     PromptArguments,
@@ -47,7 +49,7 @@ def test_eval_result_path_overrides_legacy_cache_path(tmp_path: Path) -> None:
     input_path.touch()
     result_path = tmp_path / "results.jsonl"
 
-    args = EvalTaskArguments(
+    args = CodeEvalArguments(
         input_path=str(input_path), result_path=str(result_path), code_k_values="1,5,5"
     )
 
@@ -60,7 +62,7 @@ def test_eval_code_k_values_reject_invalid_values(tmp_path: Path) -> None:
     input_path.touch()
 
     with pytest.raises(ValueError, match="positive integers"):
-        EvalTaskArguments(input_path=str(input_path), code_k_values="1,0")
+        CodeEvalArguments(input_path=str(input_path), code_k_values="1,0")
 
 
 class TestPromptArguments:
@@ -151,7 +153,7 @@ class TestVLLMEngineArguments:
 
 class TestMCAndEvaluationP0Config:
     def test_mc_generation_defaults_to_one_sample_and_auto_scoring(self) -> None:
-        config = MCInferConfig()
+        config = MCInferArguments()
         assert config.n_samples == 1
         assert config.loglikelihood_mode == "first_token"
 
@@ -159,7 +161,7 @@ class TestMCAndEvaluationP0Config:
         input_path = tmp_path / "input.jsonl"
         input_path.write_text("{}\n")
         with pytest.raises(ValueError, match="mc_aggregation"):
-            EvalTaskArguments(
+            MCEvalArguments(
                 input_path=str(input_path),
                 mc_aggregation="invalid",
             )
@@ -230,9 +232,9 @@ class TestServerArguments:
             ServerArguments(extra_body=extra_body)
 
 
-class TestMCInferConfig:
+class TestMCInferArguments:
     def test_reuses_shared_argument_classes(self) -> None:
-        args = MCInferConfig()
+        args = MCInferArguments()
 
         assert isinstance(args, DataArguments)
         assert isinstance(args, PromptArguments)
@@ -240,7 +242,7 @@ class TestMCInferConfig:
         assert isinstance(args, ServerArguments)
 
     def test_defaults_valid(self) -> None:
-        args = MCInferConfig()
+        args = MCInferArguments()
         assert args.mode == "loglikelihood"
         assert args.max_workers > 0
         assert args.n_shot == 0
@@ -251,28 +253,28 @@ class TestMCInferConfig:
 
     def test_invalid_tool_choice_raises(self) -> None:
         with pytest.raises(ValueError, match="tool_choice"):
-            MCInferConfig(tool_choice="function_name")
+            MCInferArguments(tool_choice="function_name")
 
     def test_api_key_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-mc-test")
-        assert MCInferConfig().api_key == "sk-mc-test"
+        assert MCInferArguments().api_key == "sk-mc-test"
 
     def test_api_key_default_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        assert MCInferConfig().api_key == "EMPTY"
+        assert MCInferArguments().api_key == "EMPTY"
 
     def test_invalid_mode_raises(self) -> None:
         with pytest.raises(ValueError, match="mode"):
-            MCInferConfig(mode="bogus")
+            MCInferArguments(mode="bogus")
 
     def test_nonempty_input_reuses_data_validation(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="does not exist"):
-            MCInferConfig(input_file=str(tmp_path / "missing.jsonl"))
+            MCInferArguments(input_file=str(tmp_path / "missing.jsonl"))
 
     @pytest.mark.parametrize("key", ["input_key", "label_key", "response_key"])
     def test_empty_record_key_raises(self, key: str) -> None:
         with pytest.raises(ValueError, match=key):
-            MCInferConfig(**{key: "\t"})
+            MCInferArguments(**{key: "\t"})
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -291,12 +293,43 @@ class TestMCInferConfig:
     )
     def test_invalid_values_raise(self, kwargs: dict) -> None:
         with pytest.raises(ValueError):
-            MCInferConfig(**kwargs)
+            MCInferArguments(**kwargs)
 
 
-class TestEvalTaskArguments:
-    def test_does_not_expose_unused_input_key(self) -> None:
-        assert "input_key" not in {item.name for item in fields(EvalTaskArguments)}
+class TestEvalArguments:
+    def test_task_specific_fields_are_isolated(self) -> None:
+        math_fields = {item.name for item in fields(MathEvalArguments)}
+        mc_fields = {item.name for item in fields(MCEvalArguments)}
+        code_fields = {item.name for item in fields(CodeEvalArguments)}
+
+        assert "mc_aggregation" not in math_fields
+        assert "allow_unsafe_code" not in math_fields
+        assert "code_k_values" not in math_fields
+        assert "mc_aggregation" in mc_fields
+        assert "allow_unsafe_code" not in mc_fields
+        assert "code_k_values" not in mc_fields
+        assert "mc_aggregation" not in code_fields
+        assert {"allow_unsafe_code", "code_k_values", "exec_timeout"} <= code_fields
+
+    def test_task_specific_defaults_and_validation(self, tmp_path: Path) -> None:
+        input_f = tmp_path / "data.jsonl"
+        input_f.write_text("{}\n")
+
+        assert MathEvalArguments(input_path=str(input_f)).task_name.startswith(
+            "math_opensource/"
+        )
+        assert MCEvalArguments(input_path=str(input_f)).task_name.startswith(
+            "mc_opensource/"
+        )
+        code_args = CodeEvalArguments(input_path=str(input_f), code_k_values="1,5,5")
+        assert code_args.task_name.startswith("code_opensource/")
+        assert code_args.code_k_values_tuple == (1, 5)
+
+    @pytest.mark.parametrize(
+        "argument_type", [MathEvalArguments, MCEvalArguments, CodeEvalArguments]
+    )
+    def test_does_not_expose_unused_input_key(self, argument_type: type) -> None:
+        assert "input_key" not in {item.name for item in fields(argument_type)}
 
     def test_valid_task_names(self, tmp_path: Path) -> None:
         input_f = tmp_path / "data.jsonl"
@@ -306,27 +339,9 @@ class TestEvalTaskArguments:
             "math_opensource/math500",
             "math_opensource/hmmt25",
         ]:
-            args = EvalTaskArguments(input_path=str(input_f), task_name=task)
+            args = MathEvalArguments(input_path=str(input_f), task_name=task)
             assert args.task_name == task
-
-    def test_evaluation_output_schema_defaults_to_compact(self, tmp_path: Path) -> None:
-        input_f = tmp_path / "data.jsonl"
-        input_f.write_text('{"prompt": "q", "answer": "a"}\n')
-        args = EvalTaskArguments(input_path=str(input_f))
-        assert args.output_schema == "compact"
-
-    def test_invalid_output_schema_raises(self, tmp_path: Path) -> None:
-        input_f = tmp_path / "data.jsonl"
-        input_f.write_text("{}\n")
-        with pytest.raises(ValueError, match="output_schema"):
-            EvalTaskArguments(input_path=str(input_f), output_schema="full")
-
-    def test_task_validation_is_delegated_to_registry(self, tmp_path: Path) -> None:
-        input_f = tmp_path / "data.jsonl"
-        input_f.write_text("{}\n")
-        args = EvalTaskArguments(input_path=str(input_f), task_name="custom/task")
-        assert args.task_name == "custom/task"
 
     def test_missing_input_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="does not exist"):
-            EvalTaskArguments(input_path=str(tmp_path / "nope.jsonl"))
+            MathEvalArguments(input_path=str(tmp_path / "nope.jsonl"))

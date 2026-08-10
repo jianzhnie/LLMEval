@@ -51,7 +51,7 @@ case "$BENCHMARKS" in
     HUMEVAL) BENCHMARKS="humaneval humaneval_plus" ;;
 esac
 
-# task_name 映射 (对应 EvalTaskArguments 中的有效值)
+# task_name 映射 (对应 CodeEvalArguments)
 declare -A TASK_NAME=(
     [humaneval]="code_opensource/humaneval"
     [mbpp]="code_opensource/mbpp"

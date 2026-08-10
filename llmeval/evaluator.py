@@ -25,6 +25,7 @@ Date: 2025
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 import sys
@@ -50,7 +51,11 @@ from llmeval.tasks.registry import (
     evaluate_registered_task,
     persist_evaluation_result,
 )
-from llmeval.utils.config import EvalTaskArguments
+from llmeval.utils.config import (
+    CodeEvalArguments,
+    MathEvalArguments,
+    MCEvalArguments,
+)
 from llmeval.utils.log import init_logger
 
 # Initialize logger for the evaluation orchestrator
@@ -226,6 +231,33 @@ def evaluate_task_result(
     return result
 
 
+def select_eval_arguments(task_name: str) -> type[Any]:
+    """Select the task-specific CLI schema from a task family name."""
+    family = task_name.split("/", 1)[0]
+    argument_types = {
+        "math_opensource": MathEvalArguments,
+        "mc_opensource": MCEvalArguments,
+        "code_opensource": CodeEvalArguments,
+    }
+    try:
+        return argument_types[family]
+    except KeyError as exc:
+        available = ", ".join(argument_types)
+        raise ValueError(
+            f"Unsupported task family {family!r}; expected one of: {available}"
+        ) from exc
+
+
+def _parse_eval_arguments(argv: list[str] | None = None) -> Any:
+    """Parse CLI arguments with only the selected task's options exposed."""
+    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    selected = selector.parse_known_args(argv)[0]
+    argument_type = select_eval_arguments(selected.task_name)
+    parser = HfArgumentParser(argument_type)  # type: ignore[arg-type]
+    (args,) = parser.parse_args_into_dataclasses(args=argv)
+    return args
+
+
 def main() -> int:
     """
     Main entry point for the evaluation script.
@@ -242,9 +274,7 @@ def main() -> int:
         int: Exit code (0 for success, 1 for errors)
     """
     try:
-        # Parse command line arguments using HuggingFace's argument parser
-        parser = HfArgumentParser(EvalTaskArguments)  # type: ignore[arg-type]
-        (args,) = parser.parse_args_into_dataclasses()
+        args = _parse_eval_arguments()
 
         # Log initialization with formatted argument display
         logger.info("Initializing evaluation with the following configuration:")
@@ -286,20 +316,20 @@ def main() -> int:
 
         # Run evaluation and retain the complete metric result.
         evaluate_task_result(
-            processed_data,
-            args.task_name,
-            args.label_key,
-            args.response_key,
-            args.cache_path,
-            args.max_workers,
-            args.timeout,
-            args.exec_timeout,
-            args.seed,
-            args.mc_aggregation,
-            args.allow_unsafe_code,
-            args.bootstrap_samples,
-            args.confidence_level,
-            code_k_values=args.code_k_values_tuple,
+            eval_dataset=processed_data,
+            task_name=args.task_name,
+            label_key=args.label_key,
+            response_key=args.response_key,
+            cache_path=args.cache_path,
+            max_workers=args.max_workers,
+            timeout=args.timeout,
+            exec_timeout=getattr(args, "exec_timeout", 3.0),
+            seed=args.seed,
+            mc_aggregation=getattr(args, "mc_aggregation", "first"),
+            allow_unsafe_code=getattr(args, "allow_unsafe_code", False),
+            bootstrap_samples=args.bootstrap_samples,
+            confidence_level=args.confidence_level,
+            code_k_values=getattr(args, "code_k_values_tuple", (1, 10, 64)),
         )
 
         logger.info("🎉 Evaluation completed successfully!")

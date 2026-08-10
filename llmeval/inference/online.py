@@ -261,17 +261,6 @@ class InferenceClient:
             self.usage_stats["prompt_tokens"] += prompt_tokens
             self.usage_stats["completion_tokens"] += completion_tokens
 
-    def usage_snapshot(self) -> dict[str, int]:
-        """Return a consistent copy of accumulated token usage."""
-        with self._usage_lock:
-            prompt_tokens = self.usage_stats["prompt_tokens"]
-            completion_tokens = self.usage_stats["completion_tokens"]
-        return {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        }
-
 
 class InferenceRunner:
     """Concurrent OpenAI-compatible inference runner with resume support."""
@@ -498,7 +487,6 @@ class InferenceRunner:
         logger.info(f"Successfully processed: {self._stats['processed']}")
         logger.info(f"Failed: {self._stats['failed']}")
         logger.info(f"Skipped: {self._stats['skipped']}")
-        usage = self.client.usage_snapshot()
         logger.info(f"Prompt tokens: {usage['prompt_tokens']}")
         logger.info(f"Completion tokens: {usage['completion_tokens']}")
         logger.info(f"Total tokens: {usage['total_tokens']}")

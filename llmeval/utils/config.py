@@ -30,10 +30,12 @@ from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
 
 __all__ = [
+    "CodeEvalArguments",
     "DataArguments",
-    "EvalTaskArguments",
     "GenerationArguments",
-    "MCInferConfig",
+    "MCEvalArguments",
+    "MCInferArguments",
+    "MathEvalArguments",
     "OfflineInferArguments",
     "OnlineInferArguments",
     "PromptArguments",
@@ -573,7 +575,7 @@ class OfflineInferArguments(
 
 
 @dataclass
-class MCInferConfig(
+class MCInferArguments(
     DataArguments, PromptArguments, GenerationArguments, ServerArguments
 ):
     """Configuration for multiple-choice inference.
@@ -582,6 +584,7 @@ class MCInferConfig(
     classes. This class only overrides MC-specific defaults and adds MC-only
     scoring and few-shot options.
     """
+
     mode: str = field(
         default="loglikelihood",
         metadata={"help": "Inference mode: 'loglikelihood' or 'generate'."},
@@ -639,33 +642,15 @@ class MCInferConfig(
 
 
 @dataclass
-class EvalTaskArguments:
-    """
-    Arguments for task-specific evaluation configuration.
-
-    This class handles the configuration parameters for evaluating model outputs
-    on specific tasks like math problems or code benchmarks.
-
-    Attributes:
-        input_path (str): Path to the input JSONL file containing evaluation data.
-        task_name (str): Name of the evaluation task to run.
-            Validation is delegated to the task registry.
-        label_key (str): Key for target/label text in dataset.
-        response_key (str): Key for model generated text.
-        cache_path (str): Legacy name for the evaluation result JSONL path. Existing
-            directory paths are resolved to a task-specific JSONL file.
-        max_workers (int): Maximum number of worker threads for parallel processing.
-
-
-        timeout (int): Timeout for LLM inference in seconds.
-    """
+class ShareEvalArguments:
+    """Arguments shared by all task-family evaluators."""
 
     input_path: str = field(
         metadata={"help": "Path to the input JSONL file containing evaluation data."}
     )
     task_name: str = field(
         default="math_opensource/aime24",
-        metadata={"help": "Evaluation task name (e.g. math_opensource/aime24)."},
+        metadata={"help": "Evaluation task name."},
     )
     label_key: str = field(
         default="answer", metadata={"help": "Key for target/label text in dataset."}
@@ -673,65 +658,33 @@ class EvalTaskArguments:
     response_key: str = field(
         default="gen", metadata={"help": "Key for model generated text."}
     )
-    mc_aggregation: str = field(
-        default="first",
-        metadata={
-            "help": "MC generate aggregation: first, majority_vote, any_correct, or per_sample."
-        },
-    )
-    allow_unsafe_code: bool = field(
-        default=False,
-        metadata={
-            "help": "Explicitly allow execution of generated code during evaluation."
-        },
-    )
-    code_k_values: str = field(
-        default="1,10,64",
-        metadata={"help": "Comma-separated pass@k values for code evaluation."},
-    )
-    code_k_values_tuple: tuple[int, ...] = field(init=False, default=(1, 10, 64))
-
     cache_path: str = field(
         default="./cache/results.jsonl",
-        metadata={"help": "JSONL file path for saving detailed evaluation results."},
+        metadata={"help": "Legacy JSONL path for evaluation results."},
     )
     result_path: str = field(
         default="",
-        metadata={
-            "help": "Preferred result JSONL path; overrides legacy --cache_path."
-        },
+        metadata={"help": "Preferred result path; overrides cache_path."},
     )
     max_workers: int = field(
         default=128,
-        metadata={"help": "Maximum number of worker threads for parallel processing."},
+        metadata={"help": "Maximum number of worker threads."},
     )
     timeout: int = field(
-        default=20, metadata={"help": "Timeout for LLM inference in seconds."}
-    )
-    exec_timeout: float = field(
-        default=3.0,
-        metadata={
-            "help": "Per-item code execution timeout in seconds (code tasks only)."
-        },
+        default=20, metadata={"help": "Timeout for inference in seconds."}
     )
     seed: int = field(
         default=0, metadata={"help": "Random seed for bootstrap uncertainty."}
     )
     bootstrap_samples: int = field(
         default=1000,
-        metadata={"help": "Number of bootstrap resamples for uncertainty."},
+        metadata={"help": "Number of bootstrap resamples."},
     )
     confidence_level: float = field(
         default=0.95, metadata={"help": "Bootstrap confidence level."}
     )
 
     def __post_init__(self) -> None:
-        """
-        Validate evaluation task arguments after initialization.
-
-        Raises:
-            ValueError: If required fields are missing or invalid.
-        """
         if not self.input_path:
             raise ValueError("input_path is required")
         if not Path(self.input_path).exists():
@@ -741,9 +694,80 @@ class EvalTaskArguments:
         if not self.cache_path:
             raise ValueError("result_path or cache_path is required")
         _validate_field_names(
+            task_name=self.task_name,
             label_key=self.label_key,
             response_key=self.response_key,
         )
+        if self.max_workers <= 0:
+            raise ValueError(f"max_workers must be positive, got {self.max_workers}")
+        if self.timeout <= 0:
+            raise ValueError(f"timeout must be positive, got {self.timeout}")
+        if self.seed < 0:
+            raise ValueError(f"seed must be non-negative, got {self.seed}")
+        if self.bootstrap_samples < 0:
+            raise ValueError(
+                f"bootstrap_samples must be non-negative, got {self.bootstrap_samples}"
+            )
+        if not 0.0 < self.confidence_level < 1.0:
+            raise ValueError(
+                f"confidence_level must be between 0 and 1, got {self.confidence_level}"
+            )
+
+
+@dataclass
+class MathEvalArguments(ShareEvalArguments):
+    """CLI arguments for math evaluation."""
+
+    task_name: str = field(default="math_opensource/aime24")
+
+
+@dataclass
+class MCEvalArguments(ShareEvalArguments):
+    """CLI arguments for multiple-choice evaluation."""
+
+    task_name: str = field(default="mc_opensource/mmlu")
+    mc_aggregation: str = field(
+        default="first",
+        metadata={
+            "help": "Aggregation: first, majority_vote, any_correct, or per_sample."
+        },
+    )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.mc_aggregation not in {
+            "first",
+            "majority_vote",
+            "any_correct",
+            "per_sample",
+        }:
+            raise ValueError(
+                "mc_aggregation must be one of ('first', 'majority_vote', "
+                f"'any_correct', 'per_sample'), got: {self.mc_aggregation!r}"
+            )
+
+
+@dataclass
+class CodeEvalArguments(ShareEvalArguments):
+    """CLI arguments for sandboxed code evaluation."""
+
+    task_name: str = field(default="code_opensource/humaneval")
+    allow_unsafe_code: bool = field(
+        default=False,
+        metadata={"help": "Allow execution of generated code."},
+    )
+    code_k_values: str = field(
+        default="1,10,64",
+        metadata={"help": "Comma-separated pass@k values."},
+    )
+    code_k_values_tuple: tuple[int, ...] = field(init=False, default=(1, 10, 64))
+    exec_timeout: float = field(
+        default=3.0,
+        metadata={"help": "Per-item code execution timeout in seconds."},
+    )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
         try:
             parsed_k = tuple(
                 dict.fromkeys(
@@ -761,29 +785,5 @@ class EvalTaskArguments:
                 f"code_k_values must contain positive integers, got {self.code_k_values!r}"
             )
         self.code_k_values_tuple = parsed_k
-        if self.max_workers <= 0:
-            raise ValueError(f"max_workers must be positive, got {self.max_workers}")
-        if self.timeout <= 0:
-            raise ValueError(f"timeout must be positive, got {self.timeout}")
         if self.exec_timeout <= 0:
             raise ValueError(f"exec_timeout must be positive, got {self.exec_timeout}")
-        if self.seed < 0:
-            raise ValueError(f"seed must be non-negative, got {self.seed}")
-        if self.mc_aggregation not in (
-            "first",
-            "majority_vote",
-            "any_correct",
-            "per_sample",
-        ):
-            raise ValueError(
-                "mc_aggregation must be one of ('first', 'majority_vote', "
-                f"'any_correct', 'per_sample'), got: {self.mc_aggregation!r}"
-            )
-        if self.bootstrap_samples < 0:
-            raise ValueError(
-                f"bootstrap_samples must be non-negative, got {self.bootstrap_samples}"
-            )
-        if not 0.0 < self.confidence_level < 1.0:
-            raise ValueError(
-                f"confidence_level must be between 0 and 1, got {self.confidence_level}"
-            )

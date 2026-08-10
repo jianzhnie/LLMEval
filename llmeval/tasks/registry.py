@@ -132,7 +132,14 @@ class ScorerResult:
     def __post_init__(self) -> None:
         if any(not math.isfinite(float(value)) for value in self.metrics.values()):
             raise ValueError("scorer metrics must be finite")
-        if any(count < 0 for count in self._counts):
+        counts = (
+            self.sample_count,
+            self.effective_sample_count,
+            self.failed_count,
+            self.skipped_count,
+            self.timeout_count,
+        )
+        if any(count < 0 for count in counts):
             raise ValueError("scorer result counts must be non-negative")
         if any(
             not isinstance(name, str) or not isinstance(value, int) or value < 0
@@ -156,16 +163,6 @@ class ScorerResult:
         for name, values in self.observations.items():
             if any(not math.isfinite(float(value)) for value in values):
                 raise ValueError(f"observations for metric {name!r} must be finite")
-
-    @property
-    def _counts(self) -> tuple[int, ...]:
-        return (
-            self.sample_count,
-            self.effective_sample_count,
-            self.failed_count,
-            self.skipped_count,
-            self.timeout_count,
-        )
 
 
 def bootstrap_metric(
@@ -287,18 +284,6 @@ class EvaluationTask(Protocol):
     def score(self, context: EvaluationContext) -> EvaluationResult: ...
 
 
-def _metric(
-    values: list[float], context: EvaluationContext, *, higher_is_better: bool = True
-) -> MetricValue:
-    return metric_from_samples(
-        values,
-        context.seed,
-        n_resamples=context.bootstrap_samples,
-        confidence_level=context.confidence_level,
-        higher_is_better=higher_is_better,
-    )
-
-
 def _build_evaluation_result(
     scored: ScorerResult,
     context: EvaluationContext,
@@ -311,7 +296,13 @@ def _build_evaluation_result(
         spec = specifications.get(name, MetricSpec(name))
         observations = scored.observations.get(name, [])
         metrics[name] = (
-            _metric(observations, context, higher_is_better=spec.higher_is_better)
+            metric_from_samples(
+                observations,
+                context.seed,
+                n_resamples=context.bootstrap_samples,
+                confidence_level=context.confidence_level,
+                higher_is_better=spec.higher_is_better,
+            )
             if observations
             else MetricValue(
                 value=float(value),
@@ -338,20 +329,15 @@ def _build_evaluation_result(
     )
 
 
-def _structured_summary(result: EvaluationResult) -> dict[str, Any]:
-    """Build the summary schema shared by all registered task families."""
-    payload = result.to_dict()
-    payload["summary_version"] = 1
-    metric_values = {name: metric.value for name, metric in result.metrics.items()}
-    payload["metric_values"] = metric_values
-    for name, value in metric_values.items():
-        payload.setdefault(name, value)
-    return payload
-
-
 def persist_evaluation_result(result: EvaluationResult, cache_path: Path) -> None:
     """Persist only the aggregate result summary."""
-    persist_results(cache_path, _structured_summary(result))
+    summary = result.to_dict()
+    summary["summary_version"] = 1
+    metric_values = {name: metric.value for name, metric in result.metrics.items()}
+    summary["metric_values"] = metric_values
+    for name, value in metric_values.items():
+        summary.setdefault(name, value)
+    persist_results(cache_path, summary)
 
 
 @dataclass

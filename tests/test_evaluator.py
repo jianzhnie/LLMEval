@@ -52,9 +52,11 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
 
 from llmeval.evaluator import (
     _resolve_cache_path,
+    _select_eval_arguments,
     evaluate_task,
 )
 from llmeval.tasks.registry import ScorerResult
+from llmeval.utils.config import CodeEvalArguments, MathEvalArguments, MCEvalArguments
 
 
 def _scorer_result(name: str, value: float) -> ScorerResult:
@@ -67,6 +69,19 @@ def _scorer_result(name: str, value: float) -> ScorerResult:
 
 
 class TestEvaluateTask:
+    @pytest.mark.parametrize(
+        ("task_name", "argument_type"),
+        [
+            ("math_opensource/aime24", MathEvalArguments),
+            ("mc_opensource/mmlu", MCEvalArguments),
+            ("code_opensource/humaneval", CodeEvalArguments),
+        ],
+    )
+    def test_selects_task_specific_arguments(
+        self, task_name: str, argument_type: type[object]
+    ) -> None:
+        assert _select_eval_arguments(task_name) is argument_type
+
     def test_cache_directory_path_resolves_to_task_jsonl(self, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()

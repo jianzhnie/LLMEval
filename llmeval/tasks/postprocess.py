@@ -36,7 +36,6 @@ __all__ = [
     "apply_text_pipeline_with_trace",
     "atomic_write_json",
     "atomic_write_jsonl",
-    "atomic_write_text",
     "build_filter_artifacts",
     "normalize_single_generation_samples",
     "persist_results",
@@ -311,21 +310,15 @@ def _atomic_text_writer(path: str | Path) -> Generator[TextIOBase, None, None]:
         raise
 
 
-def atomic_write_text(path: str | Path, content: str) -> None:
-    """Replace ``path`` atomically after flushing a sibling temporary file."""
-    with _atomic_text_writer(path) as handle:
-        handle.write(content)
-
-
 def atomic_write_json(
     path: str | Path, value: Any, *, indent: int | None = None
 ) -> None:
     """Serialize JSON and persist it atomically."""
-    atomic_write_text(
-        path,
-        json.dumps(value, ensure_ascii=False, indent=indent)
-        + ("\n" if indent is not None else ""),
-    )
+    content = json.dumps(value, ensure_ascii=False, indent=indent)
+    if indent is not None:
+        content += "\n"
+    with _atomic_text_writer(path) as handle:
+        handle.write(content)
 
 
 def atomic_write_jsonl(path: str | Path, records: Iterable[dict[str, Any]]) -> None:

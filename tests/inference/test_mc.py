@@ -58,7 +58,7 @@ from llmeval.inference.schema import (
     LoglikelihoodRequest,
     LoglikelihoodResult,
 )
-from llmeval.utils.config import MCInferConfig
+from llmeval.utils.config import MCInferArguments
 
 
 def _make_ll_client(max_retries: int = 0) -> MCLoglikelihoodClient:
@@ -109,7 +109,7 @@ def _make_mc_runner(
     runner = MCRunner.__new__(MCRunner)
     input_file = tmp_path / "in.jsonl"
     input_file.touch(exist_ok=True)
-    runner.config = MCInferConfig(
+    runner.config = MCInferArguments(
         input_file=str(input_file),
         output_file=str(tmp_path / "out.jsonl"),
         mode=mode,
@@ -772,7 +772,7 @@ class TestMCRunnerEndToEnd:
         inp = tmp_path / "in.jsonl"
         out = tmp_path / "out.jsonl"
         _write_input(inp)
-        cfg = MCInferConfig(
+        cfg = MCInferArguments(
             input_file=str(inp),
             output_file=str(out),
             mode="loglikelihood",
@@ -797,11 +797,11 @@ class TestMCRunnerEndToEnd:
 # ===========================================================================
 
 
-class TestMCInferConfig:
-    """Test MCInferConfig defaults and API key resolution."""
+class TestMCInferArguments:
+    """Test MCInferArguments defaults and API key resolution."""
 
     def test_defaults(self) -> None:
-        c = MCInferConfig()
+        c = MCInferArguments()
         assert c.mode == "loglikelihood"
         assert c.max_workers == 32
         assert c.temperature == 0.0
@@ -809,12 +809,12 @@ class TestMCInferConfig:
 
     def test_api_key_default(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            c = MCInferConfig()
+            c = MCInferArguments()
             assert c.api_key == "EMPTY"
 
     def test_api_key_from_env(self) -> None:
         with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
-            c = MCInferConfig()
+            c = MCInferArguments()
             assert c.api_key == "sk-test"
 
 
@@ -1073,7 +1073,7 @@ def _mc_runner_failed_items_dumped_not_written(self, tmp_path: Path) -> None:
     inp = tmp_path / "in.jsonl"
     out = tmp_path / "out.jsonl"
     _write_input(inp)
-    cfg = MCInferConfig(
+    cfg = MCInferArguments(
         input_file=str(inp),
         output_file=str(out),
         mode="loglikelihood",
