@@ -50,7 +50,6 @@ from tqdm import tqdm
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
-    build_filter_artifacts,
     persist_results,
     resolve_max_workers,
     resolve_single_generation,
@@ -836,11 +835,9 @@ def score_generate_item(
         "correct_bytes": is_correct,
         "aggregation": aggregation,
         "predictions": predictions,
-        **build_filter_artifacts(
-            generation_texts,
-            predictions,
-            [trace for _, trace in filtered],
-        ),
+        "raw_gen": generation_texts,
+        "filtered_gen": predictions,
+        "filter_trace": [trace for _, trace in filtered],
         "evaluation_status": status,
         "sample_correct": sample_correct,
         "sample_total": len(predictions),

@@ -24,7 +24,6 @@ from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
 from llmeval.tasks.postprocess import (
     DEFAULT_FILTER_REGISTRY,
     TextFilterPipeline,
-    build_filter_artifacts,
     normalize_single_generation_samples,
     persist_results,
     resolve_max_workers,
@@ -626,11 +625,9 @@ def compute_scores(
                         "failure_stage": failure_stage,
                         "failure_reason": failure_reason,
                         "fallback_matched": fallback_matched,
-                        **build_filter_artifacts(
-                            result.filter_trace.get("raw", ""),
-                            result.filtered_gen,
-                            result.filter_trace,
-                        ),
+                        "raw_gen": result.filter_trace.get("raw", ""),
+                        "filtered_gen": result.filtered_gen,
+                        "filter_trace": result.filter_trace,
                     }
                 )
                 processed_indices.add(idx)
@@ -918,6 +915,8 @@ def _filter_artifacts(response: Any) -> dict[str, Any]:
     """Return the raw response, filtered response, and task pipeline trace."""
     raw_response = response[0] if isinstance(response, list) and response else response
     filtered, trace = MATH_RESPONSE_PIPELINE.apply_with_trace(raw_response)
-    return build_filter_artifacts(
-        "" if raw_response is None else str(raw_response), filtered, trace
-    )
+    return {
+        "raw_gen": "" if raw_response is None else str(raw_response),
+        "filtered_gen": filtered,
+        "filter_trace": trace,
+    }

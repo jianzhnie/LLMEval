@@ -23,7 +23,6 @@ from llmeval.tasks.code_eval.execute import check_correctness
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
-    build_filter_artifacts,
     normalize_single_generation_samples,
     persist_results,
     resolve_max_workers,
@@ -379,7 +378,11 @@ def _process_code_item_impl(
         gen_str = ""
 
     code, filter_trace = CODE_GENERATION_PIPELINE.apply_with_trace(gen_str)
-    filter_artifacts = build_filter_artifacts(gen_str, code, filter_trace)
+    filter_artifacts = {
+        "raw_gen": gen_str,
+        "filtered_gen": code,
+        "filter_trace": filter_trace,
+    }
 
     # -- guard: missing test harness ---------------------------------------------
     # An empty test harness is a dataset problem, not a model failure: without
