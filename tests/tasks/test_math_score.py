@@ -291,10 +291,7 @@ class TestComputeScores:
         assert data[0]["filter_trace"]["pipeline"] == "math_response"
         summary = json.loads((tmp_path / "cache.summary.json").read_text())
         assert summary["accuracy"] == pytest.approx(0.5)
-        # Cache written as valid JSONL
-        lines = cache.read_text(encoding="utf-8").strip().split("\n")
-        assert len(lines) == 2
-        assert json.loads(lines[0])["accuracy"] == 1.0
+        assert not cache.exists()
 
     def test_all_correct(self, tmp_path: Path) -> None:
         from llmeval.tasks.math_eval.math_score import compute_scores
@@ -365,7 +362,7 @@ class TestComputeScores:
         assert result.effective_sample_count == 0
         assert result.failure_counts["timeout"] == 2
         assert "verification_failed" not in result.failure_counts
-        assert all(item["evaluation_status"] == "timeout" for item in result.per_item)
+        assert all(item["evaluation_status"] == "timeout" for item in result.records)
 
     def test_structured_result_counts_with_skipped_item(self, tmp_path: Path) -> None:
         from llmeval.tasks.math_eval.math_score import score_math_result
@@ -546,7 +543,7 @@ class TestRepeatedMathRows:
 
         assert result.sample_count == 1
         assert result.failed_count == 1
-        assert result.per_item[0]["failure_stage"] == "inference"
+        assert result.records[0]["failure_stage"] == "inference"
 
     def test_identical_responses_remain_independent_samples(
         self, tmp_path: Path

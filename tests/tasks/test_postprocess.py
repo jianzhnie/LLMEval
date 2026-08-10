@@ -64,7 +64,9 @@ def test_registered_pipeline_records_each_filter_step() -> None:
     assert trace["filters"][1]["output"] == "A"
 
 
-def test_resolve_max_workers_respects_cpu_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_max_workers_respects_cpu_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr("llmeval.tasks.postprocess.os.cpu_count", lambda: 8)
 
     assert resolve_max_workers(total=20, requested=12) == 7

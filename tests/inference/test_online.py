@@ -253,24 +253,7 @@ def _make_client(max_retries: int = 0):
     client.seed = 0
     client.extra_body = {}
     client.client = MagicMock()
-    client._usage_lock = threading.Lock()
-    client.usage_stats = {"prompt_tokens": 0, "completion_tokens": 0}
     return client
-
-
-def test_usage_snapshot_includes_total_tokens() -> None:
-    client = _make_client()
-    completion = MagicMock()
-    completion.usage.prompt_tokens = 12
-    completion.usage.completion_tokens = 7
-
-    client._record_usage(completion)
-
-    assert client.usage_snapshot() == {
-        "prompt_tokens": 12,
-        "completion_tokens": 7,
-        "total_tokens": 19,
-    }
 
 
 def _fake_completion(contents: list[str | None]) -> MagicMock:

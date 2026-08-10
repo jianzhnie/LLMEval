@@ -32,7 +32,6 @@ __all__ = [
     "ScorerResult",
     "TaskRegistry",
     "build_default_registry",
-    "evaluate_registered_task",
     "metric_from_samples",
     "persist_evaluation_result",
 ]
@@ -48,17 +47,6 @@ class MetricValue:
     ci_low: float | None = None
     ci_high: float | None = None
     higher_is_better: bool = True
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the metric using JSON-compatible primitive values."""
-        return {
-            "value": self.value,
-            "count": self.count,
-            "stderr": self.stderr,
-            "ci_low": self.ci_low,
-            "ci_high": self.ci_high,
-            "higher_is_better": self.higher_is_better,
-        }
 
 
 @dataclass
@@ -94,7 +82,15 @@ class EvaluationResult:
             "task_name": self.task_name,
             "task_version": self.task_version,
             "metrics": {
-                name: metric.to_dict() for name, metric in self.metrics.items()
+                name: {
+                    "value": metric.value,
+                    "count": metric.count,
+                    "stderr": metric.stderr,
+                    "ci_low": metric.ci_low,
+                    "ci_high": metric.ci_high,
+                    "higher_is_better": metric.higher_is_better,
+                }
+                for name, metric in self.metrics.items()
             },
             "sample_count": self.sample_count,
             "effective_sample_count": self.effective_sample_count,
@@ -165,47 +161,6 @@ class ScorerResult:
                 raise ValueError(f"observations for metric {name!r} must be finite")
 
 
-def bootstrap_metric(
-    samples: Iterable[float],
-    seed: int,
-    n_resamples: int = 1000,
-    confidence_level: float = 0.95,
-) -> tuple[float, float | None, float | None, float | None]:
-    """Calculate mean, bootstrap stderr, and percentile confidence bounds.
-
-    The sampler uses a local ``random.Random`` instance, so evaluating one task
-    cannot perturb another task's random stream. Empty samples return a zero
-    value with no uncertainty; one sample returns a degenerate interval.
-    """
-    values = [float(value) for value in samples if math.isfinite(float(value))]
-    if not values:
-        return 0.0, None, None, None
-    mean_value = fmean(values)
-    if len(values) == 1 or n_resamples <= 1:
-        return mean_value, 0.0, mean_value, mean_value
-    if not 0.0 < confidence_level < 1.0:
-        raise ValueError("confidence_level must be between 0 and 1")
-
-    rng = random.Random(seed)
-    bootstrap_means = [
-        fmean(rng.choice(values) for _ in values) for _ in range(n_resamples)
-    ]
-    stderr = pstdev(bootstrap_means)
-    sorted_means = sorted(bootstrap_means)
-    alpha = (1.0 - confidence_level) / 2.0
-
-    def percentile(fraction: float) -> float:
-        position = fraction * (len(sorted_means) - 1)
-        lower = math.floor(position)
-        upper = math.ceil(position)
-        if lower == upper:
-            return sorted_means[lower]
-        weight = position - lower
-        return sorted_means[lower] * (1.0 - weight) + sorted_means[upper] * weight
-
-    return mean_value, stderr, percentile(alpha), percentile(1.0 - alpha)
-
-
 def metric_from_samples(
     samples: Iterable[float],
     seed: int,
@@ -214,14 +169,39 @@ def metric_from_samples(
     confidence_level: float = 0.95,
     higher_is_better: bool = True,
 ) -> MetricValue:
-    """Build a :class:`MetricValue` from per-sample observations."""
+    """Build a metric with deterministic bootstrap uncertainty."""
     values = [float(value) for value in samples]
-    value, stderr, ci_low, ci_high = bootstrap_metric(
-        values,
-        seed,
-        n_resamples=n_resamples,
-        confidence_level=confidence_level,
-    )
+    finite_values = [value for value in values if math.isfinite(value)]
+    if not finite_values:
+        return MetricValue(0.0, len(values), higher_is_better=higher_is_better)
+
+    value = fmean(finite_values)
+    if len(finite_values) == 1 or n_resamples <= 1:
+        stderr, ci_low, ci_high = 0.0, value, value
+    else:
+        if not 0.0 < confidence_level < 1.0:
+            raise ValueError("confidence_level must be between 0 and 1")
+        rng = random.Random(seed)
+        bootstrap_means = sorted(
+            fmean(rng.choice(finite_values) for _ in finite_values)
+            for _ in range(n_resamples)
+        )
+        stderr = pstdev(bootstrap_means)
+
+        def percentile(fraction: float) -> float:
+            position = fraction * (len(bootstrap_means) - 1)
+            lower = math.floor(position)
+            upper = math.ceil(position)
+            if lower == upper:
+                return bootstrap_means[lower]
+            weight = position - lower
+            return (
+                bootstrap_means[lower] * (1.0 - weight)
+                + bootstrap_means[upper] * weight
+            )
+
+        alpha = (1.0 - confidence_level) / 2.0
+        ci_low, ci_high = percentile(alpha), percentile(1.0 - alpha)
     return MetricValue(
         value=value,
         count=len(values),
@@ -274,7 +254,6 @@ class EvaluationTask(Protocol):
 
     family: str
     version: str
-    pipeline_version: str
     metric_specs: tuple[MetricSpec, ...]
 
     def prepare_dataset(
@@ -340,25 +319,33 @@ def persist_evaluation_result(result: EvaluationResult, cache_path: Path) -> Non
     persist_results(cache_path, summary)
 
 
+class GeneratedTask:
+    """Shared validation for task families that score generated responses."""
+
+    def prepare_dataset(
+        self, data: list[dict[str, Any]], context: PreparationContext
+    ) -> list[dict[str, Any]]:
+        required = (context.label_key, context.response_key)
+        prepared: list[dict[str, Any]] = []
+        for item in data:
+            missing = [key for key in required if key not in item]
+            if missing:
+                raise ValueError(
+                    f"Missing required evaluation key(s) {missing!r}; "
+                    f"available keys: {list(item)}"
+                )
+            prepared.append({**item, "task": context.task_name})
+        return prepared
+
+
 @dataclass
-class MathTask:
+class MathTask(GeneratedTask):
     """Adapter for math-verify scoring."""
 
     scorer: StructuredScorer
     family: str = "math_opensource"
     version: str = "math_v1"
-    pipeline_version: str = "math_response_v1"
     metric_specs: tuple[MetricSpec, ...] = (MetricSpec("accuracy"),)
-
-    def prepare_dataset(
-        self, data: list[dict[str, Any]], context: PreparationContext
-    ) -> list[dict[str, Any]]:
-        return [
-            _annotate_item(
-                item, context.task_name, context.label_key, context.response_key
-            )
-            for item in data
-        ]
 
     def score(self, context: EvaluationContext) -> EvaluationResult:
         scored = self.scorer(
@@ -374,14 +361,13 @@ class MathTask:
 
 
 @dataclass
-class MCTask:
+class MCTask(GeneratedTask):
     """Adapter for generation and loglikelihood MC scoring."""
 
     generate_scorer: StructuredScorer
     loglikelihood_scorer: StructuredScorer
     family: str = "mc_opensource"
     version: str = "mc_v1"
-    pipeline_version: str = "mc_generation_v1"
     metric_specs: tuple[MetricSpec, ...] = (
         MetricSpec("acc"),
         MetricSpec("acc_norm"),
@@ -408,12 +394,7 @@ class MCTask:
     ) -> list[dict[str, Any]]:
         if self._mc_schema(data):
             return [{**item, "task": context.task_name} for item in data]
-        return [
-            _annotate_item(
-                item, context.task_name, context.label_key, context.response_key
-            )
-            for item in data
-        ]
+        return super().prepare_dataset(data, context)
 
     def score(self, context: EvaluationContext) -> EvaluationResult:
         is_loglikelihood = self._mc_schema(context.eval_dataset)
@@ -436,24 +417,13 @@ class MCTask:
 
 
 @dataclass
-class CodeTask:
+class CodeTask(GeneratedTask):
     """Adapter for sandboxed code scoring."""
 
     scorer: StructuredScorer
     family: str = "code_opensource"
     version: str = "code_v1"
-    pipeline_version: str = "code_generation_v1"
     metric_specs: tuple[MetricSpec, ...] = (MetricSpec("pass@1"),)
-
-    def prepare_dataset(
-        self, data: list[dict[str, Any]], context: PreparationContext
-    ) -> list[dict[str, Any]]:
-        return [
-            _annotate_item(
-                item, context.task_name, context.label_key, context.response_key
-            )
-            for item in data
-        ]
 
     def score(self, context: EvaluationContext) -> EvaluationResult:
         scored = self.scorer(
@@ -469,19 +439,6 @@ class CodeTask:
             persist_legacy=False,
         )
         return _build_evaluation_result(scored, context, self)
-
-
-def _annotate_item(
-    item: dict[str, Any], task_name: str, label_key: str, response_key: str
-) -> dict[str, Any]:
-    """Validate common generated-output fields and attach the task name."""
-    missing = [key for key in (label_key, response_key) if key not in item]
-    if missing:
-        raise ValueError(
-            f"Missing required evaluation key(s) {missing!r}; "
-            f"available keys: {list(item)}"
-        )
-    return {**item, "task": task_name}
 
 
 class TaskRegistry:
@@ -511,6 +468,12 @@ class TaskRegistry:
                 f"Unsupported task family {family!r}; registered tasks: {available}"
             ) from exc
 
+    def evaluate(self, context: EvaluationContext) -> EvaluationResult:
+        """Resolve, score, and persist one evaluation invocation."""
+        result = self.resolve(context.task_name).score(context)
+        persist_evaluation_result(result, context.cache_path)
+        return result
+
     @property
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._tasks))
@@ -530,13 +493,3 @@ def build_default_registry(
             "code_opensource": CodeTask(code_scorer),
         }
     )
-
-
-def evaluate_registered_task(
-    context: EvaluationContext, registry: TaskRegistry
-) -> EvaluationResult:
-    """Evaluate through a registry and persist structured result files."""
-    task = registry.resolve(context.task_name)
-    result = task.score(context)
-    persist_evaluation_result(result, context.cache_path)
-    return result

@@ -26,6 +26,7 @@ from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
     CONTEXT_LENGTH_ERROR,
+    EMPTY_RESPONSE_ERROR,
     append_jsonl,
     build_chat_messages,
     ensure_raw_prompt,
@@ -95,14 +96,6 @@ class InferenceClient:
         self.extra_body = dict(extra_body or {})
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
-        # Token usage counters, accumulated under _usage_lock in
-        # _request_with_retry and reported by the runner's final summary.
-        self._usage_lock: threading.Lock = threading.Lock()
-        self.usage_stats: dict[str, int] = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-        }
-
         if self.api_key == "EMPTY":
             log = logger.debug if is_local_endpoint(base_url) else logger.warning
             log("Using default 'EMPTY' API key.")
@@ -141,9 +134,9 @@ class InferenceClient:
     ) -> str | None:
         """Generate one response.
 
-        Returns the response text (null content is normalized to ""), or
-        None for a context-length rejection — a deterministic failure the
-        caller persists as a permanent-failure row so resume skips it.
+        Empty content is retried while retry budget remains, then normalized
+        to "" so the caller can persist a permanent failure row. ``None`` is
+        reserved for context-length rejection.
         """
         call_args = self._build_call_args(
             query,
@@ -229,37 +222,26 @@ class InferenceClient:
             ClientError: For non-retryable API issues or exhausted retries
         """
 
+        attempt = 0
+
         def do_request() -> Any:
+            nonlocal attempt
+            attempt += 1
             completion = self.client.chat.completions.create(**call_args)
             # Probe the structure so malformed responses are retried too
             try:
-                _ = completion.choices[0].message
+                content = completion.choices[0].message.content
             except (AttributeError, IndexError, TypeError) as exc:
                 raise MalformedResponseError(
                     f"Malformed response structure: {exc}"
                 ) from exc
-            self._record_usage(completion)
+            if content is not None and not isinstance(content, str):
+                raise MalformedResponseError("response content is not a string")
+            if (content is None or not content.strip()) and attempt <= self.max_retries:
+                raise MalformedResponseError("response content is empty")
             return completion
 
         return call_with_retry(do_request, self.max_retries)
-
-    def _record_usage(self, completion: Any) -> None:
-        """Accumulate token usage from a successful chat completion.
-
-        Best-effort: missing or malformed usage fields are ignored so usage
-        accounting can never break inference.
-        """
-        usage = getattr(completion, "usage", None)
-        if usage is None:
-            return
-        try:
-            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        except (TypeError, ValueError):
-            return
-        with self._usage_lock:
-            self.usage_stats["prompt_tokens"] += prompt_tokens
-            self.usage_stats["completion_tokens"] += completion_tokens
 
 
 class InferenceRunner:
@@ -351,19 +333,16 @@ class InferenceRunner:
             return None
         return query
 
-    def _build_result(
-        self, item: dict[str, Any], response: str
-    ) -> dict[str, Any] | None:
-        """Build an output row or record an empty-response failure."""
-        if not response.strip():
-            logger.warning("Empty response received")
-            with self._stats_lock:
-                self._stats["failed"] += 1
-            return None
-
+    def _build_result(self, item: dict[str, Any], response: str) -> dict[str, Any]:
+        """Build a successful row or a resumable empty-response failure."""
         result = item.copy()
         result.pop("_request_seed", None)
-        result[self.args.response_key] = response
+        if not response.strip():
+            logger.warning("Empty response received")
+            result[self.args.response_key] = ""
+            result["error"] = EMPTY_RESPONSE_ERROR
+        else:
+            result[self.args.response_key] = response
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
@@ -395,12 +374,10 @@ class InferenceRunner:
             return result
 
         result = self._build_result(item, response)
-        if not result:
-            return None
-
         self._write_result(result)
         with self._stats_lock:
-            self._stats["processed"] += 1
+            status = "failed" if "error" in result else "processed"
+            self._stats[status] += 1
 
         return result
 
@@ -487,9 +464,6 @@ class InferenceRunner:
         logger.info(f"Successfully processed: {self._stats['processed']}")
         logger.info(f"Failed: {self._stats['failed']}")
         logger.info(f"Skipped: {self._stats['skipped']}")
-        logger.info(f"Prompt tokens: {usage['prompt_tokens']}")
-        logger.info(f"Completion tokens: {usage['completion_tokens']}")
-        logger.info(f"Total tokens: {usage['total_tokens']}")
         logger.info(f"Success rate: {success_rate:.2f}%")
         logger.info(f"Total duration: {duration:.2f} seconds")
         logger.info(f"Output file: {self.args.output_file}")

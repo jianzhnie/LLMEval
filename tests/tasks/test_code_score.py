@@ -191,7 +191,7 @@ class TestScoreCode:
         )
 
         assert result.failed_count == 1
-        assert result.per_item[0]["evaluation_status"] == "failed"
+        assert result.records[0]["evaluation_status"] == "failed"
 
     def test_incorrect_program_is_not_infrastructure_failure(
         self, tmp_path: Path
@@ -236,7 +236,7 @@ class TestScoreCode:
             allow_unsafe_code=True,
         )
 
-        record = result.per_item[0]
+        record = result.records[0]
         assert record["passed"] is False
         assert record["evaluation_status"] == "completed"
         assert result.failed_count == 0
@@ -290,7 +290,7 @@ class TestScoreCode:
         assert result.failed_count == 0
         assert result.effective_sample_count == 0
         assert result.failure_counts == {"timeout": 2}
-        assert all(r["evaluation_status"] == "timeout" for r in result.per_item)
+        assert all(r["evaluation_status"] == "timeout" for r in result.records)
 
     def test_execution_requires_explicit_opt_in(self, tmp_path: Path) -> None:
         with pytest.raises(PermissionError, match="executes generated code"):
@@ -559,7 +559,7 @@ class TestScoreCode:
             allow_unsafe_code=True,
         )
 
-        record = result.per_item[0]
+        record = result.records[0]
         assert record["passed"] is False
         assert record["result"].startswith("failed: killed by signal")
         assert record["evaluation_status"] == "completed"
@@ -596,10 +596,10 @@ class TestCodeScoreResult:
         assert csr.pass_at_1 == 0.0
         assert csr.total == 0
         assert csr.correct == 0
-        assert csr.per_item == []
+        assert csr.records == []
 
     def test_populated(self) -> None:
-        csr = CodeScoreResult(pass_at_1=0.5, total=4, correct=2, per_item=[])
+        csr = CodeScoreResult(pass_at_1=0.5, total=4, correct=2, records=[])
         assert csr.pass_at_1 == 0.5
 
 
@@ -725,30 +725,20 @@ class TestScoreCodePromptModes:
 
 
 class TestWriteCache:
-    def test_writes_both_files(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
-            cache_path = Path(tf.name)
-        try:
-            records = [
-                {"task_id": "t1", "passed": True, "result": "passed"},
-                {"task_id": "t2", "passed": False, "result": "failed: AssertionError"},
-            ]
-            csr = CodeScoreResult(pass_at_1=0.5, total=2, correct=1, per_item=records)
-            write_cache(csr, cache_path)
+    def test_writes_summary_only(self, tmp_path: Path) -> None:
+        cache_path = tmp_path / "code.jsonl"
+        records = [
+            {"task_id": "t1", "passed": True, "result": "passed"},
+            {"task_id": "t2", "passed": False, "result": "failed: AssertionError"},
+        ]
+        csr = CodeScoreResult(pass_at_1=0.5, total=2, correct=1, records=records)
 
-            # JSONL
-            lines = cache_path.read_text().strip().split("\n")
-            assert len(lines) == 2
-            assert json.loads(lines[0])["task_id"] == "t1"
+        write_cache(csr, cache_path)
 
-            # Summary
-            summary_path = cache_path.with_suffix(".summary.json")
-            summary = json.loads(summary_path.read_text())
-            assert summary["pass_at_1"] == 0.5
-            assert summary["total"] == 2
-        finally:
-            cache_path.unlink(missing_ok=True)
-            cache_path.with_suffix(".summary.json").unlink(missing_ok=True)
+        assert not cache_path.exists()
+        summary = json.loads(cache_path.with_suffix(".summary.json").read_text())
+        assert summary["pass_at_1"] == 0.5
+        assert summary["total"] == 2
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -775,7 +765,7 @@ class TestCodeRepeatedRows:
 
     def _score(self, items: list[dict], tmp_path: Path):
         cache_path = tmp_path / "code.jsonl"
-        acc = score_code(
+        result = score_code_result(
             items,
             "answer",
             "gen",
@@ -785,8 +775,7 @@ class TestCodeRepeatedRows:
             k_values=(1, 2),
             allow_unsafe_code=True,
         )
-        records = [json.loads(line) for line in cache_path.read_text().splitlines()]
-        return acc, records
+        return result.metrics["pass@1"], result.records
 
     def test_repeated_rows_are_scored_independently(self, tmp_path: Path) -> None:
         items = [
@@ -879,7 +868,7 @@ class TestTimeoutClassification:
             exec_timeout=1.0,
             allow_unsafe_code=True,
         )
-        record = result.per_item[0]
+        record = result.records[0]
         assert record["result"] == "timed out"
         assert record["evaluation_status"] == "completed"
         assert result.metrics["pass@1"] == 0.0
@@ -928,7 +917,7 @@ class TestDefaultScoringPath:
             exec_timeout=5.0,
             allow_unsafe_code=True,
         )
-        statuses = {r["task_id"]: r["evaluation_status"] for r in result.per_item}
+        statuses = {r["task_id"]: r["evaluation_status"] for r in result.records}
         assert all(status == "completed" for status in statuses.values())
         assert result.metrics["pass@1"] == pytest.approx(2 / 3)
         assert result.failed_count == 0

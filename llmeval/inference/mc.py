@@ -1059,7 +1059,9 @@ def main() -> None:
         (config,) = parser.parse_args_into_dataclasses()
 
         # Log initialization with formatted argument display
-        logger.info("Initializing MCInferArguments with parsed command line arguments...")
+        logger.info(
+            "Initializing MCInferArguments with parsed command line arguments..."
+        )
         logger.info("\n--- Parsed Arguments ---")
         logger.info(
             json.dumps(redact_config_for_logging(dataclasses.asdict(config)), indent=2)

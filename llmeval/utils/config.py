@@ -52,7 +52,7 @@ class DataArguments:
     """Input, output, and resume paths shared by inference backends."""
 
     input_file: str = field(
-        default="input.jsonl", metadata={"help": "Input JSONL file containing prompts."}
+        default="", metadata={"help": "Input JSONL file containing prompts."}
     )
     output_file: str = field(
         default="output.jsonl", metadata={"help": "Output JSONL file to save results."}
@@ -68,7 +68,9 @@ class DataArguments:
     )
 
     def __post_init__(self) -> None:
-        """Validate the input path without creating output-side directories."""
+        """Validate an explicitly configured input path."""
+        if not self.input_file:
+            return
         if not Path(self.input_file).exists():
             raise ValueError(
                 f"Input file '{self.input_file}' does not exist. "
@@ -616,8 +618,6 @@ class MCInferArguments(
 
     def __post_init__(self) -> None:
         """Validate shared fields and MC-specific options."""
-        # Keep default construction available for CLI introspection. Once a path
-        # is supplied, apply the same existence check as other inference modes.
         DataArguments.__post_init__(self)
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)

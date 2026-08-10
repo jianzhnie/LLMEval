@@ -10,12 +10,12 @@ import pytest
 from llmeval.tasks.postprocess import atomic_write_jsonl, persist_results
 
 
-def test_persist_results_writes_jsonl_and_adjacent_summary(tmp_path: Path) -> None:
+def test_persist_results_writes_adjacent_summary_only(tmp_path: Path) -> None:
     output = tmp_path / "result.jsonl"
 
-    summary_path = persist_results(output, [{"index": 0}], {"accuracy": 1.0})
+    summary_path = persist_results(output, {"accuracy": 1.0})
 
-    assert json.loads(output.read_text()) == {"index": 0}
+    assert not output.exists()
     assert summary_path == tmp_path / "result.summary.json"
     assert json.loads(summary_path.read_text()) == {"accuracy": 1.0}
 

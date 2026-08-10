@@ -6,7 +6,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Callable, Generator, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from io import TextIOBase
@@ -28,6 +28,11 @@ __all__ = [
 ]
 
 TextFilter = Callable[[str], str]
+
+_ANSWER_TAG_RE: re.Pattern[str] = re.compile(
+    r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE
+)
+_THINK_END_RE: re.Pattern[str] = re.compile(r"</think\s*>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -107,12 +112,6 @@ class TextFilterPipeline:
             "raw": raw_text,
             "output": text,
         }
-
-
-_ANSWER_TAG_RE: re.Pattern[str] = re.compile(
-    r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE
-)
-_THINK_END_RE: re.Pattern[str] = re.compile(r"</think\s*>", re.IGNORECASE)
 
 
 def _coerce_text(value: Any) -> str:

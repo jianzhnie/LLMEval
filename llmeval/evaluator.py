@@ -48,7 +48,6 @@ from llmeval.tasks.registry import (
     PreparationContext,
     TaskRegistry,
     build_default_registry,
-    evaluate_registered_task,
     persist_evaluation_result,
 )
 from llmeval.utils.config import (
@@ -207,7 +206,7 @@ def evaluate_task_result(
         )
         persist_evaluation_result(result, context.cache_path)
     else:
-        result = evaluate_registered_task(context, registry)
+        result = registry.evaluate(context)
     for name, metric in result.metrics.items():
         logger.info(
             "Task %s metric %s=%.4f (n=%d, stderr=%s)",
@@ -251,6 +250,7 @@ def select_eval_arguments(task_name: str) -> type[Any]:
 def _parse_eval_arguments(argv: list[str] | None = None) -> Any:
     """Parse CLI arguments with only the selected task's options exposed."""
     selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    selector.add_argument("--task_name", default="math_opensource/aime24")
     selected = selector.parse_known_args(argv)[0]
     argument_type = select_eval_arguments(selected.task_name)
     parser = HfArgumentParser(argument_type)  # type: ignore[arg-type]

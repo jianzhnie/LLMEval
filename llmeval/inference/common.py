@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from llmeval.utils.prompts import is_chat_template_applied
 
 __all__ = [
     "CONTEXT_LENGTH_ERROR",
+    "EMPTY_RESPONSE_ERROR",
     "ResumeState",
     "append_jsonl",
     "build_chat_messages",
@@ -39,6 +41,7 @@ logger = init_logger("inference_common")
 # can never fit the model context, so the row is written once (empty
 # response) and resume treats it as completed instead of rerunning it.
 CONTEXT_LENGTH_ERROR = "context_length_exceeded"
+EMPTY_RESPONSE_ERROR = "empty_response"
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +260,7 @@ def _is_completed_record(
     # Permanent-failure rows (e.g. context-length rejections) are written
     # once with an empty response; they count as completed so resume skips
     # them instead of rerunning a request that can never succeed.
-    if item.get("error") == CONTEXT_LENGTH_ERROR:
+    if item.get("error") in {CONTEXT_LENGTH_ERROR, EMPTY_RESPONSE_ERROR}:
         return True
 
     # Only a non-empty list of per-choice numeric scores marks completion;
@@ -267,7 +270,15 @@ def _is_completed_record(
     if (
         isinstance(logprobs, list)
         and logprobs
-        and all(isinstance(value, int | float) for value in logprobs)
+        and any(
+            isinstance(value, int | float) and math.isfinite(float(value))
+            for value in logprobs
+        )
+        and all(
+            value is None
+            or (isinstance(value, int | float) and math.isfinite(float(value)))
+            for value in logprobs
+        )
     ):
         return True
 

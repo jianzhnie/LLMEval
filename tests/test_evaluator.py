@@ -52,8 +52,8 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
 
 from llmeval.evaluator import (
     _resolve_cache_path,
-    _select_eval_arguments,
     evaluate_task,
+    select_eval_arguments,
 )
 from llmeval.tasks.registry import ScorerResult
 from llmeval.utils.config import CodeEvalArguments, MathEvalArguments, MCEvalArguments
@@ -80,7 +80,7 @@ class TestEvaluateTask:
     def test_selects_task_specific_arguments(
         self, task_name: str, argument_type: type[object]
     ) -> None:
-        assert _select_eval_arguments(task_name) is argument_type
+        assert select_eval_arguments(task_name) is argument_type
 
     def test_cache_directory_path_resolves_to_task_jsonl(self, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"

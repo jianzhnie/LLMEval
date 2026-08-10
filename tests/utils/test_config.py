@@ -246,7 +246,7 @@ class TestMCInferArguments:
         assert args.mode == "loglikelihood"
         assert args.max_workers > 0
         assert args.n_shot == 0
-        assert args.max_completion_tokens == 2048
+        assert args.max_completion_tokens == 32768
         assert args.top_p == 0.95
         assert args.extra_body_dict == {}
         assert not hasattr(args, "max_tokens")
@@ -261,7 +261,7 @@ class TestMCInferArguments:
 
     def test_api_key_default_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        assert MCInferArguments().api_key == "EMPTY"
+        assert MCInferArguments().api_key is None
 
     def test_invalid_mode_raises(self) -> None:
         with pytest.raises(ValueError, match="mode"):

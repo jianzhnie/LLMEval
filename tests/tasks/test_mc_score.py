@@ -415,7 +415,7 @@ class TestMCScoreEdgeCases:
         # The generation count is backfilled so per_sample weighting keeps the
         # item visible instead of evaporating from every count.
         assert timeout_record["sample_total"] == 2
-        result = _to_scorer_result(MCScoreResult(per_item=[timeout_record]))
+        result = _to_scorer_result(MCScoreResult(records=[timeout_record]))
 
         assert result.sample_count == 2
         assert result.effective_sample_count == 0
@@ -439,7 +439,7 @@ class TestMCScoreEdgeCases:
         )
 
         assert timeout_record["sample_total"] == 1
-        result = _to_scorer_result(MCScoreResult(per_item=[timeout_record]))
+        result = _to_scorer_result(MCScoreResult(records=[timeout_record]))
         assert result.sample_count == 1
         assert result.timeout_count == 1
 
@@ -484,7 +484,7 @@ class TestMCScoreEdgeCases:
         assert result.failed_count == 0
         assert result.effective_sample_count == 0
         assert result.failure_counts == {"timeout": 2}
-        assert all(r["evaluation_status"] == "timeout" for r in result.per_item)
+        assert all(r["evaluation_status"] == "timeout" for r in result.records)
 
     def test_loglikelihood_all_neg_inf_counted_wrong(self, tmp_path: Path) -> None:
         """All -inf logprobs (failed inference) must not be argmax-scored."""
@@ -554,10 +554,10 @@ class TestMCScoreEdgeCases:
 
 
 def test_generate_filter_trace_preserves_raw_response(tmp_path: Path) -> None:
-    from llmeval.tasks.mc_eval.mc_score import score_generate
+    from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
     cache = tmp_path / "mc.jsonl"
-    score_generate(
+    result = score_generate_result(
         [
             {
                 "answer": "B",
@@ -569,7 +569,7 @@ def test_generate_filter_trace_preserves_raw_response(tmp_path: Path) -> None:
         cache,
     )
 
-    record = json.loads(cache.read_text(encoding="utf-8"))
+    record = result.records[0]
     assert record["raw_gen"] == ["<think>x</think><answer>B</answer>"]
     assert record["filtered_gen"] == ["B"]
     assert record["filter_trace"][0]["pipeline"] == "mc_generation"
@@ -580,7 +580,7 @@ def test_generate_filter_trace_preserves_raw_response(tmp_path: Path) -> None:
 
 
 def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None:
-    from llmeval.tasks.mc_eval.mc_score import score_generate
+    from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
     items = [
         {
@@ -604,13 +604,16 @@ def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None
     ]
     cache = tmp_path / "resumed.jsonl"
 
-    assert (
-        score_generate(items, "answer", "gen", cache, aggregation="majority_vote")
-        == 1.0
+    result = score_generate_result(
+        items,
+        "answer",
+        "gen",
+        cache,
+        aggregation="majority_vote",
     )
-    records = cache.read_text(encoding="utf-8").strip().splitlines()
-    assert len(records) == 1
-    assert json.loads(records[0])["predictions"] == ["A", "B", "B"]
+    assert result.metrics["acc"] == 1.0
+    assert len(result.records) == 1
+    assert result.records[0]["predictions"] == ["A", "B", "B"]
     summary = json.loads(cache.with_suffix(".summary.json").read_text())
     assert summary["question_total"] == 1
     assert summary["sample_total"] == 3

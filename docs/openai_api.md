@@ -74,7 +74,7 @@ curl https://api.openai.com/v1/chat/completions \
 `temperature=0`；需要多样性时可使用 `temperature=0.6` 至 `1.0`。
 
 OpenAI API 没有为所有模型承诺统一的 `max_completion_tokens` 默认值。LLMEval 的
-online/offline 默认值为 `32768`，MC generate 默认值为 `2048`；调用时都会显式发送。
+online、offline 和 MC generate 共用 `32768` 默认值；调用时都会显式发送。
 
 ```python
 completion = client.chat.completions.create(

@@ -803,14 +803,14 @@ class TestMCInferArguments:
     def test_defaults(self) -> None:
         c = MCInferArguments()
         assert c.mode == "loglikelihood"
-        assert c.max_workers == 32
-        assert c.temperature == 0.0
+        assert c.max_workers == 128
+        assert c.temperature == 0.6
         assert c.n_shot == 0
 
     def test_api_key_default(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             c = MCInferArguments()
-            assert c.api_key == "EMPTY"
+            assert c.api_key is None
 
     def test_api_key_from_env(self) -> None:
         with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
@@ -989,8 +989,9 @@ def _mc_client_complete_continuation_uses_choice_offsets(self) -> None:
     client = _make_ll_client()
     response = MagicMock()
     response.choices = []
-    for text, values in (("AB", [-1.0, -2.0]), ("C", [-0.5])):
+    for index, (text, values) in enumerate((("AB", [-1.0, -2.0]), ("C", [-0.5]))):
         choice = MagicMock()
+        choice.index = index
         choice.logprobs.text_offset = [0, *range(2, 2 + len(text))]
         choice.logprobs.token_logprobs = [None, *values]
         choice.logprobs.tokens = ["Q:", *text]
