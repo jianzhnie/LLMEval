@@ -28,7 +28,7 @@ dependencies = [
     "datasets",
     "math-verify",
     "numpy",
-    "openai",
+    "openai>=2.0.0",
     "Pebble",
     "tokenizers",
     "torch",

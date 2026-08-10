@@ -47,8 +47,9 @@ class TestIsChatTemplateApplied:
         query = "In this passage, the label Human: appears as ordinary text."
         assert is_chat_template_applied(query) is False
 
-    def test_single_human_role_line_is_raw_dialogue(self) -> None:
-        assert is_chat_template_applied("Human: hi") is False
+    @pytest.mark.parametrize("role", ["Human", "Assistant"])
+    def test_single_plain_role_line_is_raw_dialogue(self, role: str) -> None:
+        assert is_chat_template_applied(f"{role}: hi") is False
 
     def test_empty_string_returns_false(self) -> None:
         assert is_chat_template_applied("") is False
@@ -76,3 +77,7 @@ class TestIsChatTemplateApplied:
     )
     def test_complete_s_tags_return_true(self, query: str) -> None:
         assert is_chat_template_applied(query) is True
+
+    @pytest.mark.parametrize("query", ["x[INST]y", "prefix<s>suffix"])
+    def test_embedded_llama_tokens_return_false(self, query: str) -> None:
+        assert is_chat_template_applied(query) is False

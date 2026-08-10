@@ -38,52 +38,36 @@ SYSTEM_PROMPT_FACTORY: dict[str, str | None] = {
     "empty": None,
 }
 
-_HASHED_CHAT_ROLE_LINE_RE: re.Pattern[str] = re.compile(
-    r"(?m)^\s*###\s*(?:Human|Assistant)\s*:",
-)
-_HUMAN_ROLE_LINE_RE: re.Pattern[str] = re.compile(r"(?m)^\s*Human\s*:")
-_ASSISTANT_ROLE_LINE_RE: re.Pattern[str] = re.compile(r"(?m)^\s*Assistant\s*:")
-
-# Unambiguous special tokens — plain substring matching is safe for these.
 _SPECIAL_TOKEN_MARKERS = (
     "<|im_start|>",
-    "<|im_end|>",  # ChatML format
+    "<|im_end|>",
     "<|user|>",
-    "<|assistant|>",  # Other formats
+    "<|assistant|>",
 )
 
-# Llama-style control tokens need context to avoid false positives: bare
-# <s>/</s> collide with HTML tags (<sub>, <sup>, <span>, <strong>, ...) and
-# [INST] can appear glued to ordinary text, so <s>/</s> must be a complete
-# tag sitting at the start of the string or right after whitespace/a line
-# start, followed by whitespace or the end of the string, and [INST] must
-# not touch word characters.
-_S_TAG_RE: re.Pattern[str] = re.compile(r"(?m)(?:^|(?<=\s))</?s>(?=\s|$)")
-_INST_TAG_RE: re.Pattern[str] = re.compile(r"(?<!\w)\[/?INST\](?!\w)")
+# Token boundaries keep HTML tags and ordinary text such as ``x[INST]y``
+# from being mistaken for Llama control tokens.
+_LLAMA_CONTROL_TOKEN_RE = re.compile(
+    r"(?m)(?:^|(?<=\s))</?s>(?=\s|$)|(?<!\w)\[/?INST\](?!\w)"
+)
+_CHAT_ROLE_LINE_RE = re.compile(r"(?m)^\s*(?:(###)\s*)?(Human|Assistant)\s*:")
 
 
 def is_chat_template_applied(query: str) -> bool:
-    """Check if the query has already been processed with a chat template.
-
-    Args:
-        query: The input query string
-
-    Returns:
-        True if chat template appears to be applied, False otherwise
-    """
+    """Return whether ``query`` contains a serialized chat template."""
     if not query:
         return False
 
     if any(marker in query for marker in _SPECIAL_TOKEN_MARKERS):
         return True
 
-    if _S_TAG_RE.search(query) or _INST_TAG_RE.search(query):
+    if _LLAMA_CONTROL_TOKEN_RE.search(query):
         return True
 
-    # A single plain Human:/Assistant: line is common in dialogue benchmarks.
-    # Hashed role markers are template-specific; plain markers require both
-    # sides of a serialized conversation before rejecting the prompt.
-    return bool(
-        _HASHED_CHAT_ROLE_LINE_RE.search(query)
-        or (_HUMAN_ROLE_LINE_RE.search(query) and _ASSISTANT_ROLE_LINE_RE.search(query))
-    )
+    plain_roles: set[str] = set()
+    for hashed, role in _CHAT_ROLE_LINE_RE.findall(query):
+        if hashed:
+            return True
+        plain_roles.add(role)
+
+    return plain_roles == {"Human", "Assistant"}

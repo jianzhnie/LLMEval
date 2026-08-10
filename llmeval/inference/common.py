@@ -483,6 +483,11 @@ def redact_config_for_logging(
     def redact(value: Any, key: str | None = None) -> Any:
         if key and any(fragment in key.lower() for fragment in sensitive_fragments):
             return replacement
+        if key == "extra_body" and isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return replacement
         if isinstance(value, dict):
             return {str(name): redact(item, str(name)) for name, item in value.items()}
         if isinstance(value, list):

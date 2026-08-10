@@ -29,7 +29,7 @@ LOGLIKELIHOOD_MODE="${LOGLIKELIHOOD_MODE:-first_token}"
 MAX_WORKERS="${MAX_WORKERS:-64}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-600}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
-MAX_TOKENS="${MAX_TOKENS:-2048}"
+MAX_COMPLETION_TOKENS="${MAX_COMPLETION_TOKENS:-2048}"
 TEMPERATURE="${TEMPERATURE:-0.0}"
 SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-empty}"
 TOOL_CHOICE="${TOOL_CHOICE:-none}"
@@ -100,7 +100,7 @@ for task in $BENCHMARKS; do
                 --max_workers "$MAX_WORKERS" \
                 --request_timeout "$REQUEST_TIMEOUT" \
                 --max_retries "$MAX_RETRIES" \
-                --max_tokens "$MAX_TOKENS" \
+                --max_completion_tokens "$MAX_COMPLETION_TOKENS" \
                 --temperature "$TEMPERATURE" \
                 --system_prompt_type "$SYSTEM_PROMPT_TYPE" \
                 --tool_choice "$TOOL_CHOICE" \
@@ -119,7 +119,7 @@ for task in $BENCHMARKS; do
             --max_workers "$MAX_WORKERS" \
             --request_timeout "$REQUEST_TIMEOUT" \
             --max_retries "$MAX_RETRIES" \
-            --max_tokens "$MAX_TOKENS" \
+            --max_completion_tokens "$MAX_COMPLETION_TOKENS" \
             --temperature "$TEMPERATURE" \
             --system_prompt_type "$SYSTEM_PROMPT_TYPE" \
             --tool_choice "$TOOL_CHOICE" \

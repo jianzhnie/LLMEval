@@ -26,7 +26,7 @@ python ./llmeval/inference/online.py \
     --max_workers 128 \
     --temperature 0.6  \
     --top_p 0.95 \
-    --top_k 40
+    --extra_body '{"top_k": 40, "chat_template_kwargs": {"enable_thinking": false}}'
 
 # aime25 (repeated sample 64 times)
 python ./llmeval/inference/online.py \
@@ -40,6 +40,6 @@ python ./llmeval/inference/online.py \
     --max_workers 128 \
     --temperature 0.6  \
     --top_p 0.95 \
-    --top_k 40
+    --extra_body '{"top_k": 40, "chat_template_kwargs": {"enable_thinking": false}}'
 
 echo "🎉 All inference tasks completed successfully!"

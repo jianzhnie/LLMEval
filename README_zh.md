@@ -223,8 +223,8 @@ python ./llmeval/evaluator.py \
 | `--n_samples`   | 1       | 每道题采样次数              |
 | `--temperature` | 0.6     | 采样温度                   |
 | `--top_p`       | 0.95    | 核采样参数                  |
-| `--top_k`       | 40      | Top-k 采样参数             |
-| `--max_tokens`  | 32768   | 最大生成 token 数          |
+| `--max_completion_tokens` | 32768 | 最大生成 completion token 数 |
+| `--seed`        | 0       | 生成随机种子                |
 
 在线模式特有参数：
 
@@ -233,6 +233,10 @@ python ./llmeval/evaluator.py \
 | `--base_url`    | 必填     | API 服务器地址             |
 | `--model_name`  | 必填     | API 使用的模型名称          |
 | `--max_workers` | 128     | 并发请求线程数              |
+| `--extra_body`  | `{}`     | 服务商扩展请求字段的 JSON 对象 |
+
+参数含义及 Python、cURL、结构化输出、工具调用和流式输出示例，详见
+[OpenAI API 常用参数](docs/openai_api.md)。
 
 离线模式特有参数：
 
@@ -242,6 +246,10 @@ python ./llmeval/evaluator.py \
 | `--tensor_parallel_size` | 1      | 张量并行 GPU 数量           |
 | `--gpu_memory_utilization`| 0.9   | GPU 显存使用比例            |
 | `--batch_size`           | 128    | 推理批次大小                |
+| `--top_k`                | 40     | vLLM Top-k 采样参数         |
+| `--enable_thinking`      | false  | vLLM chat template 思考选项 |
+| `--skip_special_tokens`  | true   | 删除生成结果中的特殊 token  |
+| `--repetition_penalty`   | 1.0    | vLLM 重复惩罚               |
 
 ### 支持的评测任务
 

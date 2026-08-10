@@ -46,7 +46,6 @@ def _args(tmp_path: Path, **overrides: object) -> SimpleNamespace:
         "n_samples": 1,
         "batch_size": 2,
         "fail_fast": True,
-        "do_sample": True,
         "skip_special_tokens": True,
         "model_name_or_path": "test-model",
         "model_revision": "revision-1",
@@ -67,7 +66,7 @@ def _args(tmp_path: Path, **overrides: object) -> SimpleNamespace:
         "dtype": "float16",
         "device": "cuda",
         "quantization": "awq",
-        "max_tokens": 128,
+        "max_completion_tokens": 128,
         "temperature": 0.2,
         "top_p": 0.9,
         "top_k": 20,
@@ -105,7 +104,7 @@ class TestOfflineInferenceRunner:
         runner = _runner(
             tmp_path,
             n_samples=2,
-            do_sample=False,
+            temperature=0.0,
             skip_special_tokens=False,
         )
         items = [

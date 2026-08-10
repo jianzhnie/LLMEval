@@ -68,6 +68,7 @@ class InferenceClient:
         api_key: str | None = None,
         seed: int = 0,
         organization: str | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the inference client with API configuration.
 
@@ -80,14 +81,18 @@ class InferenceClient:
             base_url: Base URL for the OpenAI-compatible API endpoint
             timeout: Request timeout in seconds
             max_retries: Maximum number of retries for failed requests
-            tool_choice: Tool calling mode: 'none' (default, disables tools), 'auto', or tool name.
+            tool_choice: Tool calling mode: none, auto, or required.
             api_key: API key; falls back to the OPENAI_API_KEY env var and then EMPTY.
+            seed: Default request seed when no per-sample seed is provided.
+            organization: Optional OpenAI organization ID.
+            extra_body: Explicit non-standard fields for compatible providers.
         """
         self.base_url: str = base_url  # Store for potential reconnection
         self.timeout: int = timeout
         self.max_retries: int = max_retries
         self.tool_choice: str = tool_choice
         self.seed = seed
+        self.extra_body = dict(extra_body or {})
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
         # Token usage counters, accumulated under _usage_lock in
@@ -128,11 +133,9 @@ class InferenceClient:
         query: str,
         system_prompt: str | None,
         model_name: str,
-        max_tokens: int,
+        max_completion_tokens: int,
         temperature: float,
         top_p: float,
-        top_k: int,
-        enable_thinking: bool,
         *,
         seed: int | None = None,
     ) -> str | None:
@@ -146,18 +149,16 @@ class InferenceClient:
             query,
             system_prompt,
             model_name,
-            max_tokens,
+            max_completion_tokens,
             temperature,
             top_p,
-            top_k,
-            enable_thinking,
             seed=seed,
         )
         completion = self._request_with_retry(call_args)
         if completion is None:
             return None  # context length exceeded (logged in retry.should_retry)
         # Reasoning models may return content=None (thinking exhausted
-        # max_tokens); normalize to "" so callers can treat it uniformly
+        # max_completion_tokens); normalize to "" so callers can treat it uniformly
         return completion.choices[0].message.content or ""
 
     def _build_call_args(
@@ -165,11 +166,9 @@ class InferenceClient:
         query: str,
         system_prompt: str | None,
         model_name: str,
-        max_tokens: int,
+        max_completion_tokens: int,
         temperature: float,
         top_p: float,
-        top_k: int,
-        enable_thinking: bool,
         seed: int | None = None,
     ) -> dict[str, Any]:
         """Validate inputs and assemble chat.completions call arguments.
@@ -178,11 +177,9 @@ class InferenceClient:
             query: User's input query (must be non-empty)
             system_prompt: Optional system prompt
             model_name: Served model name (must be non-empty)
-            max_tokens: Maximum tokens to generate
+            max_completion_tokens: Maximum completion tokens to generate
             temperature: Sampling temperature
             top_p: Nucleus sampling threshold
-            top_k: Top-k sampling parameter (sent via extra_body)
-            enable_thinking: Whether to enable the "thinking" feature
 
         Returns:
             Keyword arguments dict for client.chat.completions.create.
@@ -199,16 +196,14 @@ class InferenceClient:
         call_args: dict[str, Any] = {
             "model": model_name,
             "messages": messages,
-            "max_tokens": max_tokens,
+            "max_completion_tokens": max_completion_tokens,
             "temperature": temperature,
             "top_p": top_p,
-            "extra_body": {
-                "top_k": top_k,
-                "chat_template_kwargs": {"enable_thinking": enable_thinking},
-            },
             "timeout": self.timeout,
             "seed": self.seed if seed is None else seed,
         }
+        if self.extra_body:
+            call_args["extra_body"] = dict(self.extra_body)
         # tool_choice: only send when explicitly configured (vLLM 0.23+ supports it)
         if is_explicit_tool_choice(self.tool_choice):
             call_args["tool_choice"] = self.tool_choice
@@ -295,6 +290,7 @@ class InferenceRunner:
                 api_key=args.api_key,
                 seed=args.seed,
                 organization=args.organization,
+                extra_body=args.extra_body_dict,
             )
         except (OSError, ValueError) as e:
             raise RuntimeError(f"Failed to initialize inference client: {e}") from e
@@ -391,11 +387,9 @@ class InferenceRunner:
             query=query,
             system_prompt=self.system_prompt,
             model_name=self.args.model_name,
-            max_tokens=self.args.max_tokens,
+            max_completion_tokens=self.args.max_completion_tokens,
             temperature=self.args.temperature,
             top_p=self.args.top_p,
-            top_k=self.args.top_k,
-            enable_thinking=self.args.enable_thinking,
             seed=get_request_seed(item),
         )
 

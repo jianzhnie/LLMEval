@@ -38,7 +38,8 @@ All CLI arguments use `HfArgumentParser` from `transformers` to parse into stron
 
 - `DataArguments` — input/output paths, task name, batch size
 - `PromptArguments` — input/label/response keys, system prompt selection from `SYSTEM_PROMPT_FACTORY`
-- `GenerationArguments` — temperature, top_p, top_k, n_samples, max_tokens
+- `GenerationArguments` — temperature, top_p, n_samples, max_completion_tokens, seed
+- `VLLMGenerationArguments` — top_k, thinking, special-token, and repetition controls
 - `VLLMEngineArguments` — model path, tensor parallelism, GPU memory, RoPE scaling
 - `ServerArguments` — base URL, model name, max_workers, retries/timeout
 

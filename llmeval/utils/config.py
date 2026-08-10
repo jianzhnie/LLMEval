@@ -39,6 +39,7 @@ __all__ = [
     "PromptArguments",
     "ServerArguments",
     "VLLMEngineArguments",
+    "VLLMGenerationArguments",
 ]
 
 logger = init_logger("eval_config")
@@ -78,6 +79,17 @@ def _validate_field_names(**field_names: str) -> None:
     for name, value in field_names.items():
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
+
+
+def _normalize_tool_choice(value: str) -> str:
+    """Validate the string forms accepted by the OpenAI API."""
+    if not isinstance(value, str) or value.strip().lower() not in {
+        "none",
+        "auto",
+        "required",
+    }:
+        raise ValueError("tool_choice must be one of: none, auto, required")
+    return value.strip().lower()
 
 
 @dataclass
@@ -158,23 +170,7 @@ class PromptArguments:
 
 @dataclass
 class GenerationArguments:
-    """
-    Arguments for controlling the text generation process.
-
-    This class handles all parameters related to text generation including
-    sampling strategies, token limits, and output formatting.
-
-    Attributes:
-        n_samples (int): Number of sequences to generate per prompt.
-        temperature (float): Controls randomness; higher is more diverse.
-        top_p (float): Nucleus sampling probability threshold.
-        top_k (int): Top-k sampling parameter.
-        max_tokens (Optional[int]): Maximum number of tokens to generate per sequence.
-        enable_thinking (bool): Enable thinking mode for LLMs (if supported).
-
-    Raises:
-        ValueError: If any parameter is outside its valid range.
-    """
+    """Backend-independent text generation arguments."""
 
     n_samples: int = field(
         default=1, metadata={"help": "Number of sequences to generate per prompt."}
@@ -183,38 +179,69 @@ class GenerationArguments:
     top_p: float = field(
         default=0.95, metadata={"help": "Nucleus sampling probability threshold."}
     )
-    top_k: int = field(default=40, metadata={"help": "Top-k sampling parameter."})
-    max_tokens: int = field(
-        default=32768, metadata={"help": "The Maximum number of tokens to generate."}
+    max_completion_tokens: int = field(
+        default=32768,
+        metadata={"help": "Maximum completion tokens to generate per sequence."},
     )
-    enable_thinking: bool = field(
-        default=False, metadata={"help": "Enable thinking mode for LLMs."}
+    seed: int = field(
+        default=0, metadata={"help": "Generation seed used for reproducible sampling."}
     )
 
     def __post_init__(self) -> None:
-        """
-        Validate generation arguments after initialization.
-
-        Raises:
-            ValueError: If any parameter is outside its valid range.
-        """
+        """Validate backend-independent generation arguments."""
+        if self.n_samples <= 0:
+            raise ValueError(
+                f"Number of samples must be positive, but got {self.n_samples}."
+            )
         if not (0.0 <= self.temperature <= 2.0):
             raise ValueError(
                 f"Temperature must be between 0.0 and 2.0, got: {self.temperature}"
             )
         if not 0 <= self.top_p <= 1:
             raise ValueError(f"Top-p must be between 0 and 1, but got {self.top_p}.")
+        if self.max_completion_tokens <= 0:
+            raise ValueError(
+                "max_completion_tokens must be a positive integer, got: "
+                f"{self.max_completion_tokens}"
+            )
+        if self.seed < 0:
+            raise ValueError(f"seed must be non-negative, got: {self.seed}")
+
+
+@dataclass
+class VLLMGenerationArguments:
+    """Generation options implemented by the local vLLM backend."""
+
+    top_k: int = field(default=40, metadata={"help": "Top-k sampling parameter."})
+    skip_special_tokens: bool = field(
+        default=True, metadata={"help": "Remove special tokens from generated text."}
+    )
+    repetition_penalty: float = field(
+        default=1.0, metadata={"help": "Local vLLM repetition penalty."}
+    )
+    enable_thinking: bool = field(
+        default=False,
+        metadata={"help": "Enable thinking through vLLM chat-template arguments."},
+    )
+
+    def __post_init__(self) -> None:
+        """Validate local vLLM generation arguments."""
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(
                 f"Top-k must be positive or -1 (disabled), got: {self.top_k}"
             )
-        if self.max_tokens <= 0:
+        if self.repetition_penalty <= 0:
             raise ValueError(
-                f"Max tokens must be a positive integer, but got {self.max_tokens}."
+                f"Repetition penalty must be positive, got: {self.repetition_penalty}"
             )
-        if self.n_samples <= 0:
+        if not isinstance(self.skip_special_tokens, bool):
             raise ValueError(
-                f"Number of samples must be positive, but got {self.n_samples}."
+                "skip_special_tokens must be a boolean, got: "
+                f"{self.skip_special_tokens}"
+            )
+        if not isinstance(self.enable_thinking, bool):
+            raise ValueError(
+                f"enable_thinking must be a boolean, got: {self.enable_thinking}"
             )
 
 
@@ -242,7 +269,6 @@ class VLLMEngineArguments:
         max_num_batched_tokens (Optional[int]): Maximum number of tokens per batch.
         max_num_seqs (Optional[int]): Maximum number of parallel sequences.
         enforce_eager (bool): Enforce eager execution for debugging purposes.
-        seed (int): Random seed for initialization.
         device (str): Device to use for inference (e.g., "cuda", "auto").
         quantization (Optional[str]): Quantization method (e.g., "awq", "gptq", None).
 
@@ -303,7 +329,6 @@ class VLLMEngineArguments:
         default=True,
         metadata={"help": "Enforce eager execution for debugging purposes."},
     )
-    seed: int = field(default=0, metadata={"help": "Random seed for initialization."})
     device: str = field(
         default="cuda",
         metadata={"help": 'Device to use for inference (e.g., "cuda", "auto").'},
@@ -382,8 +407,6 @@ class VLLMEngineArguments:
             raise ValueError(
                 f"max_num_seqs must be positive, but got {self.max_num_seqs}."
             )
-        if self.seed < 0:
-            raise ValueError(f"seed must be non-negative, got: {self.seed}")
 
 
 @dataclass
@@ -402,6 +425,7 @@ class ServerArguments:
         max_retries (int): Maximum number of retries for failed requests.
         api_key (Optional[str]): API key for authentication.
         organization (Optional[str]): Organization ID for API usage.
+        extra_body (str): JSON object containing explicit provider extensions.
 
     Raises:
         ValueError: If any parameter is outside its valid range.
@@ -435,8 +459,13 @@ class ServerArguments:
     )
     tool_choice: str = field(
         default="none",
-        metadata={"help": "Tool choice mode: 'none', 'auto', or a specific tool name."},
+        metadata={"help": "Tool choice mode: none, auto, or required."},
     )
+    extra_body: str = field(
+        default="{}",
+        metadata={"help": "JSON object of non-standard provider request fields."},
+    )
+    extra_body_dict: dict[str, Any] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         """
@@ -462,6 +491,17 @@ class ServerArguments:
             raise ValueError(
                 f"Base URL must start with http:// or https://, but got {self.base_url}"
             )
+        if not isinstance(self.model_name, str) or not self.model_name.strip():
+            raise ValueError("model_name must be a non-empty string")
+
+        try:
+            parsed_extra_body = json.loads(self.extra_body or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"extra_body must be valid JSON: {exc}") from exc
+        if not isinstance(parsed_extra_body, dict):
+            raise ValueError("extra_body must be a JSON object")
+        self.extra_body_dict = parsed_extra_body
+        self.tool_choice = _normalize_tool_choice(self.tool_choice)
 
         # Check for API key from environment if not provided
         if self.api_key is None and "OPENAI_API_KEY" in os.environ:
@@ -481,8 +521,6 @@ class OnlineInferArguments(
     and ServerArguments.
     """
 
-    seed: int = field(default=0, metadata={"help": "Generation seed sent to the API."})
-
     def __post_init__(self) -> None:
         """Validate all inherited arguments."""
         # Only validate what online mode needs; no vLLM engine args
@@ -490,20 +528,22 @@ class OnlineInferArguments(
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)
         ServerArguments.__post_init__(self)
-        if self.seed < 0:
-            raise ValueError(f"seed must be non-negative, got: {self.seed}")
 
 
 @dataclass
 class OfflineInferArguments(
-    DataArguments, PromptArguments, GenerationArguments, VLLMEngineArguments
+    DataArguments,
+    PromptArguments,
+    GenerationArguments,
+    VLLMGenerationArguments,
+    VLLMEngineArguments,
 ):
     """
     Arguments specific to offline (local vLLM engine) inference.
 
     This class combines all necessary arguments for offline inference,
     inheriting from DataArguments, PromptArguments, GenerationArguments,
-    and VLLMEngineArguments.
+    VLLMGenerationArguments, and VLLMEngineArguments.
     """
 
     batch_size: int = field(
@@ -518,69 +558,33 @@ class OfflineInferArguments(
             )
         },
     )
-    do_sample: bool = field(
-        default=True, metadata={"help": "Use sampling instead of greedy decoding."}
-    )
-    skip_special_tokens: bool = field(
-        default=True, metadata={"help": "Remove special tokens from generated text."}
-    )
-    repetition_penalty: float = field(
-        default=1.0, metadata={"help": "Local vLLM repetition penalty."}
-    )
 
     def __post_init__(self) -> None:
         """Validate all inherited arguments."""
         DataArguments.__post_init__(self)
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)
+        VLLMGenerationArguments.__post_init__(self)
         VLLMEngineArguments.__post_init__(self)
         if self.batch_size <= 0:
             raise ValueError(
                 f"Batch size must be a positive integer, but got {self.batch_size}."
             )
-        if self.repetition_penalty < 0:
-            raise ValueError(
-                "Repetition penalty must be non-negative, got: "
-                f"{self.repetition_penalty}"
-            )
-        if self.temperature <= 0.0:
-            self.do_sample = False
-            logger.info("Greedy decoding: temperature=0, do_sample=False")
 
 
 @dataclass
-class MCInferConfig:
-    """
-    Configuration for MC (multiple-choice) inference.
+class MCInferConfig(
+    DataArguments, PromptArguments, GenerationArguments, ServerArguments
+):
+    """Configuration for multiple-choice inference.
 
-    Used by llmeval/inference/mc.py and parsed from the command
-    line by HfArgumentParser; field names map 1:1 to CLI flags
-    (e.g. --input_file, --max_workers).
-
-    Attributes:
-        input_file (str): Path to the input JSONL file (MC items).
-        output_file (str): Path to the output JSONL file (results appended).
-        base_url (str): Base URL of the OpenAI-compatible API endpoint.
-        model_name (str): Served model name used in requests.
-        mode (str): Inference mode: "loglikelihood" or "generate".
-        max_workers (int): Number of concurrent worker threads.
-        request_timeout (int): Per-request timeout in seconds.
-        max_retries (int): Maximum number of retries for transient failures.
-        max_tokens (int): Maximum number of tokens to generate (generate mode).
-        n_samples (int): Number of generations per MC prompt in generate mode.
-        loglikelihood_mode (str): ``auto``, ``continuation`` or ``first_token``.
-        temperature (float): Sampling temperature (0.0 = deterministic).
-        system_prompt_type (str): System prompt template key ("empty" disables).
-        tool_choice (str): Tool calling mode: "none", "auto", or a tool name.
-        n_shot (int): Few-shot example count (0 = zero-shot).
-        few_shot_file (str): Dev file for few-shot examples
-            (required when n_shot > 0; never falls back to the evaluation set).
-        api_key (str): API key; defaults to the OPENAI_API_KEY env var.
-
-    Raises:
-        ValueError: If any parameter is outside its valid range.
+    Shared data, prompt, generation, and server fields come from their argument
+    classes. This class only overrides MC-specific defaults and adds MC-only
+    scoring and few-shot options.
     """
 
+    # MC validates paths when MCRunner starts, allowing default construction for
+    # CLI introspection and tests.
     input_file: str = field(
         default="", metadata={"help": "Path to the input JSONL file (MC items)."}
     )
@@ -595,49 +599,37 @@ class MCInferConfig:
         default="longcat-flash",
         metadata={"help": "Served model name used in requests."},
     )
-    mode: str = field(
-        default="loglikelihood",
-        metadata={"help": "Inference mode: 'loglikelihood' or 'generate'."},
-    )
     max_workers: int = field(
         default=32, metadata={"help": "Number of concurrent worker threads."}
     )
     request_timeout: int = field(
         default=300, metadata={"help": "Per-request timeout in seconds."}
     )
-    max_retries: int = field(
-        default=3,
-        metadata={"help": "Maximum number of retries for transient failures."},
-    )
-    max_tokens: int = field(
+    max_completion_tokens: int = field(
         default=2048,
-        metadata={"help": "Maximum number of tokens to generate (generate mode)."},
+        metadata={"help": "Maximum completion tokens in generate mode."},
     )
-    n_samples: int = field(
-        default=1,
-        metadata={"help": "Number of generations per prompt in generate mode."},
+    temperature: float = field(
+        default=0.0, metadata={"help": "Sampling temperature (0.0 = deterministic)."}
+    )
+    api_key: str | None = field(
+        default_factory=lambda: os.environ.get("OPENAI_API_KEY", "EMPTY"),
+        metadata={"help": "API key (default: OPENAI_API_KEY env var)."},
+    )
+
+    mode: str = field(
+        default="loglikelihood",
+        metadata={"help": "Inference mode: 'loglikelihood' or 'generate'."},
     )
     loglikelihood_mode: str = field(
         default="first_token",
         metadata={
             "help": (
-                "MC scoring mode: first_token (default), continuation, or "
-                "auto (compatibility alias for first_token)."
+                "MC scoring mode: first_token (default, Chat Completions), "
+                "continuation (legacy Completions compatibility), or auto "
+                "(alias for first_token)."
             )
         },
-    )
-    temperature: float = field(
-        default=0.0, metadata={"help": "Sampling temperature (0.0 = deterministic)."}
-    )
-    system_prompt_type: str = field(
-        default="empty",
-        metadata={"help": "System prompt template key ('empty' disables it)."},
-    )
-    # Computed value based on system_prompt_type; not settable via CLI.
-    system_prompt: str | None = field(init=False, default=None)
-    tool_choice: str = field(
-        default="none",
-        metadata={"help": "Tool calling mode: 'none', 'auto', or a tool name."},
     )
     n_shot: int = field(
         default=0,
@@ -653,104 +645,33 @@ class MCInferConfig:
             )
         },
     )
-    api_key: str = field(
-        default_factory=lambda: os.environ.get("OPENAI_API_KEY", "EMPTY"),
-        metadata={"help": "API key (default: OPENAI_API_KEY env var)."},
-    )
-    organization: str | None = field(
-        default=None, metadata={"help": "Optional OpenAI organization ID."}
-    )
-    input_key: str = field(
-        default="prompt",
-        metadata={"help": "Field name for the input prompt text in dataset."},
-    )
-    label_key: str = field(
-        default="answer",
-        metadata={"help": "Field name for the gold label/answer in dataset."},
-    )
-    response_key: str = field(
-        default="gen",
-        metadata={"help": "Field name for model generation results in dataset."},
-    )
-    seed: int = field(
-        default=0, metadata={"help": "Generation and few-shot sampling seed."}
-    )
-    repair_resume: bool = field(
-        default=False,
-        metadata={
-            "help": (
-                "Ignore only an unterminated invalid final line in an existing "
-                "resume JSONL file."
-            )
-        },
-    )
 
     def __post_init__(self) -> None:
-        """
-        Validate MC inference arguments after initialization.
+        """Validate shared fields and MC-specific options."""
+        # Keep default construction available for CLI introspection. Once a path
+        # is supplied, apply the same existence check as other inference modes.
+        if self.input_file:
+            DataArguments.__post_init__(self)
+        PromptArguments.__post_init__(self)
+        GenerationArguments.__post_init__(self)
+        ServerArguments.__post_init__(self)
 
-        Note: input_file/output_file emptiness and existence are validated at
-        pipeline start (MCRunner.run), not here, so a default-constructed
-        config stays usable for inspection and testing.
-
-        Raises:
-            ValueError: If any parameter is outside its valid range.
-        """
         if self.mode not in ("loglikelihood", "generate"):
             raise ValueError(
                 f"mode must be one of {('loglikelihood', 'generate')}, got: {self.mode!r}"
             )
-        if not self.base_url.strip():
-            raise ValueError("base_url cannot be empty")
-        if not self.base_url.startswith(("http://", "https://")):
-            raise ValueError(
-                f"Base URL must start with http:// or https://, but got {self.base_url}"
-            )
-        if not self.model_name.strip():
-            raise ValueError("model_name cannot be empty")
-        if self.max_workers <= 0:
-            raise ValueError(f"max_workers must be positive, got: {self.max_workers}")
-        if self.request_timeout <= 0:
-            raise ValueError(
-                f"request_timeout must be positive, got: {self.request_timeout}"
-            )
-        if self.max_retries < 0:
-            raise ValueError(
-                f"max_retries must be non-negative, got: {self.max_retries}"
-            )
-        if self.max_tokens <= 0:
-            raise ValueError(f"max_tokens must be positive, got: {self.max_tokens}")
-        if self.n_samples <= 0:
-            raise ValueError(f"n_samples must be positive, got: {self.n_samples}")
         if self.loglikelihood_mode not in ("auto", "continuation", "first_token"):
             raise ValueError(
                 "loglikelihood_mode must be one of ('auto', 'continuation', "
                 f"'first_token'), got: {self.loglikelihood_mode!r}"
             )
-        if not (0.0 <= self.temperature <= 2.0):
-            raise ValueError(
-                f"Temperature must be between 0.0 and 2.0, got: {self.temperature}"
-            )
         if self.n_shot < 0:
             raise ValueError(f"n_shot must be non-negative, got: {self.n_shot}")
-        if self.seed < 0:
-            raise ValueError(f"seed must be non-negative, got: {self.seed}")
         if self.n_shot > 0 and not self.few_shot_file:
             raise ValueError(
                 "few_shot_file is required when n_shot is greater than zero; "
                 "do not sample demonstrations from the evaluation set"
             )
-        _validate_field_names(
-            input_key=self.input_key,
-            label_key=self.label_key,
-            response_key=self.response_key,
-        )
-        if self.system_prompt_type not in SYSTEM_PROMPT_FACTORY:
-            raise ValueError(
-                f"Invalid system prompt type: {self.system_prompt_type}. "
-                f"Valid options are: {list(SYSTEM_PROMPT_FACTORY.keys())}"
-            )
-        self.system_prompt = SYSTEM_PROMPT_FACTORY.get(self.system_prompt_type)
 
 
 @dataclass

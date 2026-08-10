@@ -98,7 +98,7 @@ class OfflineInferenceRunner:
         logger.info("🚀 Initializing vLLM Engine")
         logger.info(f"Model: {self.args.model_name_or_path}")
         logger.info(f"Max Model Length: {self.args.max_model_len}")
-        logger.info(f"Max tokens: {self.args.max_tokens}")
+        logger.info(f"Max completion tokens: {self.args.max_completion_tokens}")
         logger.info(f"RoPE Scaling: {self.args.rope_scaling}")
         logger.info(f"Tensor Parallel Size: {self.args.tensor_parallel_size}")
         logger.info(f"Pipeline Parallel Size: {self.args.pipeline_parallel_size}")
@@ -119,10 +119,10 @@ class OfflineInferenceRunner:
 
     def _build_sampling_params(self, seed: int) -> SamplingParams:
         """Build generation parameters for one deterministic sample stream."""
-        temperature = self.args.temperature if self.args.do_sample else 0.0
         return SamplingParams(
-            max_tokens=self.args.max_tokens,
-            temperature=temperature,
+            # vLLM names this SamplingParams field ``max_tokens``.
+            max_tokens=self.args.max_completion_tokens,
+            temperature=self.args.temperature,
             top_p=self.args.top_p,
             top_k=self.args.top_k,
             repetition_penalty=self.args.repetition_penalty,

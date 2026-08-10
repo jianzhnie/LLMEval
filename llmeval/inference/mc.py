@@ -11,7 +11,7 @@ llmeval/utils/retry.py; shared JSONL and resume helpers live in
 llmeval/inference/common.py; the configuration dataclass lives in
 llmeval/utils/config.py (MCInferConfig).
 MC-specific pieces (kept deliberately): FewShotFormatter, answer-token
-logprobs via the completions API, and per-mode worker methods.
+logprobs, and per-mode worker methods.
 """
 
 from __future__ import annotations
@@ -201,11 +201,10 @@ class FewShotFormatter:
 
 
 class MCLoglikelihoodClient:
-    """Client for computing answer-token log-probabilities via completions.
+    """Client for computing answer-token log-probabilities.
 
     Mirrors InferenceClient in online.py: same initialization, masked
-    API-key logging, and classified retry policy. The MC-specific part is that
-    one request carries ALL choices of an item (batched prompt list).
+    API-key logging, and classified retry policy.
     """
 
     def __init__(
@@ -214,9 +213,10 @@ class MCLoglikelihoodClient:
         model_name: str,
         timeout: int = 300,
         max_retries: int = 3,
-        api_key: str = "",
+        api_key: str | None = None,
         seed: int = 0,
         organization: str | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the client with API configuration.
 
@@ -226,12 +226,14 @@ class MCLoglikelihoodClient:
             timeout: Request timeout in seconds
             max_retries: Maximum number of retries for transient failures
             api_key: API key; falls back to the OPENAI_API_KEY env var
+            extra_body: Explicit non-standard fields for compatible providers
         """
         self.model_name: str = model_name
         self.base_url: str = base_url
         self.timeout: int = timeout
         self.max_retries: int = max_retries
         self.seed = seed
+        self.extra_body: dict[str, Any] = dict(extra_body or {})
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
         if self.api_key == "EMPTY":
@@ -258,11 +260,10 @@ class MCLoglikelihoodClient:
     ) -> list[float] | None:
         """Compute per-answer-token log-probabilities from first-token top_logprobs.
 
-        Uses echo=False + max_tokens=1 + logprobs=20 to obtain the model's top
-        predicted tokens after the prompt. For each target choice, we look up
-        its logprob among the predictions. This directly measures
-        P(target_token | prompt) without the token-alignment issues that arise
-        from echo=True (where prompt tokenization can shift across continuations).
+        Chat Completions returns the generated token and its alternatives under
+        ``choices[0].logprobs.content[0].top_logprobs``. For each target choice,
+        look up its logprob among those alternatives. This directly measures
+        P(target_token | prompt).
 
         The target tokens (typically "A"/"B"/"C"/"D") are looked up in several
         common tokenizer forms: with/without leading space, upper/lower case.
@@ -278,23 +279,31 @@ class MCLoglikelihoodClient:
         """
 
         def do_request() -> list[float]:
-            resp = self.client.completions.create(
-                model=self.model_name,
-                prompt=prompt,
-                max_tokens=1,
-                temperature=0,
-                logprobs=20,
-                echo=False,
-                timeout=self.timeout,
-                seed=self.seed,
+            call_args: dict[str, Any] = {
+                "model": self.model_name,
+                "messages": build_chat_messages(prompt, None),
+                "max_completion_tokens": 1,
+                "temperature": 0,
+                "logprobs": True,
+                "top_logprobs": 20,
+                "timeout": self.timeout,
+                "seed": self.seed,
+            }
+            if self.extra_body:
+                call_args["extra_body"] = dict(self.extra_body)
+            resp = self.client.chat.completions.create(**call_args)
+            choices = getattr(resp, "choices", []) or []
+            choice_logprobs = getattr(choices[0], "logprobs", None) if choices else None
+            content = getattr(choice_logprobs, "content", None) or []
+            alternatives = (
+                getattr(content[0], "top_logprobs", None) if content else None
             )
-            top_dict: dict[str, float] = (
-                resp.choices[0].logprobs.top_logprobs[0]
-                if resp.choices
-                and resp.choices[0].logprobs
-                and resp.choices[0].logprobs.top_logprobs
-                else {}
-            )
+            top_dict = {
+                str(token): float(logprob)
+                for entry in alternatives or []
+                if (token := getattr(entry, "token", None)) is not None
+                and (logprob := getattr(entry, "logprob", None)) is not None
+            }
             results = []
             for target in choice_texts:
                 best = float("-inf")
@@ -318,6 +327,11 @@ class MCLoglikelihoodClient:
     def score_continuations(self, request: LoglikelihoodRequest) -> LoglikelihoodResult:
         """Score complete continuations and return a validated typed result.
 
+        The traditional Completions endpoint is required because Chat
+        Completions cannot echo prompt-token logprobs. Its ``max_tokens`` and
+        ``echo`` parameters are therefore intentional, not stale Chat
+        Completions fields.
+
         Structurally malformed responses (missing fields, mismatched choice
         counts) raise :class:`MalformedResponseError` inside the retry loop
         and are retried; deterministic token-offset mismatches
@@ -330,16 +344,19 @@ class MCLoglikelihoodClient:
                 f"{request.context}{continuation}"
                 for continuation in request.continuations
             ]
-            response = self.client.completions.create(
-                model=self.model_name,
-                prompt=prompts,
-                max_tokens=1,
-                temperature=0,
-                logprobs=20,
-                echo=True,
-                timeout=self.timeout,
-                seed=self.seed,
-            )
+            call_args: dict[str, Any] = {
+                "model": self.model_name,
+                "prompt": prompts,
+                "max_tokens": 1,
+                "temperature": 0,
+                "logprobs": 20,
+                "echo": True,
+                "timeout": self.timeout,
+                "seed": self.seed,
+            }
+            if self.extra_body:
+                call_args["extra_body"] = dict(self.extra_body)
+            response = self.client.completions.create(**call_args)
             completions = getattr(response, "choices", []) or []
             if len(completions) != len(request.continuations):
                 raise MalformedResponseError(
@@ -491,6 +508,7 @@ class MCRunner:
                     api_key=config.api_key,
                     seed=config.seed,
                     organization=config.organization,
+                    extra_body=config.extra_body_dict,
                 )
             except (OSError, ValueError) as e:
                 raise RuntimeError(f"Failed to initialize MC client: {e}") from e
@@ -884,11 +902,14 @@ class MCRunner:
         call_args: dict[str, Any] = {
             "model": self.config.model_name,
             "messages": messages,
-            "max_tokens": self.config.max_tokens,
+            "max_completion_tokens": self.config.max_completion_tokens,
             "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
             "timeout": self.config.request_timeout,
             "seed": get_request_seed(item),
         }
+        if self.config.extra_body_dict:
+            call_args["extra_body"] = dict(self.config.extra_body_dict)
         # tool_choice: only send when explicitly configured
         if is_explicit_tool_choice(self.config.tool_choice):
             call_args["tool_choice"] = self.config.tool_choice

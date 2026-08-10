@@ -17,6 +17,7 @@ from llmeval.utils.config import (
     PromptArguments,
     ServerArguments,
     VLLMEngineArguments,
+    VLLMGenerationArguments,
 )
 
 
@@ -87,7 +88,8 @@ class TestGenerationArguments:
         args = GenerationArguments()
         assert 0 < args.temperature <= 2.0
         assert args.n_samples > 0
-        assert args.max_tokens == 32768
+        assert args.max_completion_tokens == 32768
+        assert not hasattr(args, "max_tokens")
 
     @pytest.mark.parametrize("temp", [-0.1, 2.1])
     def test_invalid_temperature_raises(self, temp: float) -> None:
@@ -96,6 +98,13 @@ class TestGenerationArguments:
 
     def test_zero_temperature_is_valid_for_online_backends(self) -> None:
         assert GenerationArguments(temperature=0.0).temperature == 0.0
+
+    def test_seed_is_shared_by_generation_backends(self) -> None:
+        assert GenerationArguments(seed=42).seed == 42
+
+    def test_negative_seed_raises(self) -> None:
+        with pytest.raises(ValueError, match="seed"):
+            GenerationArguments(seed=-1)
 
 
 class TestInferenceSpecificArguments:
@@ -107,6 +116,8 @@ class TestInferenceSpecificArguments:
                 "batch_size",
                 "fail_fast",
                 "do_sample",
+                "top_k",
+                "enable_thinking",
                 "repetition_penalty",
                 "skip_special_tokens",
             }
@@ -119,7 +130,8 @@ class TestInferenceSpecificArguments:
 
         assert args.batch_size == 128
         assert args.fail_fast is True
-        assert args.do_sample is False
+        assert args.temperature == 0.0
+        assert args.top_k == 40
         assert args.skip_special_tokens is True
         assert args.repetition_penalty == 1.0
 
@@ -161,6 +173,17 @@ class TestMCAndEvaluationP0Config:
             VLLMEngineArguments(rope_scaling="not json")
 
 
+class TestVLLMGenerationArguments:
+    def test_defaults_are_valid(self) -> None:
+        args = VLLMGenerationArguments()
+        assert args.top_k == 40
+        assert args.repetition_penalty == 1.0
+
+    def test_zero_repetition_penalty_raises(self) -> None:
+        with pytest.raises(ValueError, match="positive"):
+            VLLMGenerationArguments(repetition_penalty=0.0)
+
+
 class TestServerArguments:
     def test_env_api_key_picked_up(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -173,17 +196,62 @@ class TestServerArguments:
         with pytest.raises(ValueError, match="http"):
             ServerArguments(base_url="ftp://bad.url")
 
+    def test_empty_model_name_raises(self) -> None:
+        with pytest.raises(ValueError, match="model_name"):
+            ServerArguments(model_name="  ")
+
     def test_zero_max_workers_raises(self) -> None:
         with pytest.raises(ValueError, match="positive"):
             ServerArguments(max_workers=0)
 
+    def test_tool_choice_is_normalized(self) -> None:
+        assert ServerArguments(tool_choice=" AUTO ").tool_choice == "auto"
+
+    def test_invalid_tool_choice_raises(self) -> None:
+        with pytest.raises(ValueError, match="tool_choice"):
+            ServerArguments(tool_choice="function_name")
+
+    def test_extra_body_defaults_to_empty_object(self) -> None:
+        args = ServerArguments()
+        assert args.extra_body_dict == {}
+
+    def test_extra_body_parses_provider_extensions(self) -> None:
+        args = ServerArguments(
+            extra_body='{"top_k": 40, "chat_template_kwargs": {"enable_thinking": true}}'
+        )
+        assert args.extra_body_dict == {
+            "top_k": 40,
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
+
+    @pytest.mark.parametrize("extra_body", ["not-json", "[]", "null"])
+    def test_extra_body_must_be_a_json_object(self, extra_body: str) -> None:
+        with pytest.raises(ValueError, match="extra_body"):
+            ServerArguments(extra_body=extra_body)
+
 
 class TestMCInferConfig:
+    def test_reuses_shared_argument_classes(self) -> None:
+        args = MCInferConfig()
+
+        assert isinstance(args, DataArguments)
+        assert isinstance(args, PromptArguments)
+        assert isinstance(args, GenerationArguments)
+        assert isinstance(args, ServerArguments)
+
     def test_defaults_valid(self) -> None:
         args = MCInferConfig()
         assert args.mode == "loglikelihood"
         assert args.max_workers > 0
         assert args.n_shot == 0
+        assert args.max_completion_tokens == 2048
+        assert args.top_p == 0.95
+        assert args.extra_body_dict == {}
+        assert not hasattr(args, "max_tokens")
+
+    def test_invalid_tool_choice_raises(self) -> None:
+        with pytest.raises(ValueError, match="tool_choice"):
+            MCInferConfig(tool_choice="function_name")
 
     def test_api_key_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-mc-test")
@@ -197,6 +265,10 @@ class TestMCInferConfig:
         with pytest.raises(ValueError, match="mode"):
             MCInferConfig(mode="bogus")
 
+    def test_nonempty_input_reuses_data_validation(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="does not exist"):
+            MCInferConfig(input_file=str(tmp_path / "missing.jsonl"))
+
     @pytest.mark.parametrize("key", ["input_key", "label_key", "response_key"])
     def test_empty_record_key_raises(self, key: str) -> None:
         with pytest.raises(ValueError, match=key):
@@ -208,11 +280,13 @@ class TestMCInferConfig:
             {"max_workers": 0},
             {"request_timeout": -1},
             {"max_retries": -1},
-            {"max_tokens": 0},
+            {"max_completion_tokens": 0},
             {"temperature": 2.1},
+            {"top_p": 1.1},
             {"n_shot": -1},
             {"base_url": "  "},
             {"model_name": ""},
+            {"extra_body": "[]"},
         ],
     )
     def test_invalid_values_raise(self, kwargs: dict) -> None:

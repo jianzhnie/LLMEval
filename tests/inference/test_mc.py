@@ -68,6 +68,7 @@ def _make_ll_client(max_retries: int = 0) -> MCLoglikelihoodClient:
     client.max_retries = max_retries
     client.base_url = "http://test/v1"
     client.seed = 0
+    client.extra_body = {}
     client.client = MagicMock()
     return client
 
@@ -85,7 +86,12 @@ def _make_api_error(message: str = "", status_code: int | None = None) -> Except
 def _fake_top_probs_resp(top_probs: dict[str, float]) -> MagicMock:
     resp = MagicMock()
     choice = MagicMock()
-    choice.logprobs.top_logprobs = [top_probs]
+    token = MagicMock()
+    token.top_logprobs = [
+        types.SimpleNamespace(token=text, logprob=logprob)
+        for text, logprob in top_probs.items()
+    ]
+    choice.logprobs.content = [token]
     resp.choices = [choice]
     return resp
 
@@ -101,8 +107,10 @@ def _make_mc_runner(
     tmp_path: Path, mode: str = "loglikelihood", max_retries: int = 0
 ) -> MCRunner:
     runner = MCRunner.__new__(MCRunner)
+    input_file = tmp_path / "in.jsonl"
+    input_file.touch(exist_ok=True)
     runner.config = MCInferConfig(
-        input_file=str(tmp_path / "in.jsonl"),
+        input_file=str(input_file),
         output_file=str(tmp_path / "out.jsonl"),
         mode=mode,
         max_retries=max_retries,
@@ -186,32 +194,48 @@ class TestMCLoglikelihoodClient:
 
     def test_single_request_with_top_logprobs(self) -> None:
         client = _make_ll_client(max_retries=3)
-        client.client.completions.create.return_value = _fake_top_probs_resp(
+        client.client.chat.completions.create.return_value = _fake_top_probs_resp(
             {" A": -3.0, " B": -0.5, " C": -4.2}
         )
 
         result = client.get_choices_logprobs("prompt", ["A", "B", "C"])
 
         assert result == [-3.0, -0.5, -4.2]
-        call_kwargs = client.client.completions.create.call_args.kwargs
-        assert call_kwargs["prompt"] == "prompt"
-        assert call_kwargs["echo"] is False
-        assert call_kwargs["logprobs"] == 20
-        assert call_kwargs["max_tokens"] == 1
+        call_kwargs = client.client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["messages"] == [{"role": "user", "content": "prompt"}]
+        assert call_kwargs["logprobs"] is True
+        assert call_kwargs["top_logprobs"] == 20
+        assert call_kwargs["max_completion_tokens"] == 1
+        assert "max_tokens" not in call_kwargs
 
     def test_tool_choice_none_is_omitted(self) -> None:
         client = _make_ll_client()
-        client.client.completions.create.return_value = _fake_top_probs_resp(
+        client.client.chat.completions.create.return_value = _fake_top_probs_resp(
             {" A": -3.0}
         )
 
         client.get_choices_logprobs("prompt", ["A"])
 
-        assert "tool_choice" not in client.client.completions.create.call_args.kwargs
+        assert (
+            "tool_choice" not in client.client.chat.completions.create.call_args.kwargs
+        )
+
+    def test_extra_body_is_forwarded(self) -> None:
+        client = _make_ll_client()
+        client.extra_body = {"top_k": 40}
+        client.client.chat.completions.create.return_value = _fake_top_probs_resp(
+            {" A": -3.0}
+        )
+
+        client.get_choices_logprobs("prompt", ["A"])
+
+        assert client.client.chat.completions.create.call_args.kwargs["extra_body"] == {
+            "top_k": 40
+        }
 
     def test_programming_error_propagates(self) -> None:
         client = _make_ll_client(max_retries=0)
-        client.client.completions.create.side_effect = RuntimeError("down")
+        client.client.chat.completions.create.side_effect = RuntimeError("down")
 
         with pytest.raises(RuntimeError, match="down"):
             client.get_choices_logprobs("prompt", ["A", "B"])
@@ -548,6 +572,23 @@ class TestProcessGenerateItem:
 
         assert client.chat.completions.create.call_args.kwargs["tool_choice"] == "auto"
 
+    def test_shared_generation_options_are_sent(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        runner.config.top_p = 0.8
+        runner.config.extra_body_dict = {"top_k": 40}
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [
+            _generation_choice("ans")
+        ]
+
+        runner.process_generate_item(
+            {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+        )
+
+        request = client.chat.completions.create.call_args.kwargs
+        assert request["top_p"] == 0.8
+        assert request["extra_body"] == {"top_k": 40}
+
     def test_null_content_raises(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         client = MagicMock()
@@ -596,6 +637,8 @@ class TestProcessGenerateItem:
         request = client.chat.completions.create.call_args.kwargs
         assert "n" not in request
         assert request["seed"] == 123
+        assert request["max_completion_tokens"] == runner.config.max_completion_tokens
+        assert "max_tokens" not in request
 
 
 class TestMCStableResume:
@@ -883,7 +926,7 @@ class TestContinuationScoring:
 def _mc_client_choice_not_in_top_returns_neg_inf(self) -> None:
     """A target letter absent from top_logprobs gets float('-inf')."""
     client = _make_ll_client()
-    client.client.completions.create.return_value = _fake_top_probs_resp(
+    client.client.chat.completions.create.return_value = _fake_top_probs_resp(
         {" B": -0.5, " C": -4.2}
     )
     result = client.get_choices_logprobs("p", ["A", "B", "C"])
@@ -899,7 +942,7 @@ def _mc_client_token_form_variants_are_checked(self) -> None:
     """Letters are looked up as 'X', ' X', 'x', ' x' to handle tokenizer variance."""
     client = _make_ll_client()
     # Tokenizer uses lowercase form for some models.
-    client.client.completions.create.return_value = _fake_top_probs_resp(
+    client.client.chat.completions.create.return_value = _fake_top_probs_resp(
         {"b": -1.2, " C": -3.0}
     )
     result = client.get_choices_logprobs("p", ["A", "B", "C"])
@@ -916,10 +959,10 @@ def _mc_client_4xx_aborts_without_retry(self) -> None:
     from llmeval.utils.retry import ClientError
 
     client = _make_ll_client(max_retries=3)
-    client.client.completions.create.side_effect = _make_api_error("bad", 400)
+    client.client.chat.completions.create.side_effect = _make_api_error("bad", 400)
     with pytest.raises(ClientError, match="status=400"):
         client.get_choices_logprobs("p", ["a", "b"])
-    assert client.client.completions.create.call_count == 1
+    assert client.client.chat.completions.create.call_count == 1
 
 
 TestMCLoglikelihoodClient.test_4xx_aborts_without_retry = (
@@ -930,7 +973,7 @@ TestMCLoglikelihoodClient.test_4xx_aborts_without_retry = (
 def _mc_client_empty_top_logprobs_returns_all_neg_inf(self) -> None:
     """An empty top_logprobs dict yields -inf for every choice."""
     client = _make_ll_client(max_retries=0)
-    client.client.completions.create.return_value = _fake_top_probs_resp({})
+    client.client.chat.completions.create.return_value = _fake_top_probs_resp({})
     assert client.get_choices_logprobs("p", ["A", "B"]) == [
         float("-inf"),
         float("-inf"),

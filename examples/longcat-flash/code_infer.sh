@@ -42,7 +42,7 @@ N_SAMPLES="${N_SAMPLES:-1}"               # pass@1 默认 1 次采样
 MAX_WORKERS="${MAX_WORKERS:-32}"
 TEMPERATURE="${TEMPERATURE:-0.0}"         # pass@1 用贪婪解码
 TOP_P="${TOP_P:-0.95}"
-MAX_TOKENS="${MAX_TOKENS:-1024}"          # 代码生成一般较短
+MAX_COMPLETION_TOKENS="${MAX_COMPLETION_TOKENS:-1024}"  # 代码生成一般较短
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-60000}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
 SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-empty}"
@@ -91,7 +91,7 @@ echo "[INFO] LongCat-Flash-Chat — Code Inference"
 echo "[INFO] Server:    $BASE_URL"
 echo "[INFO] Model:     $MODEL_NAME"
 echo "[INFO] Output:    $OUTPUT_DIR"
-echo "[INFO] Workers:   $MAX_WORKERS | MaxTokens: $MAX_TOKENS"
+echo "[INFO] Workers:   $MAX_WORKERS | MaxCompletionTokens: $MAX_COMPLETION_TOKENS"
 echo "[INFO] Benchmarks:"
 for task in $BENCHMARKS; do
     n="${BENCHMARK_SAMPLES[$task]:-$N_SAMPLES}"
@@ -130,7 +130,7 @@ run_infer() {
         --n_samples "$n_samples" \
         --temperature "$temperature" \
         --top_p "$TOP_P" \
-        --max_tokens "$MAX_TOKENS" \
+        --max_completion_tokens "$MAX_COMPLETION_TOKENS" \
         --max_workers "$MAX_WORKERS" \
         --max_retries "$MAX_RETRIES" \
         --request_timeout "$REQUEST_TIMEOUT" \

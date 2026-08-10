@@ -74,15 +74,13 @@ def _make_runner(tmp_path: Path, **overrides: Any) -> InferenceRunner:
         "base_url": "http://127.0.0.1:8090/v1",
         "model_name": "test-model",
         "n_samples": 1,
-        "max_tokens": 128,
+        "max_completion_tokens": 128,
         "max_workers": 2,
         "input_key": "prompt",
         "label_key": "answer",
         "response_key": "gen",
         "temperature": 0.6,
         "top_p": 0.95,
-        "top_k": 40,
-        "enable_thinking": False,
         "seed": 0,
         "repair_resume": False,
     }
@@ -253,6 +251,7 @@ def _make_client(max_retries: int = 0):
     client.tool_choice = "none"
     client.base_url = "http://example.test/v1"
     client.seed = 0
+    client.extra_body = {}
     client.client = MagicMock()
     client._usage_lock = threading.Lock()
     client.usage_stats = {"prompt_tokens": 0, "completion_tokens": 0}
@@ -304,12 +303,32 @@ def test_empty_system_prompt_type_is_not_warned(
     assert "Unknown system_prompt_type: empty" not in caplog.text
 
 
+def test_runner_forwards_parsed_extra_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import llmeval.inference.online as online_mod
+
+    input_file = tmp_path / "input.jsonl"
+    input_file.write_text('{"prompt": "q"}\n', encoding="utf-8")
+    args = OnlineInferArguments(
+        input_file=str(input_file),
+        system_prompt_type="empty",
+        extra_body='{"top_k": 40}',
+    )
+    client_factory = MagicMock()
+    monkeypatch.setattr(online_mod, "InferenceClient", client_factory)
+
+    InferenceRunner(args)
+
+    assert client_factory.call_args.kwargs["extra_body"] == {"top_k": 40}
+
+
 class TestGetContent:
     def test_null_content_normalized_to_empty(self) -> None:
         """Reasoning model truncation returns content=None → ""."""
         client = _make_client()
         client.client.chat.completions.create.return_value = _fake_completion([None])
-        result = client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
+        result = client.get_content("q", None, "m", 8, 0.0, 1.0)
         assert result == ""
 
     def test_empty_content_retried_then_succeeds(
@@ -322,7 +341,7 @@ class TestGetContent:
             _fake_completion(["ok"]),
         ]
 
-        assert client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False) == "ok"
+        assert client.get_content("q", None, "m", 8, 0.0, 1.0) == "ok"
         assert client.client.chat.completions.create.call_count == 2
 
     def test_context_length_returns_none(self) -> None:
@@ -330,7 +349,7 @@ class TestGetContent:
         client.client.chat.completions.create.side_effect = _make_api_error(
             "This model's maximum context length is 8192"
         )
-        assert client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False) is None
+        assert client.get_content("q", None, "m", 8, 0.0, 1.0) is None
 
     def test_malformed_response_retried_then_succeeds(
         self, monkeypatch: pytest.MonkeyPatch
@@ -343,7 +362,7 @@ class TestGetContent:
             _fake_completion(["ok"]),
         ]
 
-        assert client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False) == "ok"
+        assert client.get_content("q", None, "m", 8, 0.0, 1.0) == "ok"
         assert client.client.chat.completions.create.call_count == 2
 
     def test_malformed_response_fails_after_retries_exhausted(
@@ -356,7 +375,7 @@ class TestGetContent:
         from llmeval.utils.retry import ClientError
 
         with pytest.raises(ClientError, match="Max retries exceeded"):
-            client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
+            client.get_content("q", None, "m", 8, 0.0, 1.0)
         assert client.client.chat.completions.create.call_count == 3
 
     def test_4xx_fails_fast_without_retry(self) -> None:
@@ -367,7 +386,7 @@ class TestGetContent:
         from llmeval.utils.retry import ClientError
 
         with pytest.raises(ClientError, match="non-retryable"):
-            client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
+            client.get_content("q", None, "m", 8, 0.0, 1.0)
         assert client.client.chat.completions.create.call_count == 1
 
     def test_5xx_retries_then_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -377,14 +396,14 @@ class TestGetContent:
         from llmeval.utils.retry import ClientError
 
         with pytest.raises(ClientError):
-            client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
+            client.get_content("q", None, "m", 8, 0.0, 1.0)
         assert client.client.chat.completions.create.call_count == 2
 
     def test_tool_choice_none_is_omitted(self) -> None:
         client = _make_client()
         client.client.chat.completions.create.return_value = _fake_completion(["a"])
 
-        client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
+        client.get_content("q", None, "m", 8, 0.0, 1.0)
 
         assert (
             "tool_choice" not in client.client.chat.completions.create.call_args.kwargs
@@ -395,7 +414,7 @@ class TestGetContent:
         client.tool_choice = "auto"
         client.client.chat.completions.create.return_value = _fake_completion(["a"])
 
-        client.get_content("q", None, "m", 8, 0.0, 1.0, 40, False)
+        client.get_content("q", None, "m", 8, 0.0, 1.0)
 
         assert (
             client.client.chat.completions.create.call_args.kwargs["tool_choice"]
@@ -452,20 +471,55 @@ class TestGetContentSingleSample:
     def test_single_sample_omits_n(self) -> None:
         client = _make_client()
         client.client.chat.completions.create.return_value = _fake_completion(["a"])
-        result = client.get_content("q", None, "m", 8, 0.6, 1.0, 40, False)
+        result = client.get_content("q", None, "m", 8, 0.6, 1.0)
         assert result == "a"
         assert "n" not in client.client.chat.completions.create.call_args.kwargs
+
+    def test_uses_current_completion_token_parameter(self) -> None:
+        client = _make_client()
+        client.client.chat.completions.create.return_value = _fake_completion(["a"])
+
+        client.get_content("q", None, "m", 8, 0.6, 1.0)
+
+        request = client.client.chat.completions.create.call_args.kwargs
+        assert request["max_completion_tokens"] == 8
+        assert "max_tokens" not in request
 
     def test_empty_query_raises(self) -> None:
         client = _make_client()
         with pytest.raises(ValueError, match="Query cannot be empty"):
-            client.get_content("", None, "m", 8, 0.6, 1.0, 40, False)
+            client.get_content("", None, "m", 8, 0.6, 1.0)
 
     def test_seed_forwarded_when_provided(self) -> None:
         client = _make_client()
         client.client.chat.completions.create.return_value = _fake_completion(["a"])
-        client.get_content("q", None, "m", 8, 0.6, 1.0, 40, False, seed=42)
+        client.get_content("q", None, "m", 8, 0.6, 1.0, seed=42)
         assert client.client.chat.completions.create.call_args.kwargs["seed"] == 42
+
+    def test_extra_body_is_omitted_by_default(self) -> None:
+        client = _make_client()
+        client.client.chat.completions.create.return_value = _fake_completion(["a"])
+
+        client.get_content("q", None, "m", 8, 0.6, 1.0)
+
+        assert (
+            "extra_body" not in client.client.chat.completions.create.call_args.kwargs
+        )
+
+    def test_extra_body_is_forwarded_when_configured(self) -> None:
+        client = _make_client()
+        client.extra_body = {
+            "top_k": 40,
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
+        client.client.chat.completions.create.return_value = _fake_completion(["a"])
+
+        client.get_content("q", None, "m", 8, 0.6, 1.0)
+
+        assert client.client.chat.completions.create.call_args.kwargs["extra_body"] == {
+            "top_k": 40,
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
 
 
 # ── InferenceRunner.load_data (one record per sample) ─────────────

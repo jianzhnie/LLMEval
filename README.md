@@ -267,8 +267,8 @@ Common parameters for both online and offline modes:
 | `--n_samples` | 1 | Number of samples per problem |
 | `--temperature` | 0.6 | Sampling temperature |
 | `--top_p` | 0.95 | Nucleus sampling parameter |
-| `--top_k` | 40 | Top-k sampling parameter |
-| `--max_tokens` | 32768 | Maximum tokens to generate |
+| `--max_completion_tokens` | 32768 | Maximum completion tokens to generate |
+| `--seed` | 0 | Generation seed |
 | `--exec_timeout` | 3.0 | Code execution timeout (seconds, code tasks only) |
 
 Online mode specific:
@@ -278,6 +278,10 @@ Online mode specific:
 | `--base_url` | Required | API server URL |
 | `--model_name` | Required | Model name for API |
 | `--max_workers` | 128 | Concurrent request threads |
+| `--extra_body` | `{}` | JSON object for provider-specific request extensions |
+
+See [OpenAI API parameters](docs/openai_api.md) for parameter descriptions and
+Python, cURL, structured-output, tool-calling, and streaming examples.
 
 Offline mode specific:
 
@@ -287,6 +291,10 @@ Offline mode specific:
 | `--tensor_parallel_size` | 1 | GPU count for tensor parallelism |
 | `--gpu_memory_utilization` | 0.9 | GPU memory fraction |
 | `--batch_size` | 128 | Inference batch size |
+| `--top_k` | 40 | vLLM top-k sampling parameter |
+| `--enable_thinking` | false | vLLM chat-template thinking option |
+| `--skip_special_tokens` | true | Remove special tokens from generated text |
+| `--repetition_penalty` | 1.0 | vLLM repetition penalty |
 
 ### Supported Tasks
 

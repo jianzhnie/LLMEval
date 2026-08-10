@@ -96,8 +96,7 @@ class TestResumeState:
     ) -> None:
         path = tmp_path / "out.jsonl"
         path.write_text(
-            json.dumps({"doc_id": "q1", "prompt": "p", "logprobs": [None, -0.5]})
-            + "\n"
+            json.dumps({"doc_id": "q1", "prompt": "p", "logprobs": [None, -0.5]}) + "\n"
         )
         assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
 
@@ -368,12 +367,14 @@ class TestUtilities:
             "api_key": "secret",
             "nested": {"Authorization": "Bearer secret", "value": 1},
             "cookie": "session=secret",
+            "extra_body": '{"api_key": "nested-secret", "top_k": 40}',
         }
         redacted = redact_config_for_logging(payload)
         assert redacted == {
             "api_key": "***",
             "nested": {"Authorization": "***", "value": 1},
             "cookie": "***",
+            "extra_body": {"api_key": "***", "top_k": 40},
         }
         assert payload["api_key"] == "secret"
 
