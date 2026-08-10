@@ -46,7 +46,7 @@ All CLI arguments use `HfArgumentParser` from `transformers` to parse into stron
 These are composed via multiple inheritance into mode-specific argument classes:
 - `OnlineInferArguments` → `DataArguments + PromptArguments + GenerationArguments + ServerArguments`
 - `OfflineInferArguments` → `DataArguments + PromptArguments + GenerationArguments + VLLMEngineArguments`
-- `EvalTaskArguments` — standalone args for the scoring step
+- `MathEvalArguments`, `MCEvalArguments`, `CodeEvalArguments` — task-family-specific scoring arguments
 
 ### Prompt Templates (`llmeval/utils/prompts.py`)
 
@@ -64,7 +64,7 @@ Three entry points, each a standalone script with its own `main()`:
 
 ### Evaluation/Scoring Layer (`llmeval/evaluator.py`, `llmeval/tasks/`)
 
-- **`llmeval/evaluator.py`** — Entry point for scoring. Parses `EvalTaskArguments`, validates input JSONL, strips think tags, then dispatches on the task prefix: `math_opensource/*` → `compute_scores()`, `mc_opensource/*` → `score_loglikelihood()` / `score_generate()`, `code_opensource/*` → `score_code()`. Entry: `python llmeval/evaluator.py --input_path ... --task_name math_opensource/aime24 --cache_path ...`
+- **`llmeval/evaluator.py`** — Entry point for scoring. Selects `MathEvalArguments`, `MCEvalArguments`, or `CodeEvalArguments` from the task prefix, validates input JSONL, then dispatches to the registered scorer. Entry: `python llmeval/evaluator.py --input_path ... --task_name math_opensource/aime24 --cache_path ...`
 
 - **`tasks/math_eval/math_score.py`** — Core math scoring using the `math-verify` library. Uses `ProcessPool` (pebble) for parallel answer verification with timeout support. Implements `math_metric` with both `ExprExtractionConfig` and `LatexExtractionConfig` for robust answer extraction. Tracks statistics (correct, timeout, error counts) and caches results as JSONL.
 
@@ -93,7 +93,7 @@ Three task families, dispatched on the prefix before `/`:
 - **Multiple-choice** (`mc_opensource/*`, loglikelihood or generation scoring): `mmlu`, `mmlu_pro`, `ceval`
 - **Code** (`code_opensource/*`, sandboxed pass@1): `humaneval`, `mbpp`, `humaneval_plus`, `mbpp_plus`
 
-The authoritative list is `valid_tasks` in `EvalTaskArguments.__post_init__` (`llmeval/utils/config.py`).
+Task-family dispatch and supported task names are defined in `llmeval/tasks/registry.py`.
 
 ## Key Dependencies
 
