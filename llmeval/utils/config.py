@@ -582,41 +582,6 @@ class MCInferConfig(
     classes. This class only overrides MC-specific defaults and adds MC-only
     scoring and few-shot options.
     """
-
-    # MC validates paths when MCRunner starts, allowing default construction for
-    # CLI introspection and tests.
-    input_file: str = field(
-        default="", metadata={"help": "Path to the input JSONL file (MC items)."}
-    )
-    output_file: str = field(
-        default="", metadata={"help": "Path to the output JSONL file."}
-    )
-    base_url: str = field(
-        default="http://127.0.0.1:8200/v1",
-        metadata={"help": "Base URL of the OpenAI-compatible API endpoint."},
-    )
-    model_name: str = field(
-        default="longcat-flash",
-        metadata={"help": "Served model name used in requests."},
-    )
-    max_workers: int = field(
-        default=32, metadata={"help": "Number of concurrent worker threads."}
-    )
-    request_timeout: int = field(
-        default=300, metadata={"help": "Per-request timeout in seconds."}
-    )
-    max_completion_tokens: int = field(
-        default=2048,
-        metadata={"help": "Maximum completion tokens in generate mode."},
-    )
-    temperature: float = field(
-        default=0.0, metadata={"help": "Sampling temperature (0.0 = deterministic)."}
-    )
-    api_key: str | None = field(
-        default_factory=lambda: os.environ.get("OPENAI_API_KEY", "EMPTY"),
-        metadata={"help": "API key (default: OPENAI_API_KEY env var)."},
-    )
-
     mode: str = field(
         default="loglikelihood",
         metadata={"help": "Inference mode: 'loglikelihood' or 'generate'."},
@@ -650,8 +615,7 @@ class MCInferConfig(
         """Validate shared fields and MC-specific options."""
         # Keep default construction available for CLI introspection. Once a path
         # is supplied, apply the same existence check as other inference modes.
-        if self.input_file:
-            DataArguments.__post_init__(self)
+        DataArguments.__post_init__(self)
         PromptArguments.__post_init__(self)
         GenerationArguments.__post_init__(self)
         ServerArguments.__post_init__(self)
