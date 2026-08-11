@@ -26,11 +26,12 @@ duplicate_datasets() {
     mkdir -p "${TEMP_DATASET_DIR}"
 
     for dataset in "${DATASET_FILES[@]}"; do
-        local filename=$(basename "$dataset" .jsonl)
+        local filename
+        filename=$(basename "$dataset" .jsonl)
         local extension=".jsonl"
 
         echo "📁 正在复制 ${filename} x${NUM_DUPLICATES} 份"
-        for ((i=1; i<=$NUM_DUPLICATES; i++)); do
+        for ((i=1; i<=NUM_DUPLICATES; i++)); do
             cp "${dataset}" "${TEMP_DATASET_DIR}/${filename}_duplicate_${i}${extension}"
         done
     done

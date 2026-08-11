@@ -10,12 +10,10 @@ import pytest
 from llmeval.inference.common import (
     ResumeState,
     derive_request_seed,
-    is_explicit_tool_choice,
     load_jsonl,
     load_resume_state,
     prepare_sample_requests,
     redact_config_for_logging,
-    save_failed_items,
 )
 
 
@@ -50,6 +48,12 @@ class TestLoadJsonl:
         path = tmp_path / "scalar.jsonl"
         path.write_text("[1, 2]\n")
         with pytest.raises(ValueError, match="must contain an object"):
+            load_jsonl(path)
+
+    def test_non_standard_numeric_constant_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "nan.jsonl"
+        path.write_text('{"score": NaN}\n')
+        with pytest.raises(ValueError, match="non-standard JSON"):
             load_jsonl(path)
 
 
@@ -139,8 +143,6 @@ class TestResumeState:
             ["A", "B"],  # non-numeric elements
             None,  # explicit null
             [None, None],  # no choice received a finite score
-            [float("nan")],  # non-standard/non-finite JSON number
-            [float("inf")],  # non-standard/non-finite JSON number
             [True],  # bool is an int subclass but not a valid score
         ],
     )
@@ -154,8 +156,19 @@ class TestResumeState:
         )
         assert load_resume_state(path, "prompt", "gen").completed_count == 0
 
-    def test_context_length_error_row_is_completed(self, tmp_path: Path) -> None:
-        """A permanent-failure row (empty response + error marker) is completed."""
+    @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+    def test_non_standard_resume_number_raises(
+        self, tmp_path: Path, constant: str
+    ) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            f'{{"doc_id": "q1", "prompt": "p", "logprobs": [{constant}]}}\n'
+        )
+
+        with pytest.raises(ValueError, match="non-standard JSON numeric constant"):
+            load_resume_state(path, "prompt", "gen")
+
+    def test_legacy_failure_row_remains_retryable(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
         path.write_text(
             json.dumps(
@@ -164,21 +177,6 @@ class TestResumeState:
                     "prompt": "p",
                     "gen": "",
                     "error": "context_length_exceeded",
-                }
-            )
-            + "\n"
-        )
-        assert load_resume_state(path, "prompt", "gen").completed_indices == {"q1": {0}}
-
-    def test_empty_response_error_row_remains_retryable(self, tmp_path: Path) -> None:
-        path = tmp_path / "out.jsonl"
-        path.write_text(
-            json.dumps(
-                {
-                    "doc_id": "q1",
-                    "prompt": "p",
-                    "gen": "",
-                    "error": "empty_response",
                 }
             )
             + "\n"
@@ -253,22 +251,6 @@ class TestResumeState:
         ]
         path.write_text("".join(json.dumps(row) + "\n" for row in rows))
         with pytest.raises(ValueError, match="conflicting prompts"):
-            load_resume_state(path, "prompt", "gen")
-
-    def test_internal_resume_fields_are_rejected(self, tmp_path: Path) -> None:
-        path = tmp_path / "out.jsonl"
-        path.write_text(
-            json.dumps(
-                {
-                    "doc_id": "q1",
-                    "prompt": "p",
-                    "gen": ["a"],
-                    "_llmeval_legacy": True,
-                }
-            )
-            + "\n"
-        )
-        with pytest.raises(ValueError, match="unsupported internal fields"):
             load_resume_state(path, "prompt", "gen")
 
 
@@ -398,38 +380,3 @@ class TestUtilities:
             "extra_body": {"api_key": "***", "top_k": 40},
         }
         assert payload["api_key"] == "secret"
-
-    def test_tool_choice_detection(self) -> None:
-        assert not is_explicit_tool_choice(None)
-        assert is_explicit_tool_choice("auto")
-
-
-class TestSaveFailedItems:
-    def test_appends_without_losing_previous_failures(self, tmp_path: Path) -> None:
-        output = tmp_path / "output.jsonl"
-        save_failed_items(output, [{"doc_id": "q1", "error": "first"}])
-        save_failed_items(output, [{"doc_id": "q2", "error": "second"}])
-
-        failed = tmp_path / "output_failed.jsonl"
-        records = [json.loads(line) for line in failed.read_text().splitlines()]
-        assert [record["doc_id"] for record in records] == ["q1", "q2"]
-        assert all(record["run_id"] and record["failure_id"] for record in records)
-
-    def test_repeated_failures_remain_append_only(self, tmp_path: Path) -> None:
-        output = tmp_path / "output.jsonl"
-        entry = {"doc_id": "q1", "error": "transient"}
-        save_failed_items(output, [entry], run_id="run-1")
-        save_failed_items(output, [entry], run_id="run-2")
-
-        records = [
-            json.loads(line)
-            for line in (tmp_path / "output_failed.jsonl").read_text().splitlines()
-        ]
-        assert [record["run_id"] for record in records] == ["run-1", "run-2"]
-        assert records[0]["failure_id"] == records[1]["failure_id"]
-
-    def test_write_failure_propagates(self, tmp_path: Path) -> None:
-        output = tmp_path / "directory.jsonl"
-        (tmp_path / "directory_failed.jsonl").mkdir()
-        with pytest.raises(OSError):
-            save_failed_items(output, [{"error": "boom"}])

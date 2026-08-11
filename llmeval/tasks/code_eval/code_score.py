@@ -375,7 +375,6 @@ def _process_code_item_impl(
 
     code, filter_trace = CODE_GENERATION_PIPELINE.apply_with_trace(gen_str)
     filter_artifacts = {
-        "raw_gen": gen_str,
         "filtered_gen": code,
         "filter_trace": filter_trace,
     }

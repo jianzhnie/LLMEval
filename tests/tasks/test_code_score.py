@@ -64,8 +64,8 @@ def test_code_failure_record_contains_filter_trace() -> None:
         )
     )
 
-    assert record["raw_gen"] == ""
     assert record["filtered_gen"] == ""
+    assert "raw_gen" not in record
     assert record["filter_trace"]["pipeline"] == "code_generation"
 
 

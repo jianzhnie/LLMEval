@@ -1,5 +1,6 @@
 """Static regressions for the distributed inference shell runner."""
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -15,9 +16,13 @@ def test_script_has_valid_bash_syntax() -> None:
     subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
 
 
-def test_remote_process_checks_do_not_match_their_wrapper() -> None:
+def test_remote_tasks_publish_and_check_exit_statuses() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
-    assert "[p]ython" in source
+    assert "task_status_${RUN_ID}_${node_tag}_${instance_idx}" in source
+    assert "${task_index}.status" in source
+    assert "awk '\\$1 != 0" in source
+    assert "if cd '${PROJECT_DIR}'" in source
+    assert "rc=\\$?" in source
     assert "pgrep -f '${INFER_SCRIPT}'" not in source
 
 
@@ -26,6 +31,7 @@ def test_remote_setup_and_cleanup_are_failure_safe() -> None:
     assert 'ssh-keyscan -H "$node"' not in source
     assert 'search_pattern=$(build_vllm_kill_pattern "$port")' in source
     assert "trap - EXIT TERM INT" in source
+    assert "2>/dev/null || true)" in source
 
 
 def test_zero_match_counts_do_not_trip_errexit() -> None:
@@ -48,5 +54,20 @@ def test_task_timeout_and_missing_inputs_fail_the_run() -> None:
 
 def test_failed_monitor_terminates_remaining_monitors() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
+    assert 'ps -p "$pid" -o stat=' in source
     assert 'kill "$remaining"' in source
     assert 'wait "$remaining"' in source
+
+
+def test_wait_for_pids_handles_success_and_failure() -> None:
+    command = f"""
+        source {shlex.quote(str(SCRIPT))}
+        (sleep 10) & long_pid=$!
+        (exit 7) & failed_pid=$!
+        if wait_for_pids "$long_pid" "$failed_pid"; then exit 1; fi
+        if kill -0 "$long_pid" 2>/dev/null; then exit 2; fi
+        (sleep 0.1) & first_pid=$!
+        (sleep 0.2) & second_pid=$!
+        wait_for_pids "$first_pid" "$second_pid"
+    """
+    subprocess.run(["bash", "-c", command], check=True, timeout=5)

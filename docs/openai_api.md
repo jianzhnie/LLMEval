@@ -306,8 +306,8 @@ Responses API 没有直接提供 Chat Completions 的 `n`、`seed`、`stop`、
 LLMEval 的 online 模式通过 `--extra_body` 显式发送这些扩展。不要将它们发送给
 不支持对应字段的官方 OpenAI 模型。
 
-LLMEval CLI 的 `--tool_choice` 支持 `none`、`auto` 和 `required`。标准 API 中指定
-具体函数需要传入结构化对象，不应直接把函数名作为 `--tool_choice` 的字符串值。
+LLMEval 当前不提供工具定义配置，因此不会发送 `tools` 或 `tool_choice`。需要工具调用
+时，应直接使用 OpenAI SDK 并同时提供完整的工具定义。
 
 ```bash
 python -m llmeval.inference.online \

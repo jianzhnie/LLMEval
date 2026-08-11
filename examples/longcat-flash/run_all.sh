@@ -24,7 +24,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+readonly PROJECT_ROOT
 
 cd "$PROJECT_ROOT"
 
@@ -44,7 +45,6 @@ export N_SAMPLES="${N_SAMPLES:-32}"
 export MAX_WORKERS="${MAX_WORKERS:-32}"
 export TEMPERATURE="${TEMPERATURE:-0.6}"
 export SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-empty}"
-export TOOL_CHOICE="${TOOL_CHOICE:-none}"
 export BASE_URL="${BASE_URL:-http://127.0.0.1:8200/v1}"
 export MODEL_NAME="${MODEL_NAME:-longcat-flash}"
 export INPUT_DIR="${INPUT_DIR:-./output/${MODEL_NAME}}"
@@ -68,18 +68,18 @@ if [[ "$STAGE" == "all" || "$STAGE" == "prepare" ]]; then
     echo "----------------------------------------"
 
     # 展开预设组获取实际 benchmark 列表
-    MISSING=""
+    MISSING=()
     for task in $BENCHMARKS; do
         case "$task" in gsm8k|math500|hmmt25|gpqa_diamond|aime24|aime25|aime26) ;; *) continue ;; esac
         if [[ ! -f "./data/${task}.jsonl" ]]; then
-            MISSING="$MISSING $task"
+            MISSING+=("$task")
         fi
     done
 
-    if [[ -n "$MISSING" ]]; then
-        echo "[INFO] 缺少数据文件:$MISSING — 自动下载..."
+    if [[ ${#MISSING[@]} -gt 0 ]]; then
+        echo "[INFO] 缺少数据文件: ${MISSING[*]} — 自动下载..."
         python scripts/data_process/prepare_math_benchmarks.py \
-            --benchmarks $MISSING \
+            --benchmarks "${MISSING[@]}" \
             --output_dir ./data
     else
         echo "[INFO] 数据文件已就绪, 跳过下载"

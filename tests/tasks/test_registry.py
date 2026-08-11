@@ -55,6 +55,16 @@ def test_bootstrap_is_deterministic() -> None:
     )
 
 
+@pytest.mark.parametrize("n_resamples", [0, 1])
+def test_disabled_bootstrap_omits_uncertainty(n_resamples: int) -> None:
+    metric = metric_from_samples([0.0, 1.0], 7, n_resamples=n_resamples)
+
+    assert metric.value == 0.5
+    assert metric.stderr is None
+    assert metric.ci_low is None
+    assert metric.ci_high is None
+
+
 def test_registry_reports_registered_families() -> None:
     task = MathTask(
         lambda **_: ScorerResult(

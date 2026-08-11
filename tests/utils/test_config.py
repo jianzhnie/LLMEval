@@ -214,13 +214,6 @@ class TestServerArguments:
         with pytest.raises(ValueError, match="positive"):
             ServerArguments(max_workers=0)
 
-    def test_tool_choice_is_normalized(self) -> None:
-        assert ServerArguments(tool_choice=" AUTO ").tool_choice == "auto"
-
-    def test_invalid_tool_choice_raises(self) -> None:
-        with pytest.raises(ValueError, match="tool_choice"):
-            ServerArguments(tool_choice="function_name")
-
     def test_extra_body_defaults_to_empty_object(self) -> None:
         args = ServerArguments()
         assert args.extra_body_dict == {}
@@ -259,10 +252,6 @@ class TestMCInferArguments:
         assert args.top_p == 0.95
         assert args.extra_body_dict == {}
         assert not hasattr(args, "max_tokens")
-
-    def test_invalid_tool_choice_raises(self) -> None:
-        with pytest.raises(ValueError, match="tool_choice"):
-            MCInferArguments(tool_choice="function_name")
 
     def test_api_key_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-mc-test")

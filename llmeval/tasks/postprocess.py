@@ -90,10 +90,10 @@ class TextFilterPipeline:
     filters: tuple[RegisteredTextFilter, ...]
 
     def apply_with_trace(self, value: Any) -> tuple[str, dict[str, Any]]:
-        """Apply all filters and return a JSON-compatible step trace."""
+        """Apply filters and return compact, JSON-compatible metadata."""
         raw_text = _coerce_text(value)
         text = raw_text
-        steps: list[dict[str, str]] = []
+        steps: list[dict[str, str | int | bool]] = []
         for filter_fn in self.filters:
             input_text = text
             text = _coerce_text(filter_fn(text))
@@ -101,16 +101,17 @@ class TextFilterPipeline:
                 {
                     "name": filter_fn.name,
                     "version": filter_fn.version,
-                    "input": input_text,
-                    "output": text,
+                    "changed": input_text != text,
+                    "input_length": len(input_text),
+                    "output_length": len(text),
                 }
             )
         return text, {
             "pipeline": self.name,
             "pipeline_version": self.version,
             "filters": steps,
-            "raw": raw_text,
-            "output": text,
+            "input_length": len(raw_text),
+            "output_length": len(text),
         }
 
 
@@ -292,7 +293,7 @@ def atomic_write_json(
     path: str | Path, value: Any, *, indent: int | None = None
 ) -> None:
     """Serialize JSON and persist it atomically."""
-    content = json.dumps(value, ensure_ascii=False, indent=indent)
+    content = json.dumps(value, ensure_ascii=False, indent=indent, allow_nan=False)
     if indent is not None:
         content += "\n"
     with _atomic_text_writer(path) as handle:
@@ -303,4 +304,4 @@ def atomic_write_jsonl(path: str | Path, records: Iterable[dict[str, Any]]) -> N
     """Stream objects to an atomically replaced JSONL file."""
     with _atomic_text_writer(path) as handle:
         for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")

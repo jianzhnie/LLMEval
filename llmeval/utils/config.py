@@ -92,17 +92,6 @@ def _validate_field_names(**field_names: str) -> None:
             raise ValueError(f"{name} must be a non-empty string")
 
 
-def _normalize_tool_choice(value: str) -> str:
-    """Validate the string forms accepted by the OpenAI API."""
-    if not isinstance(value, str) or value.strip().lower() not in {
-        "none",
-        "auto",
-        "required",
-    }:
-        raise ValueError("tool_choice must be one of: none, auto, required")
-    return value.strip().lower()
-
-
 @dataclass
 class PromptArguments:
     """
@@ -468,10 +457,6 @@ class ServerArguments:
     organization: str | None = field(
         default=None, metadata={"help": "Organization ID for API usage."}
     )
-    tool_choice: str = field(
-        default="none",
-        metadata={"help": "Tool choice mode: none, auto, or required."},
-    )
     extra_body: str = field(
         default="{}",
         metadata={"help": "JSON object of non-standard provider request fields."},
@@ -512,7 +497,6 @@ class ServerArguments:
         if not isinstance(parsed_extra_body, dict):
             raise ValueError("extra_body must be a JSON object")
         self.extra_body_dict = parsed_extra_body
-        self.tool_choice = _normalize_tool_choice(self.tool_choice)
 
         # Check for API key from environment if not provided
         if self.api_key is None and "OPENAI_API_KEY" in os.environ:
@@ -565,7 +549,7 @@ class OfflineInferArguments(
         metadata={
             "help": (
                 "Stop on the first failed inference batch. Set to false to "
-                "record failed batches and continue."
+                "skip failed samples and continue processing."
             )
         },
     )
@@ -647,8 +631,6 @@ class MCInferArguments(
             )
         if self.mode == "loglikelihood" and self.n_samples != 1:
             raise ValueError("loglikelihood mode requires n_samples=1")
-        if self.mode == "loglikelihood" and self.tool_choice != "none":
-            raise ValueError("loglikelihood mode does not support tool_choice")
         if (
             self.mode == "loglikelihood"
             and self.loglikelihood_mode == "continuation"
@@ -693,7 +675,7 @@ class ShareEvalArguments:
     )
     bootstrap_samples: int = field(
         default=1000,
-        metadata={"help": "Number of bootstrap resamples."},
+        metadata={"help": "Bootstrap resamples; 0 or 1 disables uncertainty."},
     )
     confidence_level: float = field(
         default=0.95, metadata={"help": "Bootstrap confidence level."}

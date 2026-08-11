@@ -16,7 +16,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+readonly PROJECT_ROOT
 cd "$PROJECT_ROOT"
 
 # =============================================================================
@@ -33,7 +34,6 @@ MAX_RETRIES="${MAX_RETRIES:-3}"
 MAX_COMPLETION_TOKENS="${MAX_COMPLETION_TOKENS:-2048}"
 TEMPERATURE="${TEMPERATURE:-0.0}"
 SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-empty}"
-TOOL_CHOICE="${TOOL_CHOICE:-none}"
 N_SHOT="${N_SHOT:-0}"                    # 0=zero-shot, 5=five-shot
 FEW_SHOT_FILE="${FEW_SHOT_FILE:-}"        # dev file for few-shot
 OUTPUT_DIR="${OUTPUT_DIR:-./output/${MODEL_NAME}}"
@@ -104,7 +104,6 @@ for task in $BENCHMARKS; do
                 --max_completion_tokens "$MAX_COMPLETION_TOKENS" \
                 --temperature "$TEMPERATURE" \
                 --system_prompt_type "$SYSTEM_PROMPT_TYPE" \
-                --tool_choice "$TOOL_CHOICE" \
                 --n_shot "$N_SHOT" \
                 --few_shot_file "$FEW_SHOT_FILE" 2>&1
         } >> "$log_file" &
@@ -123,7 +122,6 @@ for task in $BENCHMARKS; do
             --max_completion_tokens "$MAX_COMPLETION_TOKENS" \
             --temperature "$TEMPERATURE" \
             --system_prompt_type "$SYSTEM_PROMPT_TYPE" \
-            --tool_choice "$TOOL_CHOICE" \
             --n_shot "$N_SHOT" \
             --few_shot_file "$FEW_SHOT_FILE"
         rc=$?

@@ -8,7 +8,6 @@ import json
 import sys
 import threading
 import types
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -82,7 +81,8 @@ def _runner(tmp_path: Path, **overrides: object) -> OfflineInferenceRunner:
     runner = OfflineInferenceRunner.__new__(OfflineInferenceRunner)
     runner.args = _args(tmp_path, **overrides)
     runner._file_lock = threading.Lock()
-    runner._run_id = uuid.uuid4().hex
+    runner._processed_count = 0
+    runner._failed_count = 0
     runner.llm = None
     runner.system_prompt = None
     return runner
@@ -181,7 +181,8 @@ class TestOfflineInferenceRunner:
         runner = _runner(tmp_path)
 
         runner._write_response_results(
-            [{"prompt": "q", "answer": "a"}], ["answer text"]
+            [{"prompt": "q", "answer": "a", "error": "legacy failure"}],
+            ["answer text"],
         )
 
         rows = [
@@ -218,7 +219,9 @@ class TestOfflineInferenceRunner:
         with pytest.raises(RuntimeError, match="bad batch"):
             runner._process_batches([{"doc_id": "d1"}])
 
-    def test_process_batches_can_record_and_continue(self, tmp_path: Path) -> None:
+    def test_process_batches_can_skip_failures_and_continue(
+        self, tmp_path: Path
+    ) -> None:
         runner = _runner(tmp_path, batch_size=1, fail_fast=False)
         runner.process_and_write_batch = MagicMock(
             side_effect=[RuntimeError("bad batch"), None]
@@ -232,11 +235,8 @@ class TestOfflineInferenceRunner:
         )
 
         assert runner.process_and_write_batch.call_count == 2
-        failed_path = tmp_path / "output_failed.jsonl"
-        failure = json.loads(failed_path.read_text().strip())
-        assert failure["error_category"] == "batch_processing"
-        assert failure["batch_index"] == 0
-        assert failure["items"] == [{"doc_id": "d1"}]
+        assert runner._failed_count == 1
+        assert not (tmp_path / "output_failed.jsonl").exists()
 
     def test_non_fail_fast_isolates_one_bad_inference_sample(
         self, tmp_path: Path
@@ -266,6 +266,6 @@ class TestOfflineInferenceRunner:
         output = json.loads(Path(runner.args.output_file).read_text().strip())
         assert output["doc_id"] == "good"
         assert output["gen"] == "ok"
-        failure = json.loads((tmp_path / "output_failed.jsonl").read_text().strip())
-        assert failure["item"] == {"doc_id": "bad", "sample_index": 0}
-        assert failure["error_category"] == "inference"
+        assert runner._processed_count == 1
+        assert runner._failed_count == 1
+        assert not (tmp_path / "output_failed.jsonl").exists()

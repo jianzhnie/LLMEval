@@ -25,18 +25,15 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
-    CONTEXT_LENGTH_ERROR,
     append_jsonl,
     build_chat_messages,
     derive_request_seed,
     ensure_raw_prompt,
-    is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
     load_resume_state,
     prepare_sample_requests,
     redact_config_for_logging,
-    save_failed_items,
 )
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
@@ -64,7 +61,6 @@ class InferenceClient:
         base_url: str,
         timeout: int,
         max_retries: int = 3,
-        tool_choice: str = "none",
         api_key: str | None = None,
         seed: int = 0,
         organization: str | None = None,
@@ -81,7 +77,6 @@ class InferenceClient:
             base_url: Base URL for the OpenAI-compatible API endpoint
             timeout: Request timeout in seconds
             max_retries: Maximum number of retries for failed requests
-            tool_choice: Tool calling mode: none, auto, or required.
             api_key: API key; falls back to the OPENAI_API_KEY env var and then EMPTY.
             seed: Default request seed when no per-sample seed is provided.
             organization: Optional OpenAI organization ID.
@@ -90,7 +85,6 @@ class InferenceClient:
         self.base_url: str = base_url  # Store for potential reconnection
         self.timeout: int = timeout
         self.max_retries: int = max_retries
-        self.tool_choice: str = tool_choice
         self.seed = seed
         self.extra_body = dict(extra_body or {})
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
@@ -193,9 +187,6 @@ class InferenceClient:
         }
         if self.extra_body:
             call_args["extra_body"] = dict(self.extra_body)
-        # tool_choice: only send when explicitly configured (vLLM 0.23+ supports it)
-        if is_explicit_tool_choice(self.tool_choice):
-            call_args["tool_choice"] = self.tool_choice
         return call_args
 
     def _request_with_retry(self, call_args: dict[str, Any]) -> Any | None:
@@ -249,7 +240,6 @@ class InferenceRunner:
                 base_url=args.base_url,
                 timeout=args.request_timeout,
                 max_retries=args.max_retries,
-                tool_choice=args.tool_choice,
                 api_key=args.api_key,
                 seed=args.seed,
                 organization=args.organization,
@@ -263,7 +253,7 @@ class InferenceRunner:
 
         # Initialize thread safety and monitoring
         self._file_lock: threading.Lock = threading.Lock()
-        self._stats: dict[str, int] = {"processed": 0, "failed": 0, "skipped": 0}
+        self._stats: dict[str, int] = {"processed": 0, "failed": 0}
         self._stats_lock: threading.Lock = threading.Lock()  # Dedicated lock for stats
 
     def load_data(self) -> list[dict[str, Any]]:
@@ -308,33 +298,26 @@ class InferenceRunner:
         """Append one result under the runner's write lock."""
         append_jsonl(self.args.output_file, [result], self._file_lock)
 
-    def _extract_query(self, item: Any) -> str | None:
-        """Return a usable query, updating stats for malformed input."""
+    def _extract_query(self, item: Any) -> str:
+        """Return a usable query or reject the sample."""
         if not isinstance(item, dict):
-            logger.error(f"Invalid item type: {type(item)}, expected dict")
-            with self._stats_lock:
-                self._stats["failed"] += 1
-            return None
+            raise ValueError(f"Invalid item type: {type(item)}, expected dict")
 
         query = item.get(self.args.input_key) or item.get("prompt")
         if not isinstance(query, str) or not query.strip():
-            logger.warning("Query must be a non-empty string")
-            with self._stats_lock:
-                self._stats["skipped"] += 1
-            return None
+            raise ValueError("Query must be a non-empty string")
         return query
 
     def _build_result(self, item: dict[str, Any], response: str) -> dict[str, Any]:
         """Build one successful output row."""
         result = item.copy()
+        result.pop("error", None)
         result[self.args.response_key] = response
         return result
 
-    def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
+    def process_item(self, item: dict[str, Any]) -> dict[str, Any]:
         """Generate, persist, and account for one expanded request."""
         query = self._extract_query(item)
-        if not query:
-            return None
 
         sample_index = item.get("sample_index")
         response = self.client.get_content(
@@ -352,18 +335,8 @@ class InferenceRunner:
             ),
         )
 
-        if response is None:
-            # Context-length rejection can never succeed on retry: persist a
-            # permanent-failure row so resume treats the sample as completed.
-            result = item.copy()
-            result[self.args.response_key] = ""
-            result["error"] = CONTEXT_LENGTH_ERROR
-            self._write_result(result)
-            with self._stats_lock:
-                self._stats["failed"] += 1
-            return result
-        if not response.strip():
-            raise RuntimeError("Inference returned empty content after retries")
+        if response is None or not response.strip():
+            raise RuntimeError("Inference produced no usable response")
 
         result = self._build_result(item, response)
         self._write_result(result)
@@ -373,56 +346,27 @@ class InferenceRunner:
         return result
 
     def _process_concurrently(self, expanded_data: list[dict[str, Any]]) -> None:
-        """Process one independent request per expanded sample."""
-        failed_tasks: list[dict[str, Any]] = []
+        """Process requests, persisting only successful results."""
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.args.max_workers, thread_name_prefix="inference_worker"
         ) as executor:
-            futures = {
-                executor.submit(self.process_item, item): item for item in expanded_data
-            }
+            futures = [
+                executor.submit(self.process_item, item) for item in expanded_data
+            ]
 
             with tqdm(
                 total=len(expanded_data), desc="Processing samples", unit="sample"
             ) as pbar:
                 for future in concurrent.futures.as_completed(futures):
-                    item = futures[future]
                     try:
-                        result = future.result()
-                        if result is None:
-                            failed_tasks.append(
-                                {
-                                    "doc_id": item.get("doc_id"),
-                                    "sample_index": item.get("sample_index"),
-                                    "error_category": "sample_processing",
-                                    "error": "sample was skipped or returned an empty response",
-                                }
-                            )
+                        future.result()
                     except Exception as e:
                         logger.warning("Inference sample failed: %s", e)
                         with self._stats_lock:
                             self._stats["failed"] += 1
-                        prompt_val = item.get(self.args.input_key) or item.get("prompt")
-                        failed_tasks.append(
-                            {
-                                "doc_id": item.get("doc_id"),
-                                "sample_index": item.get("sample_index"),
-                                self.args.input_key: (
-                                    str(prompt_val)[:200]
-                                    if prompt_val is not None
-                                    else None
-                                ),
-                                "error": str(e),
-                                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                            }
-                        )
                     finally:
                         pbar.update(1)
-
-        if failed_tasks:
-            logger.warning(f"Total failed tasks: {len(failed_tasks)}")
-            save_failed_items(self.args.output_file, failed_tasks)
 
     def run(self) -> None:
         """Load, resume, execute, and report online inference."""
@@ -456,10 +400,14 @@ class InferenceRunner:
         logger.info(f"Samples to process this run: {total_samples}")
         logger.info(f"Successfully processed: {self._stats['processed']}")
         logger.info(f"Failed: {self._stats['failed']}")
-        logger.info(f"Skipped: {self._stats['skipped']}")
         logger.info(f"Success rate: {success_rate:.2f}%")
         logger.info(f"Total duration: {duration:.2f} seconds")
         logger.info(f"Output file: {self.args.output_file}")
+        if self._stats["failed"]:
+            raise RuntimeError(
+                f"Inference failed for {self._stats['failed']} sample(s); "
+                "successful results were preserved for resume"
+            )
         logger.info("✅ Inference pipeline completed successfully\n")
 
 

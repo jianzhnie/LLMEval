@@ -104,7 +104,7 @@ def _make_runner(tmp_path: Path, **overrides: Any) -> InferenceRunner:
     runner.system_prompt = None
     runner._file_lock = threading.Lock()
     runner._stats_lock = threading.Lock()
-    runner._stats = {"processed": 0, "failed": 0, "skipped": 0}
+    runner._stats = {"processed": 0, "failed": 0}
     return runner
 
 
@@ -146,17 +146,15 @@ class TestWriteResult:
 
 
 class TestProcessItem:
-    def test_missing_query_returns_none(self, tmp_path: Path) -> None:
+    def test_missing_query_raises(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path)
-        result = runner.process_item({"answer": "a"})
-        assert result is None
-        assert runner._stats["skipped"] == 1
+        with pytest.raises(ValueError, match="non-empty string"):
+            runner.process_item({"answer": "a"})
 
-    def test_non_dict_item_returns_none(self, tmp_path: Path) -> None:
+    def test_non_dict_item_raises(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path)
-        result = runner.process_item("not a dict")
-        assert result is None
-        assert runner._stats["failed"] == 1
+        with pytest.raises(ValueError, match="Invalid item type"):
+            runner.process_item("not a dict")
 
     def test_process_item_replaces_prior_gen_value(self, tmp_path: Path) -> None:
         """Verify process_item doesn't mutate the input item."""
@@ -171,6 +169,7 @@ class TestProcessItem:
             "prompt": "q",
             "answer": "a",
             "gen": ["existing"],
+            "error": "legacy failure",
             "sample_index": 0,
         }
         original_gen = item["gen"].copy()
@@ -181,11 +180,9 @@ class TestProcessItem:
         # One row per sample: the fresh response replaces the prior gen.
         assert result is not None
         assert result["gen"] == "test response"
+        assert "error" not in result
 
-    def test_process_item_writes_permanent_failure_on_context_length(
-        self, tmp_path: Path
-    ) -> None:
-        """Context-length rejection persists a marked row instead of failing."""
+    def test_process_item_does_not_save_failed_response(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path)
         Path(runner.args.input_file).write_text(
             json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "a"}) + "\n"
@@ -200,19 +197,11 @@ class TestProcessItem:
             "answer": "a",
             "sample_index": 0,
         }
-        result = runner.process_item(item)
+        with pytest.raises(RuntimeError, match="no usable response"):
+            runner.process_item(item)
 
-        assert result is not None
-        assert result["gen"] == ""
-        assert result["error"] == "context_length_exceeded"
-        assert runner._stats["failed"] == 1
-        # The row is persisted, so resume treats the sample as completed.
-        rows = [
-            json.loads(line)
-            for line in Path(runner.args.output_file).read_text().splitlines()
-        ]
-        assert rows[0]["error"] == "context_length_exceeded"
-        assert runner.load_data() == []
+        assert not Path(runner.args.output_file).exists()
+        assert len(runner.load_data()) == 1
 
     def test_process_item_keeps_exhausted_empty_response_retryable(
         self, tmp_path: Path
@@ -224,7 +213,7 @@ class TestProcessItem:
         runner.client = MagicMock()
         runner.client.get_content.return_value = ""
 
-        with pytest.raises(RuntimeError, match="empty content"):
+        with pytest.raises(RuntimeError, match="no usable response"):
             runner.process_item(
                 {
                     "doc_id": "test:0",
@@ -258,7 +247,6 @@ def _make_client(max_retries: int = 0):
     client = InferenceClient.__new__(InferenceClient)
     client.timeout = 5
     client.max_retries = max_retries
-    client.tool_choice = "none"
     client.base_url = "http://example.test/v1"
     client.seed = 0
     client.extra_body = {}
@@ -392,28 +380,6 @@ class TestGetContent:
         with pytest.raises(ClientError):
             client.get_content("q", None, "m", 8, 0.0, 1.0)
         assert client.client.chat.completions.create.call_count == 2
-
-    def test_tool_choice_none_is_omitted(self) -> None:
-        client = _make_client()
-        client.client.chat.completions.create.return_value = _fake_completion(["a"])
-
-        client.get_content("q", None, "m", 8, 0.0, 1.0)
-
-        assert (
-            "tool_choice" not in client.client.chat.completions.create.call_args.kwargs
-        )
-
-    def test_tool_choice_auto_is_sent(self) -> None:
-        client = _make_client()
-        client.tool_choice = "auto"
-        client.client.chat.completions.create.return_value = _fake_completion(["a"])
-
-        client.get_content("q", None, "m", 8, 0.0, 1.0)
-
-        assert (
-            client.client.chat.completions.create.call_args.kwargs["tool_choice"]
-            == "auto"
-        )
 
 
 class TestInferenceClientInit:
@@ -571,9 +537,6 @@ class TestLoadData:
         loaded = runner.load_data()
 
         assert len(loaded) == 2
-        assert all(
-            not any(key.startswith("_llmeval_") for key in item) for item in loaded
-        )
 
 
 # ── InferenceRunner._process_concurrently ─────────────────────────
@@ -623,7 +586,7 @@ class TestConcurrentProcessing:
         total = sum(runner._stats.values())
         assert total == 2  # run survives; each item accounted for
 
-    def test_failed_tasks_file_records_prompt(self, tmp_path: Path) -> None:
+    def test_failed_tasks_are_counted_but_not_saved(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path, n_samples=2)
         runner.client = MagicMock()
         runner.client.get_content.side_effect = RuntimeError("server down")
@@ -636,8 +599,6 @@ class TestConcurrentProcessing:
         )
 
         failed_file = tmp_path / "output_failed.jsonl"
-        assert failed_file.exists()
-        record = json.loads(failed_file.read_text().strip().split("\n")[0])
-        assert record["sample_index"] == 0
-        assert record["prompt"] == "qq"
-        assert "server down" in record["error"]
+        assert not failed_file.exists()
+        assert not Path(runner.args.output_file).exists()
+        assert runner._stats == {"processed": 0, "failed": 2}

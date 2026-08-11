@@ -36,18 +36,15 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
-    CONTEXT_LENGTH_ERROR,
     append_jsonl,
     build_chat_messages,
     derive_request_seed,
     ensure_raw_prompt,
-    is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
     load_resume_state,
     prepare_sample_requests,
     redact_config_for_logging,
-    save_failed_items,
 )
 from llmeval.utils.config import MCInferArguments
 from llmeval.utils.log import init_logger
@@ -469,7 +466,7 @@ class MCRunner:
 
     Mirrors InferenceRunner in online.py: same pipeline stages
     (load → resume filter → concurrent processing → report), the same
-    thread-safety primitives, and the same failed-item persistence.
+    thread-safety primitives, and success-only result persistence.
     """
 
     def __init__(self, config: MCInferArguments) -> None:
@@ -519,7 +516,6 @@ class MCRunner:
             "processed": 0,
             "failed": 0,
             "correct": 0,
-            "skipped": 0,
         }
         self._stats_lock: threading.Lock = threading.Lock()
 
@@ -601,52 +597,41 @@ class MCRunner:
     ) -> None:
         """Process items concurrently using a thread pool with progress tracking.
 
-        Mirrors InferenceRunner._process_concurrently: writes successful
-        results, updates stats, and saves failed items for debugging.
+        Writes successful results and counts unsuccessful requests.
 
         Args:
             remaining: Data items to process
             worker: Per-item callable (process_loglikelihood_item or a
                 process_generate_item binding); returns a result dict,
-                None for a skipped item, or raises on failure
+                or raises on failure
         """
-        failed_items: list[dict[str, Any]] = []
-
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.config.max_workers, thread_name_prefix="mc_worker"
         ) as executor:
-            futures = {executor.submit(worker, item): item for item in remaining}
+            futures = [executor.submit(worker, item) for item in remaining]
 
             with tqdm(
                 total=len(remaining), desc="Processing samples", unit="sample"
             ) as pbar:
                 for future in concurrent.futures.as_completed(futures):
-                    item = futures[future]
                     try:
                         result = future.result()
                     except Exception as e:
                         logger.warning(f"Item failed: {e}")
                         with self._stats_lock:
                             self._stats["failed"] += 1
-                        failed_items.append({"item": item, "error": str(e)})
                     else:
-                        if result is None:
+                        if result.get("error"):
+                            logger.warning("Inference item returned no usable result")
                             with self._stats_lock:
-                                self._stats["skipped"] += 1
+                                self._stats["failed"] += 1
                         else:
                             self._write_result(result)
                             with self._stats_lock:
-                                if result.get("error") == CONTEXT_LENGTH_ERROR:
-                                    self._stats["failed"] += 1
-                                else:
-                                    self._stats["processed"] += 1
-                                    if result.get("correct"):
-                                        self._stats["correct"] += 1
+                                self._stats["processed"] += 1
+                                if result.get("correct"):
+                                    self._stats["correct"] += 1
                     pbar.update(1)
-
-        if failed_items:
-            logger.warning(f"Total failed tasks: {len(failed_items)}")
-            save_failed_items(self.config.output_file, failed_items)
 
     def _write_result(self, result: dict[str, Any]) -> None:
         """Append one result under the runner's write lock."""
@@ -667,7 +652,7 @@ class MCRunner:
         self._process_concurrently(remaining, self.process_loglikelihood_item)
         self.log_stats()
 
-    def process_loglikelihood_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
+    def process_loglikelihood_item(self, item: dict[str, Any]) -> dict[str, Any]:
         """Process a single MC item via loglikelihood comparison.
 
         Args:
@@ -675,24 +660,20 @@ class MCRunner:
 
         Returns:
             Result dict with choices, per-choice logprobs, prediction, and
-            correctness; None when the item has no choices (counted as skipped).
-            A context-length rejection returns a permanent-failure row
-            (empty logprobs, "error" marker) that is excluded as an inference
-            failure and treated as completed by resume.
+            correctness.
 
         Raises:
             RuntimeError: When every choice scored -inf, i.e. the batched
                 request failed. Such an item must NOT be scored — argmax
                 would silently degrade to always picking choice 0. Raising
-                lets the driver count it failed, dump it to *_failed.jsonl,
-                and retry it on the next resume run.
+                lets the driver count it as failed and retry it on resume.
         """
         prompt = self.build_prompt(item)
         choices = item.get("choices")
         gold = item.get("gold")
 
         if choices == [] or choices is None:
-            return None
+            raise ValueError("choices must be a non-empty list")
         if not isinstance(choices, list) or any(
             not isinstance(choice, str) or not choice.strip() for choice in choices
         ):
@@ -707,21 +688,6 @@ class MCRunner:
         choice_tokens = self._choice_tokens(item, len(choices))
         scoring_mode = self.config.loglikelihood_mode
 
-        def context_length_result() -> dict[str, Any]:
-            return {
-                self.config.input_key: prompt,
-                "doc_id": item["doc_id"],
-                "sample_index": item.get("sample_index", 0),
-                "choices": choices,
-                "choice_tokens": choice_tokens,
-                "gold": gold,
-                "logprobs": [],
-                "scoring_mode": scoring_mode,
-                "pred": -1,
-                "correct": False,
-                "error": CONTEXT_LENGTH_ERROR,
-            }
-
         if scoring_mode == "first_token":
             logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)
         elif scoring_mode == "continuation":
@@ -729,7 +695,7 @@ class MCRunner:
         else:
             raise RuntimeError(f"Unsupported loglikelihood mode: {scoring_mode!r}")
         if logprobs is None:
-            return context_length_result()
+            raise RuntimeError("Logprob inference produced no result")
         if all(lp == float("-inf") for lp in logprobs):
             raise RuntimeError("Logprob request failed for all choices")
 
@@ -834,19 +800,12 @@ class MCRunner:
             Result dict with the generated text as a string under the
             configured response key. The 'correct' key is intentionally
             absent — generate mode extracts answers at scoring time; only
-            loglikelihood mode computes correctness inline. A context-length
-            rejection returns a permanent-failure row (empty gen plus an
-            "error" marker) that is excluded as an inference failure and
-            treated as completed by resume.
+            loglikelihood mode computes correctness inline.
 
         Raises:
             RuntimeError: When generation produced no usable text (retries
                 exhausted, non-retryable 4xx, or null/empty content). An
-                empty gen from such a transient failure must NOT be written:
-                it would be scored as a wrong answer AND mark the prompt as
-                completed so resume never retries it. Raising keeps it
-                consistent with the loglikelihood mode's all-"-inf" guard
-                (failed, dumped, retried on next run).
+                empty generation is not persisted and remains retryable.
         """
         prompt = self.build_prompt(item)
         gold = item.get(self.config.label_key, "")
@@ -868,9 +827,6 @@ class MCRunner:
         }
         if self.config.extra_body_dict:
             call_args["extra_body"] = dict(self.config.extra_body_dict)
-        # tool_choice: only send when explicitly configured
-        if is_explicit_tool_choice(self.config.tool_choice):
-            call_args["tool_choice"] = self.config.tool_choice
 
         def do_request() -> str:
             resp = client.chat.completions.create(**call_args)
@@ -892,20 +848,11 @@ class MCRunner:
             generation = call_with_retry(do_request, self.config.max_retries)
         except RuntimeError as e:
             raise RuntimeError(f"Generate produced no usable text: {e}") from e
-        if generation is None:
-            # Context-length rejection can never succeed on retry: persist a
-            # permanent-failure row so resume treats the sample as completed.
-            result = dict(item)
-            result[self.config.input_key] = prompt
-            result[self.config.label_key] = gold
-            result[self.config.response_key] = ""
-            result["error"] = CONTEXT_LENGTH_ERROR
-            return result
         if not generation:
-            # Null/empty content from a completed request
-            raise RuntimeError("Generate produced no usable text (empty response)")
+            raise RuntimeError("Generate produced no usable text")
 
         result = dict(item)
+        result.pop("error", None)
         result[self.config.input_key] = prompt
         result[self.config.label_key] = gold
         result[self.config.response_key] = generation
@@ -919,8 +866,7 @@ class MCRunner:
         """Log runtime statistics (and accuracy for loglikelihood mode)."""
         logger.info(
             f"Stats: {self._stats['processed']} processed, "
-            f"{self._stats['failed']} failed, "
-            f"{self._stats['skipped']} skipped"
+            f"{self._stats['failed']} failed"
         )
         # Quick accuracy summary for loglikelihood mode
         if self.config.mode == "loglikelihood":
@@ -978,18 +924,20 @@ class MCRunner:
             raise ValueError(f"Unknown mode: {self.config.mode}")
 
         duration = time.perf_counter() - start_time
-        total = (
-            self._stats["processed"] + self._stats["failed"] + self._stats["skipped"]
-        )
+        total = self._stats["processed"] + self._stats["failed"]
         success_rate = (self._stats["processed"] / max(total, 1)) * 100
 
         logger.info("\n=== Execution Summary ===")
         logger.info(f"Successfully processed: {self._stats['processed']}")
         logger.info(f"Failed: {self._stats['failed']}")
-        logger.info(f"Skipped: {self._stats['skipped']}")
         logger.info(f"Success rate: {success_rate:.2f}%")
         logger.info(f"Total duration: {duration:.2f} seconds")
         logger.info(f"Output file: {self.config.output_file}")
+        if self._stats["failed"]:
+            raise RuntimeError(
+                f"Inference failed for {self._stats['failed']} sample(s); "
+                "successful results were preserved for resume"
+            )
         logger.info("✅ MC inference pipeline completed successfully\n")
 
 

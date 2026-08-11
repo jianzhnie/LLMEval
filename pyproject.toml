@@ -26,12 +26,10 @@ authors = [
 ]
 dependencies = [
     "datasets",
+    "httpx",
     "math-verify",
-    "numpy",
     "openai>=2.0.0",
     "Pebble",
-    "tokenizers",
-    "torch",
     "tqdm",
     "transformers",
 ]
@@ -48,15 +46,9 @@ vllm = [
 npu = [
     "vllm-ascend>=0.7.3",
 ]
-eval = [
-    "math-verify",
-    "Pebble",
-]
 all = [
     "vllm>=0.7.0",
     "vllm-ascend>=0.7.3",
-    "math-verify",
-    "Pebble",
 ]
 
 [tool.setuptools.packages.find]

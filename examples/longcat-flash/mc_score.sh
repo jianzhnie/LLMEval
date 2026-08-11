@@ -5,8 +5,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+readonly PROJECT_ROOT
 cd "$PROJECT_ROOT"
+# shellcheck source=/dev/null
 source set_env.sh 2>/dev/null || true
 
 INPUT_DIR="${INPUT_DIR:-./output/longcat-flash}"
@@ -34,7 +36,7 @@ echo "============================================"
 PARALLEL="${PARALLEL:-1}"
 declare -a TASK_NAMES=()
 declare -a TASK_PIDS=()
-declare -A TASK_STATUS=()
+task_failed=0
 
 for task in $BENCHMARKS; do
     task_name="${TASK_NAME[$task]:-}"
@@ -75,8 +77,12 @@ done
 
 if [[ "$PARALLEL" == "1" && ${#TASK_PIDS[@]} -gt 0 ]]; then
     for i in "${!TASK_PIDS[@]}"; do
-        if wait "${TASK_PIDS[$i]}"; then TASK_STATUS[${TASK_NAMES[$i]}]="OK"
-        else TASK_STATUS[${TASK_NAMES[$i]}]="FAIL"; fi
+        if wait "${TASK_PIDS[$i]}"; then
+            echo "[OK] ${TASK_NAMES[$i]}"
+        else
+            echo "[FAIL] ${TASK_NAMES[$i]}" >&2
+            task_failed=1
+        fi
     done
 fi
 
@@ -91,3 +97,4 @@ for task in "${TASK_NAMES[@]}"; do
     fi
 done
 echo "🎯 MC 评分完成!"
+exit "$task_failed"

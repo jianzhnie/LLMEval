@@ -6,7 +6,6 @@ import copy
 import hashlib
 import json
 import math
-import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,33 +16,29 @@ from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import is_chat_template_applied
 
 __all__ = [
-    "CONTEXT_LENGTH_ERROR",
     "ResumeState",
     "append_jsonl",
     "build_chat_messages",
     "build_vllm_llm_kwargs",
     "derive_request_seed",
     "ensure_raw_prompt",
-    "is_explicit_tool_choice",
     "is_local_endpoint",
     "load_jsonl",
     "load_resume_state",
     "prepare_sample_requests",
-    "process_batches_with_policy",
     "redact_config_for_logging",
-    "save_failed_items",
 ]
 
 logger = init_logger("inference_common")
 
-# Value of the "error" field on a permanent-failure result row: the prompt
-# can never fit the model context, so the row is written once (empty
-# response) and resume treats it as completed instead of rerunning it.
-CONTEXT_LENGTH_ERROR = "context_length_exceeded"
+
+def reject_nonfinite_json(value: str) -> None:
+    """Reject JavaScript-style numeric constants outside the JSON standard."""
+    raise ValueError(f"non-standard JSON numeric constant: {value}")
 
 
 # ---------------------------------------------------------------------------
-# JSONL persistence and failure auditing
+# JSONL persistence
 # ---------------------------------------------------------------------------
 
 
@@ -57,7 +52,9 @@ def append_jsonl(
         try:
             with output_path.open("a", encoding="utf-8") as handle:
                 for record in records:
-                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    handle.write(
+                        json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
+                    )
                 handle.flush()
         except Exception as exc:
             raise OSError(
@@ -72,7 +69,7 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
         for line_num, line in enumerate(handle, 1):
             if not line.strip():
                 continue
-            record = json.loads(line)
+            record = json.loads(line, parse_constant=reject_nonfinite_json)
             if not isinstance(record, dict):
                 raise ValueError(
                     f"JSONL line {line_num} must contain an object, "
@@ -97,7 +94,7 @@ def _iter_resume_records(
             next_line = handle.readline()
             if line.strip():
                 try:
-                    item = json.loads(line)
+                    item = json.loads(line, parse_constant=reject_nonfinite_json)
                 except json.JSONDecodeError as exc:
                     is_truncated_final_line = (
                         repair_truncated_last_line
@@ -115,6 +112,11 @@ def _iter_resume_records(
                         f"Invalid JSON in resume file {resume_path} at line "
                         f"{line_num}: {exc.msg}"
                     ) from exc
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid JSON in resume file {resume_path} at line "
+                        f"{line_num}: {exc}"
+                    ) from exc
                 if not isinstance(item, dict):
                     raise ValueError(
                         f"Resume file {resume_path} line {line_num} must contain an "
@@ -122,47 +124,6 @@ def _iter_resume_records(
                     )
                 yield line_num, item
             line = next_line
-
-
-def save_failed_items(
-    output_file: str | Path,
-    failed_items: list[dict[str, Any]],
-    *,
-    run_id: str | None = None,
-) -> None:
-    """Append stable, run-scoped failure audit records next to an output file."""
-    if not failed_items:
-        return
-
-    output_path = Path(output_file)
-    failed_path = output_path.with_name(f"{output_path.stem}_failed.jsonl")
-    failed_path.parent.mkdir(parents=True, exist_ok=True)
-    current_run_id = run_id or uuid.uuid4().hex
-
-    with failed_path.open("a", encoding="utf-8") as handle:
-        for entry in failed_items:
-            nested_item = entry.get("item")
-            source: dict[str, Any] = (
-                nested_item if isinstance(nested_item, dict) else entry
-            )
-            identity = {
-                "doc_id": source.get("doc_id"),
-                "sample_index": source.get("sample_index"),
-                "error_category": entry.get("error_category")
-                or entry.get("error_type")
-                or "unknown",
-                "batch_index": entry.get("batch_index"),
-                "items": entry.get("items"),
-            }
-            failure_id = hashlib.sha256(
-                json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
-            ).hexdigest()[:24]
-
-            record = dict(entry)
-            record.setdefault("run_id", current_run_id)
-            record.setdefault("failure_id", failure_id)
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    logger.info("Failed items saved to: %s", failed_path)
 
 
 # ---------------------------------------------------------------------------
@@ -227,14 +188,51 @@ def load_resume_state(
             output_path,
             repair_truncated_last_line=repair_truncated_last_line,
         ):
-            internal_fields = [key for key in item if key.startswith("_llmeval_")]
-            if internal_fields:
-                raise ValueError(
-                    f"Resume file {output_path} line {line_num} uses unsupported "
-                    f"internal fields: {internal_fields}"
-                )
-            if not _is_completed_record(item, response_key, output_path, line_num):
+            # Legacy failure rows remain retryable. Current inference paths do
+            # not persist them.
+            if item.get("error"):
                 continue
+
+            logprobs = item.get("logprobs")
+            has_valid_logprobs = (
+                isinstance(logprobs, list)
+                and bool(logprobs)
+                and any(
+                    isinstance(value, int | float)
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                    for value in logprobs
+                )
+                and all(
+                    value is None
+                    or (
+                        isinstance(value, int | float)
+                        and not isinstance(value, bool)
+                        and math.isfinite(float(value))
+                    )
+                    for value in logprobs
+                )
+            )
+            if not has_valid_logprobs:
+                response = item.get(response_key)
+                if response is None and response_key != "gen":
+                    response = item.get("gen")
+                if response is None:
+                    continue
+                if isinstance(response, list):
+                    if len(response) != 1:
+                        raise ValueError(
+                            f"Resume file {output_path} line {line_num} must contain "
+                            "exactly one generation; migrate grouped output to one "
+                            "row per sample"
+                        )
+                    response = response[0]
+                if not isinstance(response, str) or not response.strip():
+                    raise ValueError(
+                        f"Resume file {output_path} line {line_num} has an empty or "
+                        f"invalid {response_key!r} result"
+                    )
+
             if (
                 expected_scoring_mode is not None
                 and item.get("scoring_mode") != expected_scoring_mode
@@ -289,63 +287,6 @@ def load_resume_state(
     except OSError as exc:
         raise OSError(f"Failed to read resume state from {output_file}: {exc}") from exc
     return state
-
-
-def _is_completed_record(
-    item: dict[str, Any], response_key: str, output_path: Path, line_num: int
-) -> bool:
-    """Validate the one-result-per-row protocol and report completion."""
-    # Permanent-failure rows (e.g. context-length rejections) are written
-    # once with an empty response; they count as completed so resume skips
-    # them instead of rerunning a request that can never succeed.
-    if item.get("error") == CONTEXT_LENGTH_ERROR:
-        return True
-    if item.get("error"):
-        return False
-
-    # Only a non-empty list of per-choice numeric scores marks completion;
-    # an input record that happens to carry some other "logprobs" value
-    # must not be mistaken for a finished result row.
-    logprobs = item.get("logprobs")
-    if (
-        isinstance(logprobs, list)
-        and logprobs
-        and any(
-            isinstance(value, int | float)
-            and math.isfinite(float(value))
-            and not isinstance(value, bool)
-            for value in logprobs
-        )
-        and all(
-            value is None
-            or (
-                isinstance(value, int | float)
-                and not isinstance(value, bool)
-                and math.isfinite(float(value))
-            )
-            for value in logprobs
-        )
-    ):
-        return True
-
-    response = item.get(response_key)
-    if response is None and response_key != "gen":
-        response = item.get("gen")
-    if response is None:
-        return False
-    if isinstance(response, list):
-        if len(response) != 1:
-            raise ValueError(
-                f"Resume file {output_path} line {line_num} must contain exactly "
-                "one generation; migrate grouped output to one row per sample"
-            )
-        response = response[0]
-    if not isinstance(response, str) or not response.strip():
-        raise ValueError(
-            f"Resume file {output_path} line {line_num} has an empty or invalid "
-            f"{response_key!r} result"
-        )
-    return True
 
 
 def prepare_sample_requests(
@@ -444,49 +385,6 @@ def build_chat_messages(prompt: str, system_prompt: str | None) -> list[dict[str
     return messages
 
 
-def process_batches_with_policy(
-    items: Sequence[dict[str, Any]],
-    batch_size: int,
-    process_batch: Callable[[Sequence[dict[str, Any]]], None],
-    *,
-    fail_fast: bool = True,
-    on_batch_complete: Callable[[], None] | None = None,
-) -> list[dict[str, Any]]:
-    """Process batches strictly or return compact audit records for failures."""
-    if batch_size <= 0:
-        raise ValueError(f"batch_size must be positive, got {batch_size}")
-
-    failures: list[dict[str, Any]] = []
-    for batch_index, start in enumerate(range(0, len(items), batch_size)):
-        batch = items[start : start + batch_size]
-        try:
-            process_batch(batch)
-        except Exception as exc:
-            if fail_fast:
-                raise
-            failures.append(
-                {
-                    "error_category": "batch_processing",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "batch_index": batch_index,
-                    "batch_size": len(batch),
-                    "items": [
-                        {
-                            key: item[key]
-                            for key in ("doc_id", "sample_index")
-                            if key in item
-                        }
-                        for item in batch
-                    ],
-                }
-            )
-        finally:
-            if on_batch_complete is not None:
-                on_batch_complete()
-    return failures
-
-
 def is_local_endpoint(base_url: str) -> bool:
     """Return whether an API URL targets the local machine."""
     hostname = urlparse(base_url).hostname
@@ -552,8 +450,3 @@ def redact_config_for_logging(
         return value
 
     return redact(payload)
-
-
-def is_explicit_tool_choice(tool_choice: str | None) -> bool:
-    """Return whether ``tool_choice`` should be sent to an API backend."""
-    return bool(tool_choice and tool_choice.strip().lower() != "none")

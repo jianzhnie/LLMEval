@@ -240,13 +240,14 @@ def merge_generate_records(
         sample_order = sample_order_indices(
             [sample for sample, _ in samples], problem_id=problem_id
         )
-        item[response_key] = [
-            samples[index][1]
-            for index in sample_order
-            if not samples[index][0].get("error")
-        ]
-        if item[response_key]:
-            item.pop("error", None)
+        ordered_samples = [samples[index] for index in sample_order]
+        item[response_key] = [generation for _, generation in ordered_samples]
+        sample_errors = [sample.get("error") for sample, _ in ordered_samples]
+        item.pop("error", None)
+        if any(sample_errors):
+            # Internal scorer metadata. It is consumed by score_generate_item
+            # and never included in the returned score record.
+            item["_mc_sample_errors"] = sample_errors
     return merged
 
 
@@ -761,15 +762,20 @@ def score_generate_item(
     else:
         generation_texts = []
 
+    raw_sample_errors = item.get("_mc_sample_errors")
+    if isinstance(raw_sample_errors, list):
+        sample_errors = [bool(error) for error in raw_sample_errors]
+    else:
+        sample_errors = [bool(item.get("error"))] * max(len(generation_texts), 1)
+    relevant_errors = sample_errors[:1] if aggregation == "first" else sample_errors
+
     if not gold:
         status = "skipped"
-    elif (
-        item.get("error")
-        or not generation_texts
-        or all(not text.strip() for text in generation_texts)
-    ):
+    elif any(relevant_errors):
         status = "failed"
     else:
+        # Empty or unparseable model output is an incorrect observation, not
+        # an infrastructure failure. Explicit inference errors remain failed.
         status = "completed"
 
     filtered = [
@@ -779,13 +785,12 @@ def score_generate_item(
     sample_correct = [bool(gold) and prediction == gold for prediction in predictions]
 
     if aggregation == "majority_vote":
-        non_empty = [prediction for prediction in predictions if prediction]
-        counts = Counter(non_empty)
+        counts = Counter(predictions)
         if counts:
             max_count = max(counts.values())
             pred = next(
                 prediction
-                for prediction in non_empty
+                for prediction in predictions
                 if counts[prediction] == max_count
             )
         else:
@@ -811,7 +816,6 @@ def score_generate_item(
         "aggregation": aggregation,
         "predictions": predictions,
         "raw_gen": generation_texts,
-        "filtered_gen": predictions,
         "filter_trace": [trace for _, trace in filtered],
         "evaluation_status": status,
         "sample_correct": sample_correct,
@@ -829,7 +833,7 @@ def extract_answer(text: str) -> str:
     ----------------------------------------------------------
     1. **Marker match** — look for an explicit ``Answer: X`` or ``答案: X``
        token at the **end** of a line (``re.MULTILINE``, ``$`` anchor).
-       Returns the **first** such match.
+       Returns the **last** such match so an explicit correction wins.
     2. **Fallback** — find the **last** standalone letter ``A``-``J``
        (word-boundary delimited) anywhere in the text.  The English pronoun
        ``I`` and article ``a`` are ignored so trailing prose cannot hijack
@@ -839,9 +843,9 @@ def extract_answer(text: str) -> str:
     be extracted.
     """
     # 1. Explicit "Answer: X" / "答案：X" marker.
-    m = _ANSWER_MARKER_RE.search(text)
-    if m:
-        return m.group(1).upper()
+    matches = list(_ANSWER_MARKER_RE.finditer(text))
+    if matches:
+        return matches[-1].group(1).upper()
 
     # 2. Last standalone A-J letter in the text (excluding "I"/"a" stopwords).
     matches = [

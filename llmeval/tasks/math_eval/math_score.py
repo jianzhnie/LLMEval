@@ -168,12 +168,7 @@ class ProcessingStats:
 
 @dataclass(frozen=True)
 class MathAnswerResult:
-    """Worker result with a non-breaking marker for successful fallback matching.
-
-    ``filter_trace`` carries the full pipeline trace (including the raw input
-    under ``filter_trace["raw"]``), so ``raw_gen`` is not shipped separately
-    over the pool IPC.
-    """
+    """Worker result with answer and compact postprocessing diagnostics."""
 
     index: int
     grade: float
@@ -182,7 +177,6 @@ class MathAnswerResult:
     fallback_matched: bool = False
     failure_stage: str = "none"
     failure_reason: str | None = None
-    filtered_gen: str = ""
     filter_trace: dict[str, Any] = field(default_factory=dict)
 
     def __iter__(self) -> Iterator[int | float | str | None]:
@@ -357,6 +351,17 @@ def _process_answers_impl(
             failure_reason=str(e),
         )
 
+    inference_error = input_data.get("error")
+    if inference_error:
+        return MathAnswerResult(
+            index,
+            0.0,
+            None,
+            gold_answer_text,
+            failure_stage="inference",
+            failure_reason=str(inference_error),
+        )
+
     # Get the generated text. Handles cases where response might be missing or empty.
     generated_text = input_data.get(response_key, [])
     if not generated_text:
@@ -393,7 +398,6 @@ def _process_answers_impl(
             fallback_matched=fallback_matched,
             failure_stage=failure_stage,
             failure_reason=failure_reason,
-            filtered_gen=generated_text,
             filter_trace=filter_trace,
         )
 
@@ -489,16 +493,22 @@ def _math_record_status(
     """Classify a math record for the shared denominator contract.
 
     Missing or unparseable input fields are skipped (a dataset problem, not a
-    model failure). Answer extraction, verification, worker errors, and
-    timeouts are classified separately and excluded from the model-accuracy
-    denominator; only successfully scored grade-0 answers count as wrong.
+    model failure). Empty or unparseable model answers count as incorrect.
+    Explicit inference errors, verification infrastructure failures, worker
+    errors, and timeouts remain outside the model-accuracy denominator.
     """
     if extracted_answer == "Timeout":
         return "timeout"
     if failure_stage == "input":
         # Gold-truth parsing failed: the dataset row itself is unusable.
         return "skipped"
-    if failure_stage in {"inference", "extraction", "verification"}:
+    if item.get("error"):
+        return "failed"
+    if failure_stage == "extraction":
+        return "completed"
+    if failure_stage == "inference":
+        return "completed"
+    if failure_stage == "verification":
         return "failed"
     response = item.get(response_key)
     label = item.get(label_key)
@@ -511,7 +521,7 @@ def _math_record_status(
     ):
         return "skipped"
     if not response:
-        return "failed"
+        return "completed"
     return "completed"
 
 
@@ -587,15 +597,13 @@ def _score_math_records(
                         "failure_stage": failure_stage,
                         "failure_reason": failure_reason,
                         "fallback_matched": fallback_matched,
-                        "raw_gen": result.filter_trace.get("raw", ""),
-                        "filtered_gen": result.filtered_gen,
                         "filter_trace": result.filter_trace,
                     }
                 )
                 processed_indices.add(idx)
 
                 # Update statistics
-                if is_correct == 1.0:
+                if status == "completed" and is_correct == 1.0:
                     stats.correct += 1
                 if status == "timeout":
                     stats.timeout += 1
@@ -753,7 +761,7 @@ def _majority_cluster(items: list[dict[str, Any]]) -> tuple[str | None, bool]:
     for item in items:
         answer = item.get("extracted_answer")
         if answer in (None, ""):
-            continue
+            answer = INVALID_ANSWER
         answer_text = str(answer)
         if answer_text.startswith(("Error", "Format Error", "Timeout")):
             continue
@@ -841,11 +849,7 @@ def _build_problem_level_metrics(
 
 
 def _filter_artifacts(response: Any) -> dict[str, Any]:
-    """Return the raw response, filtered response, and task pipeline trace."""
+    """Return compact task-pipeline metadata for an unprocessed response."""
     raw_response = response[0] if isinstance(response, list) and response else response
-    filtered, trace = MATH_RESPONSE_PIPELINE.apply_with_trace(raw_response)
-    return {
-        "raw_gen": "" if raw_response is None else str(raw_response),
-        "filtered_gen": filtered,
-        "filter_trace": trace,
-    }
+    _, trace = MATH_RESPONSE_PIPELINE.apply_with_trace(raw_response)
+    return {"filter_trace": trace}

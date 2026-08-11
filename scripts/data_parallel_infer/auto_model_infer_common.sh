@@ -47,7 +47,7 @@
 #   3. HEALTH_TIMEOUT: 根据网络情况调整检查超时
 #
 # 使用方法：
-#   由 auto_model_infer.sh 或 auto_model_infer_tp8.sh 调用
+#   由 auto_model_infer.sh 调用
 #
 # 环境要求：
 #   - bash 4.3+（使用了 local -n nameref）
@@ -95,15 +95,17 @@ fi
 # - ControlPersist=60s: 保持连接60秒，减少重连开销
 # 为避免行内注释破坏多行字符串，将注释前移
 # - BatchMode=yes: 禁止交互提示，便于自动化
-readonly SSH_OPTS="-o StrictHostKeyChecking=no \
-                   -o UserKnownHostsFile=/dev/null \
-                   -o LogLevel=ERROR \
-                   -o BatchMode=yes \
-                   -o ConnectTimeout=5 \
-                   -o ServerAliveInterval=30 \
-                   -o ServerAliveCountMax=3 \
-                   -o ControlMaster=auto \
-                   -o ControlPersist=60s"
+readonly -a SSH_OPTS=(
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+    -o BatchMode=yes
+    -o ConnectTimeout=5
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=3
+    -o ControlMaster=auto
+    -o ControlPersist=60s
+)
 
 # SSH 用户配置: 优先使用环境变量，否则使用当前用户
 readonly SSH_USER="${SSH_USER:-$(whoami)}"
@@ -112,7 +114,7 @@ readonly SSH_USER="${SSH_USER:-$(whoami)}"
 # =======================================================
 
 # 模型路径配置
-readonly MODEL_PATH="${MODEL_PATH:-/home/jianzhnie/llmtuner/hfhub/mindspeed/models/mindspore/hf_sft_packing_0703_step6476}"
+readonly MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-7B}"
 
 # GPU/ASCEND 资源配置
 readonly TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-4}    # 张量并行大小，支持 1/2/4/8
@@ -132,6 +134,7 @@ readonly MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-32768}    # 动态批�
 # 其他推理参数
 readonly N_SAMPLES=${N_SAMPLES:-8}                   # 每条样本的重复采样次数
 readonly SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-PCL-Reasoner}"
+readonly RUN_ID="${RUN_ID:-$(date '+%Y%m%d%H%M%S')-$$}"
 
 # 计算每个实例的设备可见性
 get_device_visibility() {
@@ -218,12 +221,16 @@ readonly EXTRA_ENGINE_ARGS="${EXTRA_ENGINE_ARGS:-}"
 # =======================================================
 
 # 项目路径配置
-readonly PROJECT_DIR="${PROJECT_DIR:-/home/jianzhnie/llmtuner/llm/LLMEval}"
+COMMON_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly COMMON_SCRIPT_DIR
+DEFAULT_PROJECT_DIR="$(cd -- "${COMMON_SCRIPT_DIR}/../.." && pwd)"
+readonly DEFAULT_PROJECT_DIR
+readonly PROJECT_DIR="${PROJECT_DIR:-${DEFAULT_PROJECT_DIR}}"
 readonly INFER_SCRIPT="${INFER_SCRIPT:-${PROJECT_DIR}/llmeval/inference/online.py}"
 readonly SET_ENV_SCRIPT="${SET_ENV_SCRIPT:-${PROJECT_DIR}/set_env.sh}"
 
 # 输出与日志路径配置
-readonly OUTPUT_ROOT="${OUTPUT_ROOT:-/home/jianzhnie/llmtuner/llm/LLMEval/output}"
+readonly OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_DIR}/output}"
 readonly OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${SERVED_MODEL_NAME}}"
 readonly LOG_DIR="${LOG_DIR:-${OUTPUT_ROOT}/logs-rl}"
 
@@ -322,7 +329,9 @@ ssh_run() {
     shift
     local userhost="${SSH_USER:+${SSH_USER}@}${node}"
     # 使用 $@ 确保命令中的空格和引号被正确传递
-    ssh ${SSH_OPTS} "${userhost}" "$@"
+    # Commands are intentionally assembled locally and passed as one remote command.
+    # shellcheck disable=SC2029
+    ssh "${SSH_OPTS[@]}" "${userhost}" "$@"
 }
 
 # 日志函数 (带有 Emoji 提示)
@@ -360,21 +369,34 @@ log_error() {
 }
 
 wait_for_pids() {
-    local pids=("$@")
-    local index pid remaining
-    for index in "${!pids[@]}"; do
-        pid="${pids[index]}"
-        if ! wait "$pid"; then
-            # Stop sibling monitors immediately. Otherwise a failed instance
-            # can leave the remaining 10-day polling loops orphaned.
-            for remaining in "${pids[@]:index+1}"; do
-                kill "$remaining" 2>/dev/null || true
-            done
-            for remaining in "${pids[@]:index+1}"; do
-                wait "$remaining" 2>/dev/null || true
-            done
-            return 1
+    local pending=("$@")
+    local next=()
+    local pid remaining state
+
+    while [[ ${#pending[@]} -gt 0 ]]; do
+        next=()
+        for pid in "${pending[@]}"; do
+            state=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+            if [[ -n "$state" && "$state" != Z* ]]; then
+                next+=("$pid")
+                continue
+            fi
+            if ! wait "$pid"; then
+                # Stop every monitor still running as soon as any peer fails.
+                for remaining in "${pending[@]}"; do
+                    [[ "$remaining" == "$pid" ]] || kill "$remaining" 2>/dev/null || true
+                done
+                for remaining in "${pending[@]}"; do
+                    [[ "$remaining" == "$pid" ]] || wait "$remaining" 2>/dev/null || true
+                done
+                return 1
+            fi
+        done
+        if [[ ${#next[@]} -eq 0 ]]; then
+            break
         fi
+        pending=("${next[@]}")
+        sleep 1
     done
     return 0
 }
@@ -560,7 +582,7 @@ validate_config() {
     )
 
     # 提前创建输出目录，确保权限检查通过
-    mkdir -p "${OUTPUT_DIR}" "${LOG_DIR}" || true
+    mkdir -p "${OUTPUT_DIR}" "${LOG_DIR}"
 
     for dir in "${required_dirs[@]}"; do
         check_permissions "$dir"
@@ -579,10 +601,11 @@ validate_config() {
     for check in "${param_checks[@]}"; do
         # Bash 技巧: 使用 IFS 拆分字符串
         IFS=':' read -r param min max desc <<< "$check"
-        local value
-        # Bash 技巧: 使用 eval 获取变量值 (仅限配置区，风险可控)
-        value=$(eval echo "\$$param")
-        # Bash 技巧: 使用 [[ ... ]] 和算术扩展进行数值比较
+        local -n value_ref="$param"
+        local value="$value_ref"
+        if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+            handle_error 1 "$desc ($param) 必须是整数，当前值: $value"
+        fi
         if [[ $value -lt $min || $value -gt $max ]]; then
             handle_error 1 "$desc ($param) 需在 $min-$max 之间，当前值: $value"
         fi
@@ -607,8 +630,9 @@ validate_config() {
         handle_error 1 "TENSOR_PARALLEL_SIZE (${TENSOR_PARALLEL_SIZE}) * INSTANCES_PER_NODE (${INSTANCES_PER_NODE}) 必须等于 8，当前乘积为: ${total_devices}"
     fi
 
-    # 验证浮点数参数 (使用 bc 进行浮点比较)
-    if [[ $(echo "${MEMORY_UTILIZATION} < 0.1 || ${MEMORY_UTILIZATION} > 1.0" | bc -l) -eq 1 ]]; then
+    # 验证浮点数参数，不依赖额外的 bc 命令。
+    if ! awk -v value="${MEMORY_UTILIZATION}" \
+        'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value >= 0.1 && value <= 1.0) }'; then
         handle_error 1 "显存利用率需在 0.1-1.0 之间，当前值: ${MEMORY_UTILIZATION}"
     fi
 
@@ -856,7 +880,7 @@ check_and_prepare_remote_dirs() {
         # 创建目录，清理旧的状态/日志文件
         local prep_cmd="mkdir -p '${OUTPUT_DIR}' '${DATASET_DIR}' '${LOG_DIR}' && \
             rm -rf '${LOG_DIR}/status' && mkdir -p '${LOG_DIR}/status' && \
-            rm -f '${LOG_DIR}/${API_SERVER_LOG_PREFIX}'*.log '${LOG_DIR}/${TASK_LOG_PREFIX}'*.log 2>/dev/null || true"
+            (rm -f '${LOG_DIR}/${API_SERVER_LOG_PREFIX}'*.log '${LOG_DIR}/${TASK_LOG_PREFIX}'*.log 2>/dev/null || true)"
 
         if ! ssh_run "$node" "$prep_cmd"; then
             log_error "❌ 无法在节点 ${node} 上准备目录，请检查SSH连接和权限"
@@ -886,7 +910,8 @@ deploy_model_service() {
     local port="$2"
     local instance_id="$3"
     local log_file="${LOG_DIR}/${API_SERVER_LOG_PREFIX}${node//./_}_${instance_id}.log"
-    local devices=$(get_device_visibility "$instance_id")
+    local devices
+    devices=$(get_device_visibility "$instance_id")
 
     log_info "🚀 在节点 ${node} 上部署模型服务实例 ${instance_id}，端口 ${port} (TP=${TENSOR_PARALLEL_SIZE}, GPUs=${devices}, mem_util=${MEMORY_UTILIZATION})"    # 1. 节点连通性验证
 
@@ -1043,7 +1068,7 @@ wait_for_services() {
 
         # 统计已就绪服务数量
         local ready_count
-        ready_count=$(ls -1 "${status_dir}" 2>/dev/null | wc -l | tr -d ' ')
+        ready_count=$(find "${status_dir}" -maxdepth 1 -type f -name '*.ok' | wc -l | tr -d ' ')
 
         if [[ $ready_count -eq $total_services ]]; then
             log_info "✅ 所有 ${total_services} 个服务已就绪"
@@ -1110,6 +1135,8 @@ run_task_batch_parallel() {
     local instance_idx="$5"
     shift 5
     local files=("$@")
+    local node_tag="${node//./_}"
+    local status_dir="${LOG_DIR}/task_status_${RUN_ID}_${node_tag}_${instance_idx}"
 
     log_info "👉 在节点 ${node}, instance ${instance_idx} 上启动 ${#files[@]} 个推理任务..."
 
@@ -1120,13 +1147,20 @@ run_task_batch_parallel() {
     fi
 
     # 构建所有文件的推理命令并一次性发送
+    if ! ssh_run "$node" "rm -rf '${status_dir}' && mkdir -p '${status_dir}'"; then
+        log_error "节点 ${node} 无法创建任务状态目录: ${status_dir}"
+        return 1
+    fi
+
     local commands=()
+    local task_index=0
     for file in "${files[@]}"; do
         local input_file="${DATASET_DIR}/${file}"
         # 移除文件扩展名
         local base_name="${file%.*}"
         local output_file="${OUTPUT_DIR}/infer_${model_name//\//_}_${base_name}_bz${N_SAMPLES}.jsonl"
         local log_file="${LOG_DIR}/${TASK_LOG_PREFIX}${node//./_}_${instance_idx}_${base_name}.log"
+        local status_file="${status_dir}/${task_index}.status"
 
         log_info "  -> 准备处理文件: ${file} (输出: ${output_file})"
 
@@ -1137,9 +1171,9 @@ run_task_batch_parallel() {
         fi
 
         # 构建推理命令
-        local infer_cmd="cd '${PROJECT_DIR}' && \
+        local job_cmd="if cd '${PROJECT_DIR}' && \
             source '${SET_ENV_SCRIPT}' && \
-            nohup python '${INFER_SCRIPT}' \
+            python '${INFER_SCRIPT}' \
                 --input_file '${input_file}' \
                 --output_file '${output_file}' \
                 --input_key '${INPUT_KEY}' \
@@ -1148,14 +1182,27 @@ run_task_batch_parallel() {
                 --n_samples ${N_SAMPLES} \
                 --system_prompt_type '${SYSTEM_PROMPT_TYPE}' \
                 --max_workers ${MAX_WORKERS} \
-                > '${log_file}' 2>&1 &"
+                > '${log_file}' 2>&1; then \
+            rc=0; \
+        else \
+            rc=\$?; \
+        fi; \
+            printf '%s\n' \"\$rc\" > '${status_file}.tmp'; \
+            mv '${status_file}.tmp' '${status_file}'; \
+            exit \"\$rc\""
+
+        local quoted_job_cmd
+        printf -v quoted_job_cmd '%q' "$job_cmd"
+        local infer_cmd="nohup bash -lc ${quoted_job_cmd} >/dev/null 2>&1 &"
 
         commands+=("$infer_cmd")
+        task_index=$((task_index + 1))
     done
 
     # 将所有命令组合成一个命令字符串并执行
     if [[ ${#commands[@]} -gt 0 ]]; then
-        local combined_cmd=$(printf "%s " "${commands[@]}")
+        local combined_cmd
+        combined_cmd=$(printf "%s " "${commands[@]}")
         log_info "🚀 节点 ${node}: ${instance_idx}) .. 提交  ${#commands[@]} 个 OpenAI API Server 推理任务..."
         # 提交失败（SSH 异常）时明确报错退出，而不是静默继续：
         # 否则后续等待循环会因节点上没有任务而误判“任务已完成”
@@ -1170,7 +1217,8 @@ run_task_batch_parallel() {
         return 1
     fi
     # 等待任务完成
-    wait_for_batch_completion_and_cleanup "$node" "$port" ${#commands[@]}
+    wait_for_batch_completion_and_cleanup \
+        "$node" "$port" "${#commands[@]}" "$status_dir"
 }
 
 # 监控单节点推理任务并在完成后清理服务
@@ -1178,39 +1226,53 @@ wait_for_batch_completion_and_cleanup() {
     local node="$1"
     local port="$2"
     local expected_count="$3"
+    local status_dir="$4"
     local max_wait_time=864000  # 最大等待时间（秒）(10天)
-    local wait_interval=600     # 检查间隔（秒）
+    local wait_interval=30      # 检查间隔（秒）
     local total_wait_time=0
-    local infer_script_name="${INFER_SCRIPT##*/}"
-    # [p]ython 不会匹配 pgrep 所在的远端 shell 命令行自身；脚本名前要求
-    # 路径分隔符，避免无关的同名参数被计为推理任务。
-    local infer_process_pattern="[p]ython([0-9.]*)?[[:space:]]+[^[:space:]]*/${infer_script_name}([[:space:]]|$)"
 
     log_info "⏳ 等待节点 ${node} 上的 ${expected_count} 个任务完成..."
 
     while [[ $total_wait_time -lt $max_wait_time ]]; do
-        local current_running_tasks
-        # 区分 SSH 失败与 pgrep 真返回 0：SSH 抖动时不判定完成，
-        # 打 warning 并跳过本轮检查，避免误杀仍在运行的推理服务
-        if ! current_running_tasks=$(ssh_run "$node" "pgrep -f '${infer_process_pattern}' | wc -l" 2>/dev/null); then
+        local completed_count
+        if ! completed_count=$(ssh_run "$node" \
+            "test -d '${status_dir}' && find '${status_dir}' -maxdepth 1 -type f -name '*.status' | wc -l" \
+            2>/dev/null); then
             log_warn "⚠️ 节点 ${node} 状态检查失败（SSH 异常，可能是网络抖动），跳过本轮检查，继续等待..."
-            sleep $wait_interval
+            sleep "$wait_interval"
             total_wait_time=$((total_wait_time + wait_interval))
             continue
         fi
 
-        if [[ $current_running_tasks -le 0 ]]; then
-            log_info "✅ 节点 ${node} 上的 ${expected_count} 个推理任务已完成"
+        if ! [[ "$completed_count" =~ ^[0-9]+$ ]]; then
+            log_warn "节点 ${node} 返回无效任务状态计数: ${completed_count}"
+            sleep "$wait_interval"
+            total_wait_time=$((total_wait_time + wait_interval))
+            continue
+        fi
 
-            # 任务完成后，停止该节点的 vLLM 服务
-            log_info "📋 推理任务完成，正在清理资源..."
+        if [[ $completed_count -eq $expected_count ]]; then
+            local failed_count
+            if ! failed_count=$(ssh_run "$node" \
+                "awk '\$1 != 0 { failures++ } END { print failures + 0 }' '${status_dir}'/*.status" \
+                2>/dev/null); then
+                log_error "节点 ${node} 无法读取任务退出状态"
+                stop_service_on_node "$node" "$port"
+                return 1
+            fi
+
+            log_info "节点 ${node} 上的 ${expected_count} 个推理任务已结束，正在清理资源..."
             stop_service_on_node "$node" "$port"
-
+            if [[ ! "$failed_count" =~ ^[0-9]+$ || "$failed_count" -ne 0 ]]; then
+                log_error "节点 ${node} 有 ${failed_count} 个推理任务执行失败"
+                return 1
+            fi
+            log_info "✅ 节点 ${node} 上的推理任务全部成功"
             return 0
         fi
 
-        log_info "⏳ 节点 ${node} 上仍有 ${current_running_tasks} 个任务在运行，已等待 ${total_wait_time} 秒"
-        sleep $wait_interval
+        log_info "⏳ 节点 ${node} 已完成 ${completed_count}/${expected_count} 个任务，已等待 ${total_wait_time} 秒"
+        sleep "$wait_interval"
         total_wait_time=$((total_wait_time + wait_interval))
     done
 

@@ -176,7 +176,9 @@ def metric_from_samples(
         return MetricValue(0.0, len(values), higher_is_better=higher_is_better)
 
     value = fmean(finite_values)
-    if len(finite_values) == 1 or n_resamples <= 1:
+    if n_resamples <= 1:
+        stderr = ci_low = ci_high = None
+    elif len(finite_values) == 1:
         stderr, ci_low, ci_high = 0.0, value, value
     else:
         if not 0.0 < confidence_level < 1.0:
@@ -271,24 +273,35 @@ def _build_evaluation_result(
     """Translate the shared scorer contract without filesystem round-trips."""
     specifications = {spec.name: spec for spec in task.metric_specs}
     metrics: dict[str, MetricValue] = {}
+    bootstrap_cache: dict[tuple[float, ...], MetricValue] = {}
     for name, value in scored.metrics.items():
         spec = specifications.get(name, MetricSpec(name))
         observations = scored.observations.get(name, [])
-        metrics[name] = (
-            metric_from_samples(
-                observations,
-                context.seed,
-                n_resamples=context.bootstrap_samples,
-                confidence_level=context.confidence_level,
+        if observations:
+            cache_key = tuple(float(observation) for observation in observations)
+            cached = bootstrap_cache.get(cache_key)
+            if cached is None:
+                cached = metric_from_samples(
+                    cache_key,
+                    context.seed,
+                    n_resamples=context.bootstrap_samples,
+                    confidence_level=context.confidence_level,
+                )
+                bootstrap_cache[cache_key] = cached
+            metrics[name] = MetricValue(
+                value=cached.value,
+                count=cached.count,
+                stderr=cached.stderr,
+                ci_low=cached.ci_low,
+                ci_high=cached.ci_high,
                 higher_is_better=spec.higher_is_better,
             )
-            if observations
-            else MetricValue(
+        else:
+            metrics[name] = MetricValue(
                 value=float(value),
                 count=0,
                 higher_is_better=spec.higher_is_better,
             )
-        )
     missing = set(specifications) - set(metrics)
     if missing:
         raise ValueError(f"Scorer omitted declared metrics: {sorted(missing)}")

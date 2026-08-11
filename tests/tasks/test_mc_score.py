@@ -255,6 +255,82 @@ class TestScoreGenerate:
         assert first.metrics["acc"] == 1.0
         assert first.effective_sample_count == 1
 
+    def test_first_aggregation_does_not_skip_failed_first_sample(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        items = [
+            {
+                "doc_id": "q0",
+                "sample_index": 0,
+                "answer": "B",
+                "gen": "",
+                "error": "context_length_exceeded",
+            },
+            {
+                "doc_id": "q0",
+                "sample_index": 1,
+                "answer": "B",
+                "gen": "Answer: B",
+            },
+        ]
+
+        result = score_generate_result(items, "answer", "gen", aggregation="first")
+
+        assert result.metrics["acc"] == 0.0
+        assert result.sample_count == 1
+        assert result.effective_sample_count == 0
+        assert result.failed_count == 1
+
+    @pytest.mark.parametrize("aggregation", ["majority_vote", "any_correct"])
+    def test_question_aggregation_excludes_incomplete_samples(
+        self, aggregation: str
+    ) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        items = [
+            {
+                "doc_id": "q0",
+                "sample_index": 0,
+                "answer": "B",
+                "gen": "Answer: B",
+            },
+            {
+                "doc_id": "q0",
+                "sample_index": 1,
+                "answer": "B",
+                "gen": "",
+                "error": "context_length_exceeded",
+            },
+        ]
+
+        result = score_generate_result(items, "answer", "gen", aggregation=aggregation)
+
+        assert result.metrics["acc"] == 0.0
+        assert result.effective_sample_count == 0
+        assert result.failed_count == 1
+
+    def test_majority_vote_counts_unparseable_answers_as_wrong_votes(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        result = score_generate_result(
+            [
+                {"doc_id": "q0", "sample_index": 0, "answer": "B", "gen": "?"},
+                {"doc_id": "q0", "sample_index": 1, "answer": "B", "gen": "?"},
+                {
+                    "doc_id": "q0",
+                    "sample_index": 2,
+                    "answer": "B",
+                    "gen": "Answer: B",
+                },
+            ],
+            "answer",
+            "gen",
+            aggregation="majority_vote",
+        )
+
+        assert result.metrics["acc"] == 0.0
+        assert result.effective_sample_count == 1
+
     def test_failed_record_recomputes_untrusted_sample_total(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import _error_record
 
@@ -572,12 +648,18 @@ def test_generate_filter_trace_preserves_raw_response() -> None:
 
     record = result.records[0]
     assert record["raw_gen"] == ["<think>x</think><answer>B</answer>"]
-    assert record["filtered_gen"] == ["B"]
+    assert "filtered_gen" not in record
     assert record["filter_trace"][0]["pipeline"] == "mc_generation"
     assert [step["name"] for step in record["filter_trace"][0]["filters"]] == [
         "strip_reasoning",
         "extract_answer",
     ]
+
+
+def test_extract_answer_uses_last_explicit_correction() -> None:
+    from llmeval.tasks.mc_eval.mc_score import extract_answer
+
+    assert extract_answer("Answer: A\nCorrection follows.\nAnswer: B") == "B"
 
 
 def test_generate_merges_resumed_rows_before_aggregation() -> None:

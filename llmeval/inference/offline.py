@@ -17,7 +17,6 @@ import logging
 import sys
 import threading
 import time
-import uuid
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
@@ -37,27 +36,13 @@ from llmeval.inference.common import (
     load_jsonl,
     load_resume_state,
     prepare_sample_requests,
-    process_batches_with_policy,
     redact_config_for_logging,
-    save_failed_items,
 )
 from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.log import init_logger
 
 # Initialize logger
 logger = init_logger("offline_vllm_infer", logging.INFO)
-
-
-def _sample_failure(
-    item: dict[str, Any], category: str, error: object
-) -> dict[str, Any]:
-    """Build a compact failed-sample audit record."""
-    return {
-        "item": {key: item[key] for key in ("doc_id", "sample_index") if key in item},
-        "error_category": category,
-        "error_type": type(error).__name__,
-        "error": str(error),
-    }
 
 
 class OfflineInferenceRunner:
@@ -87,7 +72,8 @@ class OfflineInferenceRunner:
         """
         self.args: OfflineInferArguments = args
         self._file_lock: threading.Lock = threading.Lock()
-        self._run_id = uuid.uuid4().hex
+        self._processed_count = 0
+        self._failed_count = 0
         self.llm: LLM | None = None
         # System prompt is resolved and validated by PromptArguments at parse time.
         self.system_prompt: str | None = args.system_prompt
@@ -184,24 +170,27 @@ class OfflineInferenceRunner:
         """Persist non-empty generated responses."""
         if len(original_items) != len(responses):
             raise ValueError("original_items and responses must have equal length")
-        valid_pairs: list[tuple[dict[str, Any], str]] = []
-        failures: list[dict[str, Any]] = []
-        for item, response in zip(original_items, responses, strict=True):
-            if response and response.strip():
-                valid_pairs.append((item, response))
-            else:
-                failures.append(
-                    _sample_failure(item, "inference", "empty model response")
-                )
-        self._handle_sample_failures(failures)
+        valid_pairs = [
+            (item, response)
+            for item, response in zip(original_items, responses, strict=True)
+            if response and response.strip()
+        ]
+        failed_count = len(original_items) - len(valid_pairs)
+        if failed_count:
+            if self.args.fail_fast:
+                raise RuntimeError("Inference produced no usable response")
+            self._failed_count += failed_count
+            logger.warning("Inference failed for %d sample(s)", failed_count)
         if not valid_pairs:
             return
         results: list[dict[str, Any]] = []
         for original_item, model_response in valid_pairs:
             result = dict(original_item)
+            result.pop("error", None)
             result[self.args.response_key] = model_response
             results.append(result)
         append_jsonl(self.args.output_file, results, self._file_lock)
+        self._processed_count += len(results)
 
     def _extract_model_response(self, output: RequestOutput) -> str:
         """Extract the first vLLM response text, or return an empty string."""
@@ -266,16 +255,19 @@ class OfflineInferenceRunner:
 
         valid_items: list[dict[str, Any]] = []
         valid_messages: list[list[dict[str, str]]] = []
-        invalid_items: list[dict[str, Any]] = []
+        failed_count = 0
         for item in batch_data:
             try:
                 messages = self.convert_to_messages_format(item)
             except ValueError as exc:
-                invalid_items.append(_sample_failure(item, "input_validation", exc))
+                if self.args.fail_fast:
+                    raise
+                logger.warning("Inference sample failed: %s", exc)
+                failed_count += 1
                 continue
             valid_items.append(item)
             valid_messages.append(messages)
-        self._handle_sample_failures(invalid_items)
+        self._failed_count += failed_count
         if not valid_messages:
             return
 
@@ -305,9 +297,8 @@ class OfflineInferenceRunner:
             if self.args.fail_fast:
                 raise
             if len(items) == 1:
-                self._handle_sample_failures(
-                    [_sample_failure(items[0], "inference", exc)]
-                )
+                self._failed_count += 1
+                logger.warning("Inference sample failed: %s", exc)
                 return
             midpoint = len(items) // 2
             logger.warning(
@@ -324,18 +315,6 @@ class OfflineInferenceRunner:
         # Persistence errors must propagate to the batch policy. Retrying model
         # generation cannot repair a filesystem failure and may append duplicates.
         self._write_response_results(items, responses)
-
-    def _handle_sample_failures(self, failures: list[dict[str, Any]]) -> None:
-        """Apply the configured strict or auditing policy to sample failures."""
-        if not failures:
-            return
-        if self.args.fail_fast:
-            first = failures[0]
-            raise ValueError(
-                f"Sample {first['item']} failed {first['error_category']}: "
-                f"{first['error']}"
-            )
-        save_failed_items(self.args.output_file, failures, run_id=self._run_id)
 
     def run(self) -> None:
         """Load, resume, execute, and persist offline inference."""
@@ -363,6 +342,13 @@ class OfflineInferenceRunner:
         # Process data in batches
         self._process_batches(eval_dataset)
 
+        logger.info("Successfully processed: %d", self._processed_count)
+        logger.info("Failed: %d", self._failed_count)
+        if self._failed_count:
+            raise RuntimeError(
+                f"Inference failed for {self._failed_count} sample(s); "
+                "successful results were preserved for resume"
+            )
         logger.info(
             f"✨ Final data processing completed. Results saved to {self.args.output_file}"
         )
@@ -377,19 +363,20 @@ class OfflineInferenceRunner:
         )
 
         with tqdm(total=total_batches, desc="Processing batches", unit="batch") as pbar:
-            failures = process_batches_with_policy(
-                eval_dataset,
-                self.args.batch_size,
-                self.process_and_write_batch,
-                fail_fast=self.args.fail_fast,
-                on_batch_complete=lambda: pbar.update(1),
-            )
-        if failures:
-            save_failed_items(self.args.output_file, failures, run_id=self._run_id)
-            logger.warning(
-                "Continued after %d failed batch(es); details saved next to output",
-                len(failures),
-            )
+            for start in range(0, len(eval_dataset), self.args.batch_size):
+                batch = eval_dataset[start : start + self.args.batch_size]
+                failed_before = self._failed_count
+                try:
+                    self.process_and_write_batch(batch)
+                except Exception as exc:
+                    if self.args.fail_fast:
+                        raise
+                    self._failed_count = failed_before + len(batch)
+                    logger.warning(
+                        "Inference failed for %d sample(s): %s", len(batch), exc
+                    )
+                finally:
+                    pbar.update(1)
 
 
 def main() -> None:

@@ -24,7 +24,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+readonly PROJECT_ROOT
 
 cd "$PROJECT_ROOT"
 
@@ -46,7 +47,6 @@ MAX_COMPLETION_TOKENS="${MAX_COMPLETION_TOKENS:-1024}"  # 代码生成一般较�
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-60000}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
 SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-empty}"
-TOOL_CHOICE="${TOOL_CHOICE:-none}"
 
 # =============================================================================
 # 输出目录
@@ -123,7 +123,6 @@ run_infer() {
     python -m llmeval.inference.online \
         --input_file "$input_file" \
         --input_key "prompt" \
-        --task "$task" \
         --output_file "$output_file" \
         --base_url "$BASE_URL" \
         --model_name "$MODEL_NAME" \
@@ -135,7 +134,7 @@ run_infer() {
         --max_retries "$MAX_RETRIES" \
         --request_timeout "$REQUEST_TIMEOUT" \
         --system_prompt_type "$SYSTEM_PROMPT_TYPE" \
-        --tool_choice "$TOOL_CHOICE" 2>&1
+        2>&1
 
     local rc=$?
     if [[ $rc -eq 0 ]]; then

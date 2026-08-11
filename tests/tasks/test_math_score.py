@@ -235,7 +235,7 @@ class TestComputeScores:
         def fake_score_math_records(*, eval_dataset, **_kwargs):
             eval_dataset[0].update(
                 accuracy=0.0,
-                evaluation_status="failed",
+                evaluation_status="completed",
                 failure_stage="extraction",
             )
             eval_dataset[1].update(
@@ -257,11 +257,10 @@ class TestComputeScores:
             timeout=60,
         )
 
-        assert result.failed_count == 1
-        assert result.effective_sample_count == 1
-        assert result.failure_counts["extraction_failed"] == 1
-        assert "wrong_answer" not in result.failure_counts
-        assert result.details["wrong_answer_count"] == 1
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 2
+        assert "extraction_failed" not in result.failure_counts
+        assert result.details["wrong_answer_count"] == 2
 
     def test_mixed_accuracy_and_fields(self, tmp_path: Path) -> None:
         from llmeval.tasks.math_eval.math_score import _score_math_records
@@ -283,8 +282,9 @@ class TestComputeScores:
         assert data[1]["accuracy"] == 0.0
         assert "extracted_gold" in data[0]
         assert "extracted_answer" in data[0]
-        assert data[0]["raw_gen"] == "$\\boxed{5}$"
-        assert data[0]["filtered_gen"] == "$\\boxed{5}$"
+        assert data[0]["gen"] == ["$\\boxed{5}$"]
+        assert "raw_gen" not in data[0]
+        assert "filtered_gen" not in data[0]
         assert data[0]["filter_trace"]["pipeline"] == "math_response"
 
     def test_all_correct(self, tmp_path: Path) -> None:
@@ -374,12 +374,33 @@ class TestComputeScores:
             timeout=60,
         )
         assert result.sample_count == 2
-        assert result.effective_sample_count == 1
-        assert result.failed_count == 1
+        assert result.effective_sample_count == 2
+        assert result.failed_count == 0
         assert result.skipped_count == 0
+        assert "inference_failed" not in result.failure_counts
+        assert result.observations["accuracy"] == [1.0, 0.0]
+        assert result.metrics["accuracy"] == 0.5
+
+    def test_explicit_inference_error_is_excluded_even_with_generation(
+        self, tmp_path: Path
+    ) -> None:
+        from llmeval.tasks.math_eval.math_score import score_math_result
+
+        item = _math_item("5", ["$\\boxed{5}$"])
+        item["error"] = "request failed"
+
+        result = score_math_result(
+            eval_dataset=[item],
+            label_key="answer",
+            response_key="gen",
+            max_workers=1,
+            timeout=60,
+        )
+
+        assert result.metrics["accuracy"] == 0.0
+        assert result.effective_sample_count == 0
+        assert result.failed_count == 1
         assert result.failure_counts["inference_failed"] == 1
-        assert result.observations["accuracy"] == [1.0]
-        assert result.metrics["accuracy"] == 1.0
 
     def test_multi_sample_problem_metrics(self, tmp_path: Path) -> None:
         from llmeval.tasks.math_eval.math_score import score_math_result
@@ -530,7 +551,9 @@ class TestRepeatedMathRows:
         result = self._score(data, tmp_path)
 
         assert result.sample_count == 1
-        assert result.failed_count == 1
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 1
+        assert result.metrics["accuracy"] == 0.0
         assert result.records[0]["failure_stage"] == "inference"
 
     def test_identical_responses_remain_independent_samples(
@@ -692,8 +715,8 @@ class TestProblemCompleteness:
         assert result.details["incomplete_problem_count"] == 0
         assert result.details["excluded_problem_doc_ids"] == []
 
-    def test_all_incomplete_reports_zero_and_summary(self, tmp_path: Path) -> None:
-        """Zero complete problems: @k is 0.0 and the summary says so."""
+    def test_empty_generation_is_a_complete_wrong_sample(self, tmp_path: Path) -> None:
+        """A model's empty answer is wrong without making the problem incomplete."""
         from llmeval.tasks.math_eval.math_score import score_math_result
 
         data = [
@@ -713,8 +736,8 @@ class TestProblemCompleteness:
             max_workers=2,
             timeout=60,
         )
-        assert result.metrics["problem_pass@2"] == 0.0
-        assert result.metrics["problem_majority@2"] == 0.0
-        assert result.details["complete_problem_count"] == 0
-        assert result.details["incomplete_problem_count"] == 1
-        assert result.details["excluded_problem_doc_ids"] == ["doc:aime24:0"]
+        assert result.metrics["problem_pass@2"] == 1.0
+        assert result.metrics["problem_majority@2"] == 1.0
+        assert result.details["complete_problem_count"] == 1
+        assert result.details["incomplete_problem_count"] == 0
+        assert result.details["excluded_problem_doc_ids"] == []

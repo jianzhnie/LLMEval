@@ -18,6 +18,15 @@ def test_atomic_json_writes_exact_destination(tmp_path: Path) -> None:
     assert json.loads(output.read_text()) == {"accuracy": 1.0}
 
 
+def test_atomic_json_rejects_non_finite_numbers(tmp_path: Path) -> None:
+    output = tmp_path / "result.json"
+
+    with pytest.raises(ValueError, match="Out of range float values"):
+        atomic_write_json(output, {"score": float("nan")})
+
+    assert not output.exists()
+
+
 def test_atomic_jsonl_replaces_existing_file(tmp_path: Path) -> None:
     output = tmp_path / "result.jsonl"
     output.write_text('{"old": true}\n')

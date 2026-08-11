@@ -149,7 +149,6 @@ def _make_mc_runner(
         "processed": 0,
         "failed": 0,
         "correct": 0,
-        "skipped": 0,
     }
     return runner
 
@@ -229,18 +228,6 @@ class TestMCLoglikelihoodClient:
 
         assert client.get_choices_logprobs("prompt", ["A"]) == [-0.1]
         assert client.client.chat.completions.create.call_count == 2
-
-    def test_tool_choice_none_is_omitted(self) -> None:
-        client = _make_ll_client()
-        client.client.chat.completions.create.return_value = _fake_top_probs_resp(
-            {" A": -3.0}
-        )
-
-        client.get_choices_logprobs("prompt", ["A"])
-
-        assert (
-            "tool_choice" not in client.client.chat.completions.create.call_args.kwargs
-        )
 
     def test_extra_body_is_forwarded(self) -> None:
         client = _make_ll_client()
@@ -336,6 +323,7 @@ class TestProcessLoglikelihoodItem:
 
         assert runner._stats["failed"] == 1
         assert runner._stats["processed"] == 0
+        assert not Path(runner.config.output_file).exists()
 
     def test_run_logs_effective_mode(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
@@ -473,20 +461,20 @@ class TestProcessLoglikelihoodItem:
         assert result["logprobs"] == [-0.2, None]
         json.dumps(result, allow_nan=False)
 
-    def test_first_token_context_length_returns_permanent_failure_row(
-        self, tmp_path: Path
-    ) -> None:
+    def test_first_token_failed_request_is_not_returned(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
         runner.client = MagicMock()
         runner.client.get_choices_logprobs.return_value = None
 
-        result = runner.process_loglikelihood_item(
-            {"doc_id": "test:0", "prompt": "q", "choices": ["a", "b"], "gold": 1}
-        )
-
-        assert result["error"] == "context_length_exceeded"
-        assert result["logprobs"] == []
-        assert result["pred"] == -1
+        with pytest.raises(RuntimeError, match="no result"):
+            runner.process_loglikelihood_item(
+                {
+                    "doc_id": "test:0",
+                    "prompt": "q",
+                    "choices": ["a", "b"],
+                    "gold": 1,
+                }
+            )
 
 
 class TestProcessGenerateItem:
@@ -503,33 +491,14 @@ class TestProcessGenerateItem:
                 "sample_index": 0,
                 "prompt": "q",
                 "answer": "A",
+                "error": "legacy failure",
             },
             client,
             [],
         )
 
         assert result["gen"] == "ans"
-
-    def test_tool_choice_auto_is_sent(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path, mode="generate")
-        runner.config.tool_choice = "auto"
-        client = MagicMock()
-        client.chat.completions.create.return_value.choices = [
-            _generation_choice("ans")
-        ]
-
-        runner.process_generate_item(
-            {
-                "doc_id": "test:0",
-                "sample_index": 0,
-                "prompt": "q",
-                "answer": "A",
-            },
-            client,
-            [],
-        )
-
-        assert client.chat.completions.create.call_args.kwargs["tool_choice"] == "auto"
+        assert "error" not in result
 
     def test_shared_generation_options_are_sent(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
@@ -597,27 +566,24 @@ class TestProcessGenerateItem:
         assert result["gen"] == "answer"
         assert client.chat.completions.create.call_count == 2
 
-    def test_context_length_returns_permanent_failure_row(self, tmp_path: Path) -> None:
-        """Context-length rejection yields a marked row instead of raising."""
+    def test_failed_generation_is_not_returned(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         client = MagicMock()
         client.chat.completions.create.side_effect = _make_api_error(
             "This model's maximum context length is 8192", 400
         )
 
-        result = runner.process_generate_item(
-            {
-                "doc_id": "test:0",
-                "sample_index": 0,
-                "prompt": "q",
-                "answer": "A",
-            },
-            client,
-            [],
-        )
-
-        assert result["gen"] == ""
-        assert result["error"] == "context_length_exceeded"
+        with pytest.raises(RuntimeError, match="no usable text"):
+            runner.process_generate_item(
+                {
+                    "doc_id": "test:0",
+                    "sample_index": 0,
+                    "prompt": "q",
+                    "answer": "A",
+                },
+                client,
+                [],
+            )
 
     def test_single_request_uses_transient_seed(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
@@ -688,9 +654,6 @@ class TestMCStableResume:
         first = runner.load_data()
         assert len(first) == 3
         assert [item["sample_index"] for item in first] == [0, 1, 2]
-        assert all(
-            not any(key.startswith("_llmeval_") for key in item) for item in first
-        )
         document_id = first[0]["doc_id"]
         Path(runner.config.output_file).write_text(
             "".join(
@@ -710,7 +673,6 @@ class TestMCStableResume:
         remaining = runner.load_data()
 
         assert len(remaining) == 1
-        assert not any(key.startswith("_llmeval_") for key in remaining[0])
 
     def test_mixed_stable_and_legacy_output_both_resume(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
@@ -744,8 +706,7 @@ class TestMCStableResume:
 
         assert runner.load_data() == []
 
-    def test_context_length_row_is_skipped_on_resume(self, tmp_path: Path) -> None:
-        """A permanent-failure (context-length) row counts as completed."""
+    def test_legacy_failure_row_is_retried_on_resume(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         Path(runner.config.input_file).write_text(
             json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "A"}) + "\n"
@@ -763,7 +724,9 @@ class TestMCStableResume:
             + "\n"
         )
 
-        assert runner.load_data() == []
+        remaining = runner.load_data()
+        assert len(remaining) == 1
+        assert remaining[0]["doc_id"] == "test:0"
 
     def test_generate_resume_uses_completed_row_count(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
@@ -789,7 +752,6 @@ class TestMCStableResume:
         remaining = runner.load_data()
 
         assert len(remaining) == 1
-        assert not any(key.startswith("_llmeval_") for key in remaining[0])
 
 
 class TestMCRunnerEndToEnd:
@@ -1046,14 +1008,13 @@ TestProcessLoglikelihoodItem.test_full_choice_text_uses_answer_letters = (
 )
 
 
-def _mc_process_ll_no_choices_returns_none(self, tmp_path: Path) -> None:
+def _mc_process_ll_no_choices_raises(self, tmp_path: Path) -> None:
     runner = _make_mc_runner(tmp_path)
-    assert runner.process_loglikelihood_item({"prompt": "q"}) is None
+    with pytest.raises(ValueError, match="non-empty list"):
+        runner.process_loglikelihood_item({"prompt": "q"})
 
 
-TestProcessLoglikelihoodItem.test_no_choices_returns_none = (
-    _mc_process_ll_no_choices_returns_none
-)
+TestProcessLoglikelihoodItem.test_no_choices_raises = _mc_process_ll_no_choices_raises
 
 
 def _mc_process_gen_persistent_error_raises_after_retries(self, tmp_path: Path) -> None:
@@ -1078,7 +1039,7 @@ TestProcessGenerateItem.test_persistent_error_raises_after_retries = (
 )
 
 
-def _mc_runner_failed_items_dumped_not_written(self, tmp_path: Path) -> None:
+def _mc_runner_failed_items_are_not_written(self, tmp_path: Path) -> None:
     from llmeval.inference import mc as mc_infer
 
     class FailLLClient:
@@ -1097,16 +1058,18 @@ def _mc_runner_failed_items_dumped_not_written(self, tmp_path: Path) -> None:
         mode="loglikelihood",
         max_workers=2,
     )
-    with patch.object(mc_infer, "MCLoglikelihoodClient", FailLLClient):
+    with (
+        patch.object(mc_infer, "MCLoglikelihoodClient", FailLLClient),
+        pytest.raises(RuntimeError, match="failed for 2 sample"),
+    ):
         MCRunner(cfg).run()
     assert not out.exists()  # nothing scored
     failed = tmp_path / "out_failed.jsonl"
-    assert failed.exists()
-    assert len(failed.read_text().strip().split("\n")) == 2
+    assert not failed.exists()
 
 
-TestMCRunnerEndToEnd.test_failed_items_dumped_not_written = (
-    _mc_runner_failed_items_dumped_not_written
+TestMCRunnerEndToEnd.test_failed_items_are_not_written = (
+    _mc_runner_failed_items_are_not_written
 )
 
 

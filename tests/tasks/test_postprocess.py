@@ -86,8 +86,16 @@ def test_registered_pipeline_records_each_filter_step() -> None:
     assert trace["pipeline"] == "test_pipeline"
     assert trace["pipeline_version"] == "3"
     assert [step["name"] for step in trace["filters"]] == ["strip", "upper"]
-    assert trace["filters"][0]["input"] == " a "
-    assert trace["filters"][1]["output"] == "A"
+    assert trace["filters"][0] == {
+        "name": "strip",
+        "version": "2",
+        "changed": True,
+        "input_length": 3,
+        "output_length": 1,
+    }
+    assert trace["filters"][1]["output_length"] == 1
+    assert "raw" not in trace
+    assert "output" not in trace
 
 
 def test_resolve_max_workers_respects_cpu_limit(
