@@ -12,12 +12,12 @@ specified task type. Supported task families:
 Features:
     - JSONL input file processing
     - Flexible task-specific evaluation
-    - Structured JSONL and summary output
+    - Structured JSON summary output
     - Parallel processing capabilities
     - Robust error handling
 
 Example:
-    $ python llmeval/evaluator.py --input_path data.jsonl --task_name math_opensource/aime24 --cache_path cache/
+    $ python -m llmeval.evaluator --input_path data.jsonl --task_name math_opensource/aime24 --result_path results.json
 
 Author: jianzhnie
 Date: 2025
@@ -42,12 +42,15 @@ from llmeval.tasks.mc_eval.mc_score import (
     score_loglikelihood_result,
 )
 from llmeval.tasks.registry import (
+    CodeTask,
     EvaluationContext,
     EvaluationResult,
+    EvaluationTask,
+    MathTask,
+    MCTask,
     MetricValue,
     PreparationContext,
     TaskRegistry,
-    build_default_registry,
     persist_evaluation_result,
 )
 from llmeval.utils.config import (
@@ -61,22 +64,12 @@ from llmeval.utils.log import init_logger
 logger = init_logger("evaluator")
 
 
-def _resolve_cache_path(cache_path: str | Path, task_name: str) -> Path:
-    """Resolve legacy directory-style cache paths to a JSONL output file."""
-    raw_path = str(cache_path)
-    path = Path(cache_path)
-    if (path.exists() and path.is_dir()) or raw_path.endswith(("/", "\\")):
-        filename = task_name.replace("/", "_") or "evaluation"
-        return path / f"{filename}.jsonl"
-    return path
-
-
 def evaluate_task(
     eval_dataset: list[dict[str, Any]],
     task_name: str,
     label_key: str,
     response_key: str,
-    cache_path: str | Path,
+    result_path: str | Path,
     max_workers: int,
     timeout: int = 20,
     exec_timeout: float = 3.0,
@@ -104,7 +97,7 @@ def evaluate_task(
         >>> data = [{"input": "2+2", "answer": "4", "gen": "4"}]
         >>> accuracy = evaluate_task(
         ...     data, "math_opensource", "answer", "gen",
-        ...     "cache/results", max_workers=4
+        ...     "results/evaluation.json", max_workers=4
         ... )
         >>> print(f"Accuracy: {accuracy:.2f}")
     """
@@ -113,7 +106,7 @@ def evaluate_task(
         task_name=task_name,
         label_key=label_key,
         response_key=response_key,
-        cache_path=cache_path,
+        result_path=result_path,
         max_workers=max_workers,
         timeout=timeout,
         exec_timeout=exec_timeout,
@@ -127,29 +120,22 @@ def evaluate_task(
     return result.primary_value
 
 
+def _task_families() -> dict[str, tuple[type[Any], EvaluationTask]]:
+    """Build the task-family definitions from injectable module scorers."""
+    return {
+        "math_opensource": (MathEvalArguments, MathTask(score_math_result)),
+        "mc_opensource": (
+            MCEvalArguments,
+            MCTask(score_generate_result, score_loglikelihood_result),
+        ),
+        "code_opensource": (CodeEvalArguments, CodeTask(score_code_result)),
+    }
+
+
 def _default_registry() -> TaskRegistry:
-    """Build a registry from module symbols so scorer tests remain injectable."""
-    return build_default_registry(
-        score_math_result,
-        score_generate_result,
-        score_loglikelihood_result,
-        score_code_result,
+    return TaskRegistry(
+        {family: task for family, (_, task) in _task_families().items()}
     )
-
-
-def prepare_evaluation_data(
-    data: list[dict[str, Any]],
-    task_name: str,
-    label_key: str,
-    response_key: str,
-) -> list[dict[str, Any]]:
-    """Validate and annotate input through the registered task adapter."""
-    context = PreparationContext(
-        task_name=task_name,
-        label_key=label_key,
-        response_key=response_key,
-    )
-    return _default_registry().resolve(task_name).prepare_dataset(data, context)
 
 
 def evaluate_task_result(
@@ -157,7 +143,7 @@ def evaluate_task_result(
     task_name: str,
     label_key: str,
     response_key: str,
-    cache_path: str | Path,
+    result_path: str | Path,
     max_workers: int,
     timeout: int = 20,
     exec_timeout: float = 3.0,
@@ -170,13 +156,57 @@ def evaluate_task_result(
 ) -> EvaluationResult:
     """Evaluate a task through the registry and return all declared metrics."""
     actual_seed = 0 if seed is None else seed
-    resolved_cache_path = _resolve_cache_path(cache_path, task_name)
+    if type(max_workers) is not int or max_workers <= 0:
+        raise ValueError(f"max_workers must be positive, got {max_workers!r}")
+    if type(timeout) is not int or timeout <= 0:
+        raise ValueError(f"timeout must be positive, got {timeout!r}")
+    if (
+        not isinstance(exec_timeout, int | float)
+        or isinstance(exec_timeout, bool)
+        or exec_timeout <= 0
+    ):
+        raise ValueError(f"exec_timeout must be positive, got {exec_timeout!r}")
+    if type(actual_seed) is not int or actual_seed < 0:
+        raise ValueError(f"seed must be non-negative, got {actual_seed!r}")
+    if type(bootstrap_samples) is not int or bootstrap_samples < 0:
+        raise ValueError(
+            f"bootstrap_samples must be non-negative, got {bootstrap_samples!r}"
+        )
+    if not isinstance(confidence_level, int | float) or not (
+        0.0 < confidence_level < 1.0
+    ):
+        raise ValueError(
+            f"confidence_level must be between 0 and 1, got {confidence_level!r}"
+        )
+    if (
+        not isinstance(code_k_values, tuple)
+        or not code_k_values
+        or any(type(value) is not int or value <= 0 for value in code_k_values)
+    ):
+        raise ValueError(
+            f"code_k_values must contain positive integers, got {code_k_values!r}"
+        )
+    if not str(result_path).strip():
+        raise ValueError("result_path must be a non-empty file path")
+    resolved_result_path = Path(result_path)
+    if resolved_result_path.exists() and resolved_result_path.is_dir():
+        raise ValueError("result_path must be a file path, not a directory")
+    registry = _default_registry()
+    task = registry.resolve(task_name)
+    prepared_dataset = task.prepare_dataset(
+        eval_dataset,
+        PreparationContext(
+            task_name=task_name,
+            label_key=label_key,
+            response_key=response_key,
+        ),
+    )
     context = EvaluationContext(
-        eval_dataset=eval_dataset,
+        eval_dataset=prepared_dataset,
         task_name=task_name,
         label_key=label_key,
         response_key=response_key,
-        cache_path=resolved_cache_path,
+        result_path=resolved_result_path,
         max_workers=max_workers,
         timeout=timeout,
         exec_timeout=exec_timeout,
@@ -187,8 +217,6 @@ def evaluate_task_result(
         confidence_level=confidence_level,
         code_k_values=code_k_values,
     )
-    registry = _default_registry()
-    task = registry.resolve(task_name)
     if not eval_dataset:
         logger.warning("Empty dataset provided for evaluation")
         result = EvaluationResult(
@@ -204,7 +232,7 @@ def evaluate_task_result(
             },
             primary_metric=task.metric_specs[0].name if task.metric_specs else None,
         )
-        persist_evaluation_result(result, context.cache_path)
+        persist_evaluation_result(result, context.result_path)
     else:
         result = registry.evaluate(context)
     for name, metric in result.metrics.items():
@@ -234,9 +262,7 @@ def select_eval_arguments(task_name: str) -> type[Any]:
     """Select the task-specific CLI schema from a task family name."""
     family = task_name.split("/", 1)[0]
     argument_types = {
-        "math_opensource": MathEvalArguments,
-        "mc_opensource": MCEvalArguments,
-        "code_opensource": CodeEvalArguments,
+        family: definition[0] for family, definition in _task_families().items()
     }
     try:
         return argument_types[family]
@@ -304,23 +330,13 @@ def main() -> int:
             logger.error("❌ Input file is empty")
             return 1
 
-        # Task-specific validation and annotation live in the registry. The
-        # evaluator does not need to know how a task identifies its schema.
-        try:
-            processed_data = prepare_evaluation_data(
-                data, args.task_name, args.label_key, args.response_key
-            )
-        except (ValueError, TypeError) as e:
-            logger.error(f"❌ Error processing data: {e!s}")
-            return 1
-
         # Run evaluation and retain the complete metric result.
         evaluate_task_result(
-            eval_dataset=processed_data,
+            eval_dataset=data,
             task_name=args.task_name,
             label_key=args.label_key,
             response_key=args.response_key,
-            cache_path=args.cache_path,
+            result_path=args.result_path,
             max_workers=args.max_workers,
             timeout=args.timeout,
             exec_timeout=getattr(args, "exec_timeout", 3.0),

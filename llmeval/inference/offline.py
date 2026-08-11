@@ -32,8 +32,8 @@ from llmeval.inference.common import (
     append_jsonl,
     build_chat_messages,
     build_vllm_llm_kwargs,
+    derive_request_seed,
     ensure_raw_prompt,
-    get_request_seed,
     load_jsonl,
     load_resume_state,
     prepare_sample_requests,
@@ -53,7 +53,7 @@ def _sample_failure(
 ) -> dict[str, Any]:
     """Build a compact failed-sample audit record."""
     return {
-        "item": {"doc_id": item["doc_id"]},
+        "item": {key: item[key] for key in ("doc_id", "sample_index") if key in item},
         "error_category": category,
         "error_type": type(error).__name__,
         "error": str(error),
@@ -134,7 +134,20 @@ class OfflineInferenceRunner:
         self, items: Sequence[dict[str, Any]]
     ) -> list[SamplingParams]:
         """Return independent, resume-stable sampling parameters per item."""
-        return [self._build_sampling_params(get_request_seed(item)) for item in items]
+        params: list[SamplingParams] = []
+        for item in items:
+            prompt = item.get(self.args.input_key) or item.get("prompt")
+            params.append(
+                self._build_sampling_params(
+                    derive_request_seed(
+                        self.args.seed,
+                        str(item.get("doc_id", "")),
+                        prompt,
+                        item.get("sample_index"),
+                    )
+                )
+            )
+        return params
 
     def _prepare_hf_overrides(self) -> dict[str, Any]:
         """Return explicitly configured Hugging Face model overrides."""
@@ -186,7 +199,6 @@ class OfflineInferenceRunner:
         results: list[dict[str, Any]] = []
         for original_item, model_response in valid_pairs:
             result = dict(original_item)
-            result.pop("_request_seed", None)
             result[self.args.response_key] = model_response
             results.append(result)
         append_jsonl(self.args.output_file, results, self._file_lock)
@@ -233,7 +245,6 @@ class OfflineInferenceRunner:
             resume_state,
             self.args.input_key,
             self.args.n_samples,
-            base_seed=self.args.seed,
         )
 
         if not expanded_data:

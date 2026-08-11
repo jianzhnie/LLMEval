@@ -43,11 +43,6 @@ logger = init_logger("code_execute")
 __all__ = [
     "TimeoutException",
     "check_correctness",
-    "reliability_guard",
-    "reliability_restore",
-    "swallow_io",
-    "time_limit",
-    "unsafe_execute",
 ]
 
 # ===========================================================================
@@ -510,9 +505,9 @@ _LOGGED_MP_METHODS: set[str] = set()
 def _resolve_mp_method() -> str:
     """Resolve the multiprocessing start method for worker processes.
 
-    The default is ``"fork"`` whenever the platform supports it (see
-    :func:`check_correctness` for the rationale); platforms without ``fork``
-    fall back to ``"spawn"`` with a warning.  The environment variable
+    Linux defaults to ``"fork"`` for low per-sample startup overhead. macOS
+    and platforms without ``fork`` default to ``"spawn"`` because forking a
+    multi-threaded process can deadlock. The environment variable
     ``LLMEVAL_MP_METHOD`` explicitly overrides the default; a value not in
     :func:`multiprocessing.get_all_start_methods` raises ``ValueError``
     instead of silently falling back.
@@ -527,6 +522,8 @@ def _resolve_mp_method() -> str:
                 f"supported start methods on this platform: {available}"
             )
         method = override
+    elif sys.platform == "darwin" and "spawn" in available:
+        method = "spawn"
     elif "fork" in available:
         method = "fork"
     else:
@@ -567,23 +564,14 @@ def check_correctness(
     :func:`unsafe_execute` helper remains available for trusted internal tests,
     but production callers should use this function with an isolated runtime.
 
-    The multiprocessing start method defaults to ``"fork"`` (when supported
-    by the platform, otherwise ``"spawn"``).  ``fork`` is the default because
-    scoring already runs inside Pebble ``ProcessPool`` workers and
-    ``check_correctness`` spawns one child **per sample** — with ``spawn``
-    each child re-bootstraps the interpreter and re-imports the module tree,
-    and that startup cost is charged against the outer pool-level timeout
-    budget, which caused scoring timeouts in practice.
+    Linux defaults to ``"fork"`` because scoring already runs inside Pebble
+    workers and ``check_correctness`` starts one child per sample. macOS uses
+    ``"spawn"`` to avoid the deadlock risk of forking a multi-threaded process.
 
     .. warning::
-        Forking a multi-threaded process can deadlock if the child inherits
-        a lock held by another thread.  Scoring workers must therefore avoid
-        holding locks across ``check_correctness`` calls (the Pebble worker
-        and the child itself are single-threaded at fork time).  If a caller
-        ever runs this from a process with lock-holding threads, set
-        ``LLMEVAL_MP_METHOD=spawn`` to opt back into the safer (but slower)
-        start method.  An invalid ``LLMEVAL_MP_METHOD`` value raises
-        ``ValueError`` rather than silently falling back.
+        Forking a multi-threaded process can deadlock if the child inherits a
+        held lock. Linux callers with background threads should set
+        ``LLMEVAL_MP_METHOD=spawn``. An invalid override raises ``ValueError``.
 
     Returns
     -------

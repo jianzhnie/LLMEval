@@ -18,13 +18,12 @@ from llmeval.utils.prompts import is_chat_template_applied
 
 __all__ = [
     "CONTEXT_LENGTH_ERROR",
-    "EMPTY_RESPONSE_ERROR",
     "ResumeState",
     "append_jsonl",
     "build_chat_messages",
     "build_vllm_llm_kwargs",
+    "derive_request_seed",
     "ensure_raw_prompt",
-    "get_request_seed",
     "is_explicit_tool_choice",
     "is_local_endpoint",
     "load_jsonl",
@@ -41,7 +40,6 @@ logger = init_logger("inference_common")
 # can never fit the model context, so the row is written once (empty
 # response) and resume treats it as completed instead of rerunning it.
 CONTEXT_LENGTH_ERROR = "context_length_exceeded"
-EMPTY_RESPONSE_ERROR = "empty_response"
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +147,7 @@ def save_failed_items(
             )
             identity = {
                 "doc_id": source.get("doc_id"),
+                "sample_index": source.get("sample_index"),
                 "error_category": entry.get("error_category")
                 or entry.get("error_type")
                 or "unknown",
@@ -173,23 +172,36 @@ def save_failed_items(
 
 @dataclass
 class ResumeState:
-    """Completed row counts and recorded prompts keyed by document ID."""
+    """Completed sample indices and recorded prompts keyed by document ID."""
 
-    completed_counts: dict[str, int] = field(default_factory=dict)
+    completed_indices: dict[str, set[int]] = field(default_factory=dict)
     prompts: dict[str, str] = field(default_factory=dict)
 
     @property
     def completed_count(self) -> int:
         """Return the total number of completed samples represented by the state."""
-        return sum(self.completed_counts.values())
+        return sum(len(indices) for indices in self.completed_indices.values())
 
 
-def get_request_seed(item: dict[str, Any]) -> int:
-    """Return the validated transient seed attached during request expansion."""
-    value = item.get("_request_seed")
-    if type(value) is not int or value < 0:
-        raise ValueError("Expanded inference item is missing a valid request seed")
-    return value
+def derive_request_seed(
+    base_seed: int,
+    document_id: str,
+    prompt: str,
+    sample_index: int,
+) -> int:
+    """Derive a stable per-sample seed without storing private request fields."""
+    if type(base_seed) is not int or base_seed < 0:
+        raise ValueError(f"base_seed must be non-negative, got {base_seed}")
+    if not isinstance(document_id, str) or not document_id.strip():
+        raise ValueError("document_id must be a non-empty string")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("prompt must be a non-empty string")
+    if type(sample_index) is not int or sample_index < 0:
+        raise ValueError(f"sample_index must be non-negative, got {sample_index}")
+    payload = f"{base_seed}\0{document_id}\0{prompt}\0{sample_index}".encode(
+        "utf-8", errors="replace"
+    )
+    return int.from_bytes(hashlib.sha256(payload).digest()[:4], "big") & 0x7FFFFFFF
 
 
 def load_resume_state(
@@ -210,11 +222,7 @@ def load_resume_state(
             output_path,
             repair_truncated_last_line=repair_truncated_last_line,
         ):
-            internal_fields = [
-                key
-                for key in item
-                if key.startswith("_llmeval_") or key == "_request_seed"
-            ]
+            internal_fields = [key for key in item if key.startswith("_llmeval_")]
             if internal_fields:
                 raise ValueError(
                     f"Resume file {output_path} line {line_num} uses unsupported "
@@ -230,9 +238,25 @@ def load_resume_state(
                     "'doc_id'; migrate legacy resume output before continuing"
                 )
             document_key = str(document_id)
-            state.completed_counts[document_key] = (
-                state.completed_counts.get(document_key, 0) + 1
-            )
+            completed = state.completed_indices.setdefault(document_key, set())
+            sample_index = item.get("sample_index")
+            if sample_index is None:
+                # Legacy rows did not persist sample identity. Assign the next
+                # free index in file order so existing result files remain usable.
+                sample_index = 0
+                while sample_index in completed:
+                    sample_index += 1
+            if type(sample_index) is not int or sample_index < 0:
+                raise ValueError(
+                    f"Resume file {output_path} line {line_num} has invalid "
+                    f"sample_index={sample_index!r}"
+                )
+            if sample_index in completed:
+                raise ValueError(
+                    f"Resume file {output_path} line {line_num} duplicates "
+                    f"sample_index={sample_index} for doc_id={document_key!r}"
+                )
+            completed.add(sample_index)
 
             prompt = item.get(input_key) or item.get("prompt")
             if prompt is not None:
@@ -260,8 +284,10 @@ def _is_completed_record(
     # Permanent-failure rows (e.g. context-length rejections) are written
     # once with an empty response; they count as completed so resume skips
     # them instead of rerunning a request that can never succeed.
-    if item.get("error") in {CONTEXT_LENGTH_ERROR, EMPTY_RESPONSE_ERROR}:
+    if item.get("error") == CONTEXT_LENGTH_ERROR:
         return True
+    if item.get("error"):
+        return False
 
     # Only a non-empty list of per-choice numeric scores marks completion;
     # an input record that happens to carry some other "logprobs" value
@@ -271,12 +297,18 @@ def _is_completed_record(
         isinstance(logprobs, list)
         and logprobs
         and any(
-            isinstance(value, int | float) and math.isfinite(float(value))
+            isinstance(value, int | float)
+            and math.isfinite(float(value))
+            and not isinstance(value, bool)
             for value in logprobs
         )
         and all(
             value is None
-            or (isinstance(value, int | float) and math.isfinite(float(value)))
+            or (
+                isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            )
             for value in logprobs
         )
     ):
@@ -308,17 +340,13 @@ def prepare_sample_requests(
     input_key: str,
     n_samples: int,
     *,
-    base_seed: int,
     prompt_resolver: Callable[[dict[str, Any]], str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return one independent request row per unfinished sample."""
     if not input_key:
         raise ValueError("input_key must be non-empty")
-    if n_samples <= 0:
+    if type(n_samples) is not int or n_samples <= 0:
         raise ValueError(f"n_samples must be positive, got {n_samples}")
-    if type(base_seed) is not int or base_seed < 0:
-        raise ValueError(f"base_seed must be non-negative, got {base_seed}")
-
     expanded: list[dict[str, Any]] = []
     first_indices: dict[str, int] = {}
     for index, source in enumerate(raw_data):
@@ -362,22 +390,19 @@ def prepare_sample_requests(
                 f"Input record at index {index} changed prompt for doc_id="
                 f"{document_key!r}; use a new output file"
             )
-        completed = resume_state.completed_counts.get(document_key, 0)
-        if completed > n_samples:
+        completed = resume_state.completed_indices.get(document_key, set())
+        invalid_indices = sorted(index for index in completed if index >= n_samples)
+        if invalid_indices:
             raise ValueError(
-                f"Resume output contains {completed} rows for doc_id={document_key!r}, "
-                f"exceeding requested n_samples={n_samples}"
+                f"Resume output contains sample indices {invalid_indices} for "
+                f"doc_id={document_key!r}, outside requested n_samples={n_samples}"
             )
 
-        for generation_ordinal in range(completed, n_samples):
-            seed_payload = (
-                f"{base_seed}\0{document_key}\0{prompt}\0{generation_ordinal}"
-            ).encode("utf-8", errors="replace")
+        for generation_ordinal in range(n_samples):
+            if generation_ordinal in completed:
+                continue
             item = copy.deepcopy(source)
-            item["_request_seed"] = (
-                int.from_bytes(hashlib.sha256(seed_payload).digest()[:4], "big")
-                & 0x7FFFFFFF
-            )
+            item["sample_index"] = generation_ordinal
             expanded.append(item)
     return expanded
 
@@ -432,7 +457,14 @@ def process_batches_with_policy(
                     "error": str(exc),
                     "batch_index": batch_index,
                     "batch_size": len(batch),
-                    "items": [{"doc_id": item["doc_id"]} for item in batch],
+                    "items": [
+                        {
+                            key: item[key]
+                            for key in ("doc_id", "sample_index")
+                            if key in item
+                        }
+                        for item in batch
+                    ],
                 }
             )
         finally:

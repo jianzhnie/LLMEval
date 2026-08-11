@@ -4,7 +4,7 @@ Architecture matches ``mc_score.py``:
     * Module-level picklable worker (``_process_code_item``)
     * Serial / parallel dispatcher (``_score_items``)
     * Aggregate result dataclass (``CodeScoreResult``)
-    * JSONL + summary result persistence (``write_cache``)
+    * Structured in-memory result returned to the task registry
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import ast
 import re
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from pebble import ProcessPool
@@ -24,7 +23,6 @@ from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
     normalize_single_generation_samples,
-    persist_results,
     resolve_max_workers,
     strip_reasoning_wrappers,
 )
@@ -37,9 +35,7 @@ __all__ = [
     "CodeScoreResult",
     "estimate_pass_at_k",
     "extract_code",
-    "score_code",
     "score_code_result",
-    "write_cache",
 ]
 
 # ===========================================================================
@@ -218,7 +214,7 @@ class CodeScoreResult:
     """Number of samples that passed all tests."""
 
     problems: int = 0
-    """Number of distinct benchmark problems."""
+    """Number of complete benchmark problems included in Pass@k."""
 
     records: list[dict[str, Any]] = field(default_factory=list)
     """Per-item execution records (``task_id``, ``passed``, ``result``, ``stderr``)."""
@@ -399,6 +395,16 @@ def _process_code_item_impl(
         record.update(filter_artifacts)
         return idx, record
 
+    inference_error = item.get("error")
+    if inference_error:
+        record = _failure_record(
+            task_id,
+            f"failed: inference error: {inference_error}",
+            evaluation_status="failed",
+        )
+        record.update(filter_artifacts)
+        return idx, record
+
     if not gen_str.strip():
         record = _failure_record(task_id, "failed: empty generation")
         record.update(filter_artifacts)
@@ -512,12 +518,8 @@ def _score_items(
         for i, item in enumerate(eval_dataset)
     ]
 
-    # NOTE: each pool worker calls ``check_correctness`` once per sample, and
-    # that child process defaults to the ``fork`` start method (see
-    # ``execute._resolve_mp_method``) — ``spawn``'s interpreter restart per
-    # sample used to consume the pool-level ``timeout`` budget below and
-    # caused spurious scoring timeouts.  Set ``LLMEVAL_MP_METHOD=spawn`` to
-    # opt back in if fork-unsafe threads are ever introduced.
+    # Each pool worker calls ``check_correctness`` once per sample. Linux uses
+    # fork for low startup overhead; macOS uses spawn to avoid unsafe forks.
     with (
         tqdm(total=total, desc="Scoring code", unit="item") as pbar,
         ProcessPool(max_workers=optimal_workers) as pool,
@@ -605,14 +607,25 @@ def _compute_pass_at_k(
 def _completed_code_groups(
     records: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group completed code observations by their stable problem identity."""
+    """Return problem groups whose samples all completed successfully.
+
+    Pass@k is a problem-level estimate. Keeping the successful subset of an
+    incomplete problem can bias that estimate, so any scorer, worker, or
+    inference failure excludes the whole problem from problem-level metrics.
+    The individual failures remain in ``records`` and in the sample counters.
+    """
     grouped: dict[str, list[dict[str, Any]]] = {}
     for record in records:
-        if record.get("evaluation_status", "completed") != "completed":
-            continue
         task_id = str(record["task_id"])
         grouped.setdefault(task_id, []).append(record)
-    return grouped
+    return {
+        task_id: problem_records
+        for task_id, problem_records in grouped.items()
+        if all(
+            record.get("evaluation_status", "completed") == "completed"
+            for record in problem_records
+        )
+    }
 
 
 # ===========================================================================
@@ -624,13 +637,11 @@ def _score_code_task_result(
     eval_dataset: list[dict[str, Any]],
     label_key: str,
     response_key: str,
-    cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 20,
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
     k_values: tuple[int, ...] = (1, 10, 64),
     allow_unsafe_code: bool = False,
-    persist_legacy: bool = True,
 ) -> tuple[CodeScoreResult, dict[str, list[dict[str, Any]]]]:
     """Score a code-generation dataset and return task-native details.
 
@@ -647,9 +658,6 @@ def _score_code_task_result(
         Dict key for the ground-truth test harness (e.g. ``"answer"``).
     response_key : str
         Dict key for the model output (e.g. ``"gen"``).
-    cache_path : str | Path
-        Path for the per-item JSONL result file. A ``.summary.json`` is written
-        alongside it.
     max_workers : int
         Maximum Pebble ``ProcessPool`` workers (≤ 1 = serial).
     timeout : int
@@ -674,7 +682,11 @@ def _score_code_task_result(
         )
     # ``k_values`` is a scorer-level option rather than an inference config
     # field, so validate it at the public scoring boundary.
-    if any(k <= 0 for k in k_values):
+    if (
+        not isinstance(k_values, tuple)
+        or not k_values
+        or any(type(k) is not int or k <= 0 for k in k_values)
+    ):
         raise ValueError(
             f"k_values must contain only positive integers, got {k_values}"
         )
@@ -727,11 +739,8 @@ def _score_code_task_result(
         problems=problems,
         records=records,
     )
-    if persist_legacy:
-        write_cache(result, cache_path)
-
     logger.info(
-        "Pass@1 (problem macro): %.2f%% across %d problem(s); "
+        "Pass@1 (problem macro): %.2f%% across %d complete problem(s); "
         "sample outcomes: %d/%d passed",
         pass_at_1 * 100,
         problems,
@@ -799,26 +808,22 @@ def score_code_result(
     eval_dataset: list[dict[str, Any]],
     label_key: str,
     response_key: str,
-    cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 20,
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
     k_values: tuple[int, ...] = (1, 10, 64),
     allow_unsafe_code: bool = False,
-    persist_legacy: bool = True,
 ) -> ScorerResult:
     """Score code and return the registry's structured scorer contract."""
     result, completed_groups = _score_code_task_result(
         eval_dataset,
         label_key,
         response_key,
-        cache_path,
         max_workers=max_workers,
         timeout=timeout,
         exec_timeout=exec_timeout,
         k_values=k_values,
         allow_unsafe_code=allow_unsafe_code,
-        persist_legacy=persist_legacy,
     )
     metrics = dict(result.pass_at_k)
     metrics.setdefault("pass@1", result.pass_at_1)
@@ -838,10 +843,21 @@ def score_code_result(
         failure_counts["failed"] = failed_count
     if timeout_count:
         failure_counts["timeout"] = timeout_count
+    all_problem_ids = list(
+        dict.fromkeys(str(record["task_id"]) for record in result.records)
+    )
+    excluded_problem_ids = [
+        task_id for task_id in all_problem_ids if task_id not in completed_groups
+    ]
     return ScorerResult(
         metrics=metrics,
         observations=observations,
         records=result.records,
+        details={
+            "complete_problem_count": len(completed_groups),
+            "incomplete_problem_count": len(excluded_problem_ids),
+            "excluded_problem_task_ids": excluded_problem_ids,
+        },
         sample_count=result.total,
         effective_sample_count=max(
             result.total - failed_count - skipped_count - timeout_count, 0
@@ -850,53 +866,4 @@ def score_code_result(
         skipped_count=skipped_count,
         timeout_count=timeout_count,
         failure_counts=failure_counts,
-    )
-
-
-def score_code(
-    eval_dataset: list[dict[str, Any]],
-    label_key: str,
-    response_key: str,
-    cache_path: str | Path,
-    max_workers: int = 8,
-    timeout: int = 20,
-    exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
-    k_values: tuple[int, ...] = (1, 10, 64),
-    allow_unsafe_code: bool = False,
-) -> float:
-    """Compatibility wrapper returning only the primary Pass@1 metric."""
-    return score_code_result(
-        eval_dataset,
-        label_key,
-        response_key,
-        cache_path,
-        max_workers=max_workers,
-        timeout=timeout,
-        exec_timeout=exec_timeout,
-        k_values=k_values,
-        allow_unsafe_code=allow_unsafe_code,
-    ).metrics["pass@1"]
-
-
-# ===========================================================================
-# Result persistence
-# ===========================================================================
-
-
-def write_cache(result: CodeScoreResult, cache_path: str | Path) -> None:
-    """Write a ``.summary.json`` metrics file.
-
-    Pattern matches :func:`llmeval.tasks.mc_eval.mc_score.write_cache`.
-    """
-    persist_results(
-        cache_path,
-        {
-            "pass_at_1": round(result.pass_at_1, 6),
-            "pass_at_k": {
-                key: round(value, 6) for key, value in result.pass_at_k.items()
-            },
-            "total": result.total,
-            "correct": result.correct,
-            "problems": result.problems,
-        },
     )

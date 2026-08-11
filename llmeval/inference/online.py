@@ -26,11 +26,10 @@ from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
     CONTEXT_LENGTH_ERROR,
-    EMPTY_RESPONSE_ERROR,
     append_jsonl,
     build_chat_messages,
+    derive_request_seed,
     ensure_raw_prompt,
-    get_request_seed,
     is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
@@ -134,9 +133,8 @@ class InferenceClient:
     ) -> str | None:
         """Generate one response.
 
-        Empty content is retried while retry budget remains, then normalized
-        to "" so the caller can persist a permanent failure row. ``None`` is
-        reserved for context-length rejection.
+        Empty content is treated as a malformed response and retried. ``None``
+        is reserved for context-length rejection.
         """
         call_args = self._build_call_args(
             query,
@@ -150,9 +148,7 @@ class InferenceClient:
         completion = self._request_with_retry(call_args)
         if completion is None:
             return None  # context length exceeded (logged in retry.should_retry)
-        # Reasoning models may return content=None (thinking exhausted
-        # max_completion_tokens); normalize to "" so callers can treat it uniformly
-        return completion.choices[0].message.content or ""
+        return completion.choices[0].message.content
 
     def _build_call_args(
         self,
@@ -222,11 +218,7 @@ class InferenceClient:
             ClientError: For non-retryable API issues or exhausted retries
         """
 
-        attempt = 0
-
         def do_request() -> Any:
-            nonlocal attempt
-            attempt += 1
             completion = self.client.chat.completions.create(**call_args)
             # Probe the structure so malformed responses are retried too
             try:
@@ -237,7 +229,7 @@ class InferenceClient:
                 ) from exc
             if content is not None and not isinstance(content, str):
                 raise MalformedResponseError("response content is not a string")
-            if (content is None or not content.strip()) and attempt <= self.max_retries:
+            if content is None or not content.strip():
                 raise MalformedResponseError("response content is empty")
             return completion
 
@@ -303,7 +295,6 @@ class InferenceRunner:
             resume_state,
             self.args.input_key,
             self.args.n_samples,
-            base_seed=self.args.seed,
         )
         total_remaining = len(prepared_data)
 
@@ -334,15 +325,9 @@ class InferenceRunner:
         return query
 
     def _build_result(self, item: dict[str, Any], response: str) -> dict[str, Any]:
-        """Build a successful row or a resumable empty-response failure."""
+        """Build one successful output row."""
         result = item.copy()
-        result.pop("_request_seed", None)
-        if not response.strip():
-            logger.warning("Empty response received")
-            result[self.args.response_key] = ""
-            result["error"] = EMPTY_RESPONSE_ERROR
-        else:
-            result[self.args.response_key] = response
+        result[self.args.response_key] = response
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
@@ -351,6 +336,7 @@ class InferenceRunner:
         if not query:
             return None
 
+        sample_index = item.get("sample_index")
         response = self.client.get_content(
             query=query,
             system_prompt=self.system_prompt,
@@ -358,26 +344,31 @@ class InferenceRunner:
             max_completion_tokens=self.args.max_completion_tokens,
             temperature=self.args.temperature,
             top_p=self.args.top_p,
-            seed=get_request_seed(item),
+            seed=derive_request_seed(
+                self.args.seed,
+                str(item.get("doc_id", "")),
+                query,
+                sample_index,
+            ),
         )
 
         if response is None:
             # Context-length rejection can never succeed on retry: persist a
             # permanent-failure row so resume treats the sample as completed.
             result = item.copy()
-            result.pop("_request_seed", None)
             result[self.args.response_key] = ""
             result["error"] = CONTEXT_LENGTH_ERROR
             self._write_result(result)
             with self._stats_lock:
                 self._stats["failed"] += 1
             return result
+        if not response.strip():
+            raise RuntimeError("Inference returned empty content after retries")
 
         result = self._build_result(item, response)
         self._write_result(result)
         with self._stats_lock:
-            status = "failed" if "error" in result else "processed"
-            self._stats[status] += 1
+            self._stats["processed"] += 1
 
         return result
 
@@ -403,6 +394,7 @@ class InferenceRunner:
                             failed_tasks.append(
                                 {
                                     "doc_id": item.get("doc_id"),
+                                    "sample_index": item.get("sample_index"),
                                     "error_category": "sample_processing",
                                     "error": "sample was skipped or returned an empty response",
                                 }
@@ -415,6 +407,7 @@ class InferenceRunner:
                         failed_tasks.append(
                             {
                                 "doc_id": item.get("doc_id"),
+                                "sample_index": item.get("sample_index"),
                                 self.args.input_key: (
                                     str(prompt_val)[:200]
                                     if prompt_val is not None

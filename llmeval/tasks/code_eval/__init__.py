@@ -3,9 +3,9 @@
 Public API::
 
     from llmeval.tasks.code_eval import (
-        check_correctness, unsafe_execute,  # execution sandbox
+        check_correctness,                  # execution guard
         extract_code, estimate_pass_at_k,   # code utilities
-        score_code, write_cache,            # scoring & persistence
+        score_code_result,                  # structured scoring
         CodeScoreResult, TimeoutException,  # types
     )
 """
@@ -14,13 +14,11 @@ from llmeval.tasks.code_eval.code_score import (
     CodeScoreResult,
     estimate_pass_at_k,
     extract_code,
-    score_code,
-    write_cache,
+    score_code_result,
 )
 from llmeval.tasks.code_eval.execute import (
     TimeoutException,
     check_correctness,
-    unsafe_execute,
 )
 
 __all__ = [
@@ -29,7 +27,5 @@ __all__ = [
     "check_correctness",
     "estimate_pass_at_k",
     "extract_code",
-    "score_code",
-    "unsafe_execute",
-    "write_cache",
+    "score_code_result",
 ]

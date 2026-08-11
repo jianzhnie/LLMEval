@@ -1,7 +1,7 @@
 """
 This module provides functionality to evaluate the accuracy of model-generated mathematical answers
 against their ground truth using the `math-verify` library. It leverages multiprocessing to speed
-up the evaluation process and includes robust error handling and caching mechanisms.
+up the evaluation process and includes robust error handling.
 
 The module implements a parallel processing architecture to efficiently handle large batches of
 mathematical evaluation tasks while providing detailed logging and progress tracking.
@@ -25,7 +25,6 @@ from llmeval.tasks.postprocess import (
     DEFAULT_FILTER_REGISTRY,
     TextFilterPipeline,
     normalize_single_generation_samples,
-    persist_results,
     resolve_max_workers,
 )
 from llmeval.tasks.registry import ScorerResult
@@ -516,50 +515,14 @@ def _math_record_status(
     return "completed"
 
 
-def compute_scores(
+def _score_math_records(
     eval_dataset: list[dict[str, Any]],
     label_key: str,
     response_key: str,
-    cache_path: str,
     max_workers: int,
     timeout: int,
-    persist_legacy: bool = True,
 ) -> float:
-    """
-    Computes accuracy scores for a batch of mathematical evaluation jobs using parallel processing.
-
-    This function orchestrates the parallel evaluation process:
-    1. Validates input parameters and dataset
-    2. Optimizes worker count based on system resources and workload
-    3. Processes jobs in parallel with timeout protection
-    4. Tracks statistics (correct answers, timeouts, errors)
-    5. Saves detailed results to JSONL
-    6. Provides comprehensive logging and progress tracking
-
-    Args:
-        eval_dataset (List[Dict[str, Any]]): Evaluation dataset where each dictionary contains:
-            - task: Task identifier (required)
-            - model output and ground truth fields (specified by label_key and response_key)
-            - Other optional metadata
-        label_key (str): Dictionary key for accessing ground truth answers
-        response_key (str): Dictionary key for accessing model-generated answers
-        cache_path (str): File system path for saving processed results
-        max_workers (int): Upper limit on parallel worker processes
-        timeout (int, optional): Maximum seconds allowed per job. Defaults to 20.
-
-    Returns:
-        float: Average accuracy score across all processed jobs (0.0 to 1.0);
-        an empty dataset returns 0.0.
-
-    Raises:
-        OSError: When the result file cannot be written
-
-    Note:
-        Results are saved in JSONL format with additional metadata including:
-        - Performance statistics (correct/timeout/error counts)
-        - Processing parameters (workers, timeout)
-        - Individual job results and extracted answers
-    """
+    """Score normalized math rows in place and return sample-level accuracy."""
     if not eval_dataset:
         logger.info("No jobs to process. Returning 0.0 accuracy.")
         return 0.0
@@ -567,7 +530,6 @@ def compute_scores(
     total = len(eval_dataset)
     stats = ProcessingStats(total=total)
     processed_indices = set()
-    failure_counts: dict[str, int] = Counter()
 
     optimal_workers = resolve_max_workers(total, max_workers)
 
@@ -637,10 +599,8 @@ def compute_scores(
                     stats.correct += 1
                 if status == "timeout":
                     stats.timeout += 1
-                    failure_counts["timeout"] += 1
                 elif status == "failed":
                     stats.error += 1
-                    failure_counts[f"{failure_stage}_failed"] += 1
                 elif status == "skipped":
                     stats.skipped += 1
 
@@ -661,7 +621,6 @@ def compute_scores(
                 }
             )
             stats.timeout += 1
-            failure_counts["timeout"] += 1
 
     logger.info(f"Summary: {total} eval_dataset processed.")
 
@@ -677,20 +636,6 @@ def compute_scores(
     Workers Used: {optimal_workers}
     """)
 
-    # Add metadata and save results
-    metadata = {
-        "total_jobs": stats.total,
-        "correct_count": stats.correct,
-        "timeout_count": stats.timeout,
-        "error_count": stats.error,
-        "skipped_count": stats.skipped,
-        "effective_sample_count": stats.effective,
-        "workers_used": optimal_workers,
-        "timeout_setting": timeout,
-        "failure_counts": dict(failure_counts),
-    }
-
-    logger.debug(f"Processing metadata: {metadata}")
     # Calculate and return the average accuracy
     eligible_accuracy = [
         float(data["accuracy"])
@@ -698,12 +643,6 @@ def compute_scores(
         if data.get("evaluation_status", "completed") == "completed"
     ]
     accuracy = mean(eligible_accuracy) if eligible_accuracy else 0.0
-    if persist_legacy:
-        persist_results(
-            cache_path,
-            {"accuracy": round(accuracy, 6), **metadata},
-        )
-        logger.info("Results saved to %s", cache_path)
     logger.info(f"Final Accuracy: {accuracy:.4f}")
     return accuracy
 
@@ -712,29 +651,19 @@ def score_math_result(
     eval_dataset: list[dict[str, Any]],
     label_key: str,
     response_key: str,
-    cache_path: str,
     max_workers: int,
     timeout: int,
-    persist_legacy: bool = True,
 ) -> ScorerResult:
-    """Return math scores through the registry's structured scorer contract.
-
-    :func:`compute_scores` remains the compatibility API and performs the
-    established JSONL/summary persistence. This entry point builds the registry
-    result from the in-memory annotated records, without reading those files
-    back from disk.
-    """
+    """Score math generations and return the shared structured result."""
     # Each inference row carries one generation; normalize its representation
     # before scoring and problem-level aggregation.
     scoring_dataset = _normalize_math_samples(eval_dataset, label_key, response_key)
-    accuracy = compute_scores(
+    accuracy = _score_math_records(
         eval_dataset=scoring_dataset,
         label_key=label_key,
         response_key=response_key,
-        cache_path=cache_path,
         max_workers=max_workers,
         timeout=timeout,
-        persist_legacy=persist_legacy,
     )
     observations = [
         float(item.get("accuracy", 0.0))

@@ -18,5 +18,5 @@ Quick-start::
 
     accuracy = evaluate_task(data, "code_opensource/humaneval",
                              label_key="answer", response_key="gen",
-                             cache_path="./cache/results.jsonl", max_workers=8)
+                             result_path="./results/evaluation.json", max_workers=8)
 """

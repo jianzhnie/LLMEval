@@ -21,9 +21,9 @@ __all__ = [
     "atomic_write_json",
     "atomic_write_jsonl",
     "normalize_single_generation_samples",
-    "persist_results",
     "resolve_max_workers",
     "resolve_single_generation",
+    "sample_order_indices",
     "strip_reasoning_wrappers",
 ]
 
@@ -171,6 +171,45 @@ def resolve_single_generation(
     return value
 
 
+def sample_order_indices(items: list[dict[str, Any]], *, problem_id: str) -> list[int]:
+    """Return stable sample positions ordered by validated ``sample_index``.
+
+    Legacy rows without an index receive the lowest unused indices in file
+    order. Explicit indices must be non-negative integers and unique within
+    the problem.
+    """
+    explicit: dict[int, int] = {}
+    used: dict[int, int] = {}
+    for position, item in enumerate(items):
+        sample_index = item.get("sample_index")
+        if sample_index is None:
+            continue
+        if type(sample_index) is not int or sample_index < 0:
+            raise ValueError(
+                f"Invalid sample_index {sample_index!r} for problem {problem_id!r}"
+            )
+        previous_position = used.get(sample_index)
+        if previous_position is not None:
+            raise ValueError(
+                f"Duplicate sample_index {sample_index} for problem {problem_id!r}"
+            )
+        explicit[position] = sample_index
+        used[sample_index] = position
+
+    assigned: list[int] = []
+    next_index = 0
+    for position in range(len(items)):
+        sample_index = explicit.get(position)
+        if sample_index is None:
+            while next_index in used:
+                next_index += 1
+            sample_index = next_index
+            used[sample_index] = position
+            next_index += 1
+        assigned.append(sample_index)
+    return sorted(range(len(items)), key=assigned.__getitem__)
+
+
 def normalize_single_generation_samples(
     eval_dataset: list[dict[str, Any]],
     response_key: str,
@@ -186,6 +225,7 @@ def normalize_single_generation_samples(
     must agree across those rows.
     """
     first_seen: dict[str, dict[str, Any]] = {}
+    positions_by_problem: dict[str, list[int]] = {}
     normalized: list[dict[str, Any]] = []
     for row_index, item in enumerate(eval_dataset):
         problem_id = problem_identity(item, row_index)
@@ -201,8 +241,16 @@ def normalize_single_generation_samples(
         response = resolve_single_generation(item, response_key, problem_id=problem_id)
         record = dict(item)
         record[response_key] = [response] if response is not None else []
+        positions_by_problem.setdefault(problem_id, []).append(len(normalized))
         normalized.append(record)
-    return normalized
+
+    ordered = normalized.copy()
+    for problem_id, positions in positions_by_problem.items():
+        samples = [normalized[position] for position in positions]
+        sample_order = sample_order_indices(samples, problem_id=problem_id)
+        for destination, source in zip(positions, sample_order, strict=True):
+            ordered[destination] = samples[source]
+    return ordered
 
 
 def resolve_max_workers(total: int, requested: int) -> int:
@@ -256,14 +304,3 @@ def atomic_write_jsonl(path: str | Path, records: Iterable[dict[str, Any]]) -> N
     with _atomic_text_writer(path) as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def persist_results(
-    cache_path: str | Path,
-    summary: Any,
-) -> Path:
-    """Persist an aggregate summary next to the configured result path."""
-    destination = Path(cache_path)
-    summary_path = destination.with_suffix(".summary.json")
-    atomic_write_json(summary_path, summary, indent=2)
-    return summary_path

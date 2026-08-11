@@ -16,7 +16,7 @@ from pathlib import Path
 from statistics import fmean, pstdev
 from typing import Any, Protocol
 
-from llmeval.tasks.postprocess import persist_results
+from llmeval.tasks.postprocess import atomic_write_json
 from llmeval.utils.log import init_logger
 
 logger = init_logger("task_registry")
@@ -25,13 +25,13 @@ __all__ = [
     "CodeTask",
     "EvaluationContext",
     "EvaluationResult",
+    "EvaluationTask",
     "MCTask",
     "MathTask",
     "MetricValue",
     "PreparationContext",
     "ScorerResult",
     "TaskRegistry",
-    "build_default_registry",
     "metric_from_samples",
     "persist_evaluation_result",
 ]
@@ -237,7 +237,7 @@ class EvaluationContext(PreparationContext):
     """All inputs that affect one evaluation invocation."""
 
     eval_dataset: list[dict[str, Any]]
-    cache_path: Path
+    result_path: Path
     max_workers: int
     timeout: int
     exec_timeout: float
@@ -308,7 +308,7 @@ def _build_evaluation_result(
     )
 
 
-def persist_evaluation_result(result: EvaluationResult, cache_path: Path) -> None:
+def persist_evaluation_result(result: EvaluationResult, result_path: Path) -> None:
     """Persist only the aggregate result summary."""
     summary = result.to_dict()
     summary["summary_version"] = 1
@@ -316,7 +316,7 @@ def persist_evaluation_result(result: EvaluationResult, cache_path: Path) -> Non
     summary["metric_values"] = metric_values
     for name, value in metric_values.items():
         summary.setdefault(name, value)
-    persist_results(cache_path, summary)
+    atomic_write_json(result_path, summary, indent=2)
 
 
 class GeneratedTask:
@@ -352,10 +352,8 @@ class MathTask(GeneratedTask):
             eval_dataset=context.eval_dataset,
             label_key=context.label_key,
             response_key=context.response_key,
-            cache_path=str(context.cache_path),
             max_workers=context.max_workers,
             timeout=context.timeout,
-            persist_legacy=False,
         )
         return _build_evaluation_result(scored, context, self)
 
@@ -381,7 +379,16 @@ class MCTask(GeneratedTask):
 
         Raises ValueError when the dataset mixes loglikelihood and generate items.
         """
-        has_logprobs = ["logprobs" in item for item in data]
+        has_logprobs: list[bool] = []
+        for index, item in enumerate(data):
+            if "logprobs" not in item:
+                has_logprobs.append(False)
+                continue
+            if not isinstance(item["logprobs"], list):
+                raise ValueError(
+                    f"MC item {index} has invalid logprobs; expected a list"
+                )
+            has_logprobs.append(True)
         if any(has_logprobs) and not all(has_logprobs):
             raise ValueError(
                 "Mixed MC dataset detected: all items must use loglikelihood or "
@@ -401,7 +408,6 @@ class MCTask(GeneratedTask):
         scorer = self.loglikelihood_scorer if is_loglikelihood else self.generate_scorer
         kwargs: dict[str, Any] = {
             "eval_dataset": context.eval_dataset,
-            "cache_path": context.cache_path,
             "max_workers": context.max_workers,
             "timeout": context.timeout,
         }
@@ -411,7 +417,6 @@ class MCTask(GeneratedTask):
                 response_key=context.response_key,
                 aggregation=context.mc_aggregation,
             )
-        kwargs["persist_legacy"] = False
         scored = scorer(**kwargs)
         return _build_evaluation_result(scored, context, self)
 
@@ -430,13 +435,11 @@ class CodeTask(GeneratedTask):
             eval_dataset=context.eval_dataset,
             label_key=context.label_key,
             response_key=context.response_key,
-            cache_path=context.cache_path,
             max_workers=context.max_workers,
             timeout=context.timeout,
             exec_timeout=context.exec_timeout,
             k_values=context.code_k_values,
             allow_unsafe_code=context.allow_unsafe_code,
-            persist_legacy=False,
         )
         return _build_evaluation_result(scored, context, self)
 
@@ -471,25 +474,9 @@ class TaskRegistry:
     def evaluate(self, context: EvaluationContext) -> EvaluationResult:
         """Resolve, score, and persist one evaluation invocation."""
         result = self.resolve(context.task_name).score(context)
-        persist_evaluation_result(result, context.cache_path)
+        persist_evaluation_result(result, context.result_path)
         return result
 
     @property
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._tasks))
-
-
-def build_default_registry(
-    math_scorer: StructuredScorer,
-    mc_generate_scorer: StructuredScorer,
-    mc_loglikelihood_scorer: StructuredScorer,
-    code_scorer: StructuredScorer,
-) -> TaskRegistry:
-    """Build the standard registry; scorer arguments keep tests injectable."""
-    return TaskRegistry(
-        {
-            "math_opensource": MathTask(math_scorer),
-            "mc_opensource": MCTask(mc_generate_scorer, mc_loglikelihood_scorer),
-            "code_opensource": CodeTask(code_scorer),
-        }
-    )
