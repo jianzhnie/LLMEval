@@ -333,10 +333,10 @@ class TestScoreCode:
         assert result.effective_sample_count == 1
         assert result.metrics["pass@1"] == 0.0
 
-    def test_pool_timeout_is_classified_timeout(
+    def test_pool_timeout_is_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A pool-level timeout (missing worker result) is timeout, not failed."""
+        """A missing worker result is represented as a failed sample."""
         import llmeval.tasks.code_eval.code_score as code_score
 
         class _EmptyFuture:
@@ -375,11 +375,9 @@ class TestScoreCode:
         )
 
         assert result.sample_count == 2
-        assert result.timeout_count == 2
-        assert result.failed_count == 0
+        assert result.failed_count == 2
         assert result.effective_sample_count == 0
-        assert result.failure_counts == {"timeout": 2}
-        assert all(r["evaluation_status"] == "timeout" for r in result.records)
+        assert all(r["evaluation_status"] == "failed" for r in result.records)
 
     def test_execution_requires_explicit_opt_in(self, tmp_path: Path) -> None:
         with pytest.raises(PermissionError, match="executes generated code"):
@@ -867,7 +865,7 @@ class TestCodeRepeatedRows:
 class TestTimeoutClassification:
     def test_status_strings(self) -> None:
         assert _code_record_status({"result": "timed out"}) == "completed"
-        assert _code_record_status({"result": "timed out: worker killed"}) == "timeout"
+        assert _code_record_status({"result": "timed out: worker killed"}) == "failed"
 
     def test_candidate_infinite_loop_counts_as_wrong(self, tmp_path: Path) -> None:
         """A candidate that dead-loops must stay in the Pass@k denominator."""
@@ -891,7 +889,7 @@ class TestTimeoutClassification:
         assert record["result"] == "timed out"
         assert record["evaluation_status"] == "completed"
         assert result.metrics["pass@1"] == 0.0
-        assert result.timeout_count == 0
+        assert result.failed_count == 0
         assert result.effective_sample_count == 1
 
 
@@ -939,4 +937,3 @@ class TestDefaultScoringPath:
         assert all(status == "completed" for status in statuses.values())
         assert result.metrics["pass@1"] == pytest.approx(2 / 3)
         assert result.failed_count == 0
-        assert result.timeout_count == 0

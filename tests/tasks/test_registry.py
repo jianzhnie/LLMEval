@@ -25,7 +25,6 @@ from llmeval.tasks.registry import (
 def test_evaluation_result_summary_excludes_records(tmp_path: Path) -> None:
     result = EvaluationResult(
         task_name="mc_opensource/mmlu",
-        task_version="mc_v1",
         metrics={"acc": MetricValue(1.0, 1)},
         sample_count=1,
         effective_sample_count=1,
@@ -37,6 +36,7 @@ def test_evaluation_result_summary_excludes_records(tmp_path: Path) -> None:
     persist_evaluation_result(result, tmp_path / "score.json")
     summary = json.loads((tmp_path / "score.json").read_text())
     assert "records" not in summary
+    assert not any("version" in key for key in summary)
     assert summary["acc"] == 1.0
 
 

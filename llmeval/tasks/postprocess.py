@@ -37,10 +37,9 @@ _THINK_END_RE: re.Pattern[str] = re.compile(r"</think\s*>", re.IGNORECASE)
 
 @dataclass(frozen=True)
 class RegisteredTextFilter:
-    """A named, versioned text transformation."""
+    """A named text transformation."""
 
     name: str
-    version: str
     function: TextFilter
 
     def __call__(self, text: str) -> str:
@@ -53,21 +52,17 @@ class FilterRegistry:
     def __init__(self) -> None:
         self._filters: dict[str, RegisteredTextFilter] = {}
 
-    def register(self, name: str, function: TextFilter, *, version: str = "1") -> None:
+    def register(self, name: str, function: TextFilter) -> None:
         if not name:
             raise ValueError("filter name cannot be empty")
         if name in self._filters:
             raise ValueError(f"filter {name!r} is already registered")
-        self._filters[name] = RegisteredTextFilter(name, version, function)
+        self._filters[name] = RegisteredTextFilter(name, function)
 
-    def build_pipeline(
-        self, name: str, version: str, *filter_names: str
-    ) -> TextFilterPipeline:
-        """Build a named, versioned pipeline from registered filters."""
+    def build_pipeline(self, name: str, *filter_names: str) -> TextFilterPipeline:
+        """Build a named pipeline from registered filters."""
         if not name:
             raise ValueError("pipeline name cannot be empty")
-        if not version:
-            raise ValueError("pipeline version cannot be empty")
         missing = [item for item in filter_names if item not in self._filters]
         if missing:
             available = ", ".join(sorted(self._filters)) or "<none>"
@@ -76,17 +71,15 @@ class FilterRegistry:
             )
         return TextFilterPipeline(
             name,
-            version,
             tuple(self._filters[item] for item in filter_names),
         )
 
 
 @dataclass(frozen=True)
 class TextFilterPipeline:
-    """An ordered task-level text pipeline with a stable name and version."""
+    """An ordered task-level text pipeline with a stable name."""
 
     name: str
-    version: str
     filters: tuple[RegisteredTextFilter, ...]
 
     def apply_with_trace(self, value: Any) -> tuple[str, dict[str, Any]]:
@@ -100,7 +93,6 @@ class TextFilterPipeline:
             steps.append(
                 {
                     "name": filter_fn.name,
-                    "version": filter_fn.version,
                     "changed": input_text != text,
                     "input_length": len(input_text),
                     "output_length": len(text),
@@ -108,7 +100,6 @@ class TextFilterPipeline:
             )
         return text, {
             "pipeline": self.name,
-            "pipeline_version": self.version,
             "filters": steps,
             "input_length": len(raw_text),
             "output_length": len(text),
@@ -147,9 +138,7 @@ def strip_reasoning_wrappers(text: str) -> str:
 
 
 DEFAULT_FILTER_REGISTRY = FilterRegistry()
-DEFAULT_FILTER_REGISTRY.register(
-    "strip_reasoning", strip_reasoning_wrappers, version="1"
-)
+DEFAULT_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers)
 
 
 def resolve_single_generation(

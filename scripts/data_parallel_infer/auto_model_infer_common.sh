@@ -1167,7 +1167,7 @@ run_task_batch_parallel() {
         # 检查输入文件是否存在
         if ! ssh_run "$node" "test -f '${input_file}'" >/dev/null 2>&1; then
             log_error "❌ 输入文件 ${input_file} 在节点 ${node} 上不存在"
-            continue
+            return 1
         fi
 
         # 构建推理命令

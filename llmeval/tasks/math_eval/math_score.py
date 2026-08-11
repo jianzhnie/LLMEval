@@ -10,7 +10,6 @@ mathematical evaluation tasks while providing detailed logging and progress trac
 from __future__ import annotations
 
 import re
-from collections import Counter
 from collections.abc import Iterator
 from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 from dataclasses import dataclass, field
@@ -74,7 +73,7 @@ _verify_func = math_metric(
 )
 
 MATH_RESPONSE_PIPELINE: TextFilterPipeline = DEFAULT_FILTER_REGISTRY.build_pipeline(
-    "math_response", "1", "strip_reasoning"
+    "math_response", "strip_reasoning"
 )
 
 INVALID_ANSWER = "[invalidanswer]"
@@ -141,14 +140,12 @@ class ProcessingStats:
 
     total: int = 0
     correct: int = 0
-    timeout: int = 0
-    error: int = 0
-    skipped: int = 0
+    failed: int = 0
 
     @property
     def effective(self) -> int:
         """Number of samples eligible for the accuracy denominator."""
-        return max(self.total - self.timeout - self.error - self.skipped, 0)
+        return max(self.total - self.failed, 0)
 
     @property
     def correct_rate(self) -> float:
@@ -156,14 +153,9 @@ class ProcessingStats:
         return (self.correct / self.effective * 100) if self.effective > 0 else 0.0
 
     @property
-    def timeout_rate(self) -> float:
-        """Calculate percentage of timeouts."""
-        return (self.timeout / self.total * 100) if self.total > 0 else 0.0
-
-    @property
-    def error_rate(self) -> float:
-        """Calculate percentage of errors."""
-        return (self.error / self.total * 100) if self.total > 0 else 0.0
+    def failed_rate(self) -> float:
+        """Calculate percentage of failed evaluations."""
+        return (self.failed / self.total * 100) if self.total > 0 else 0.0
 
 
 @dataclass(frozen=True)
@@ -175,8 +167,7 @@ class MathAnswerResult:
     predicted: str | None
     gold: str | None
     fallback_matched: bool = False
-    failure_stage: str = "none"
-    failure_reason: str | None = None
+    failed: bool = False
     filter_trace: dict[str, Any] = field(default_factory=dict)
 
     def __iter__(self) -> Iterator[int | float | str | None]:
@@ -330,10 +321,8 @@ def _process_answers_impl(
     # Family-only names are valid registry inputs and use generic gold parsing.
     task_name = input_data.get("task", "")
     if not _is_math_task_name(task_name):
-        logger.warning(f"⚠️ Invalid task format for job {index}")
-        return MathAnswerResult(
-            index, 0.0, None, None, failure_stage="input", failure_reason="invalid task"
-        )
+        logger.warning("Invalid task format for job %d", index)
+        return MathAnswerResult(index, 0.0, None, None, failed=True)
     _, _, data_name = task_name.partition("/")
 
     # Parse the ground truth answer from the input data
@@ -341,39 +330,18 @@ def _process_answers_impl(
     try:
         _, gold_answer_text = parse_ground_truth(input_data, data_name, label_key)
     except (ValueError, NotImplementedError, KeyError) as e:
-        logger.error(f"❌ [Error] Parsing gold truth for job {index} failed: {e}")
-        return MathAnswerResult(
-            index,
-            0.0,
-            None,
-            None,
-            failure_stage="input",
-            failure_reason=str(e),
-        )
+        logger.error("Parsing gold truth for job %d failed: %s", index, e)
+        return MathAnswerResult(index, 0.0, None, None, failed=True)
 
     inference_error = input_data.get("error")
     if inference_error:
-        return MathAnswerResult(
-            index,
-            0.0,
-            None,
-            gold_answer_text,
-            failure_stage="inference",
-            failure_reason=str(inference_error),
-        )
+        return MathAnswerResult(index, 0.0, None, gold_answer_text, failed=True)
 
     # Get the generated text. Handles cases where response might be missing or empty.
     generated_text = input_data.get(response_key, [])
     if not generated_text:
-        logger.warning(f"⚠️ No generated text found for job {index}")
-        return MathAnswerResult(
-            index,
-            0.0,
-            None,
-            None,
-            failure_stage="inference",
-            failure_reason="missing generation",
-        )
+        logger.warning("No generated text found for job %d", index)
+        return MathAnswerResult(index, 0.0, None, gold_answer_text)
     raw_generated_text = (
         generated_text[0] if isinstance(generated_text, list) else str(generated_text)
     )
@@ -387,8 +355,7 @@ def _process_answers_impl(
         gold: str | None,
         *,
         fallback_matched: bool = False,
-        failure_stage: str = "none",
-        failure_reason: str | None = None,
+        failed: bool = False,
     ) -> MathAnswerResult:
         return MathAnswerResult(
             index,
@@ -396,8 +363,7 @@ def _process_answers_impl(
             predicted,
             gold,
             fallback_matched=fallback_matched,
-            failure_stage=failure_stage,
-            failure_reason=failure_reason,
+            failed=failed,
             filter_trace=filter_trace,
         )
 
@@ -414,13 +380,7 @@ def _process_answers_impl(
                 "No answers could be extracted for job %d; fallback did not match",
                 index,
             )
-            return result(
-                0.0,
-                None,
-                gold_answer_text,
-                failure_stage="extraction",
-                failure_reason="no answer extracted",
-            )
+            return result(0.0, None, gold_answer_text)
 
         # Extract answers with validation
         gold_ans = extracted_answers[0] if len(extracted_answers) > 0 else None
@@ -428,40 +388,22 @@ def _process_answers_impl(
 
         # Validate grade value
         if not (isinstance(grade, int | float) and 0 <= grade <= 1):
-            logger.error(f"❌ [Error] Invalid grade value {grade} for job {index}")
-            return result(
-                0.0,
-                pred_ans,
-                gold_ans,
-                failure_stage="verification",
-                failure_reason=f"invalid grade: {grade!r}",
-            )
+            logger.error("Invalid grade value %r for job %d", grade, index)
+            return result(0.0, pred_ans, gold_ans, failed=True)
 
         return result(float(grade), pred_ans, gold_ans)
 
     # Note: Pebble enforces timeouts at the pool level (terminating subprocess),
     # so a timeout here is a safety net for timeouts from math_verify internals.
     except _TIMEOUT_ERRORS:
-        logger.warning(f"⏰ [Timeout] Job {index} timed out")
-        return result(
-            0.0,
-            "Timeout",
-            "Timeout",
-            failure_stage="verification",
-            failure_reason="timeout",
-        )
+        logger.warning("Job %d timed out", index)
+        return result(0.0, None, gold_answer_text, failed=True)
     except Exception as e:
         if _math_text_equiv(gold_answer_text, generated_text):
             logger.debug("Fallback normalization matched job %d after %s", index, e)
             return result(1.0, generated_text, gold_answer_text, fallback_matched=True)
         logger.warning("Math verification failed for job %d: %s", index, e)
-        return result(
-            0.0,
-            None,
-            gold_answer_text,
-            failure_stage="verification",
-            failure_reason=str(e),
-        )
+        return result(0.0, None, gold_answer_text, failed=True)
 
 
 def process_answers(
@@ -473,56 +415,7 @@ def process_answers(
         return _process_answers_impl(args)
     except Exception as exc:
         logger.warning("Math scoring worker failed for job %d: %s", index, exc)
-        return MathAnswerResult(
-            index,
-            0.0,
-            None,
-            None,
-            failure_stage="verification",
-            failure_reason=f"worker error: {exc}",
-        )
-
-
-def _math_record_status(
-    item: dict[str, Any],
-    label_key: str,
-    response_key: str,
-    extracted_answer: Any,
-    failure_stage: str = "none",
-) -> str:
-    """Classify a math record for the shared denominator contract.
-
-    Missing or unparseable input fields are skipped (a dataset problem, not a
-    model failure). Empty or unparseable model answers count as incorrect.
-    Explicit inference errors, verification infrastructure failures, worker
-    errors, and timeouts remain outside the model-accuracy denominator.
-    """
-    if extracted_answer == "Timeout":
-        return "timeout"
-    if failure_stage == "input":
-        # Gold-truth parsing failed: the dataset row itself is unusable.
-        return "skipped"
-    if item.get("error"):
-        return "failed"
-    if failure_stage == "extraction":
-        return "completed"
-    if failure_stage == "inference":
-        return "completed"
-    if failure_stage == "verification":
-        return "failed"
-    response = item.get(response_key)
-    label = item.get(label_key)
-    task_name = item.get("task")
-    if (
-        label is None
-        or (isinstance(label, str) and not label.strip())
-        or not isinstance(task_name, str)
-        or not _is_math_task_name(task_name)
-    ):
-        return "skipped"
-    if not response:
-        return "completed"
-    return "completed"
+        return MathAnswerResult(index, 0.0, None, None, failed=True)
 
 
 def _score_math_records(
@@ -562,55 +455,35 @@ def _score_math_records(
             except StopIteration:
                 break
             except _TIMEOUT_ERRORS:
-                # Handle timeout for individual task — skip and continue
-                logger.warning("Individual task timed out, skipping and continuing")
+                logger.warning("Individual task timed out; marked as failed")
                 pbar.update(1)
                 continue
             except Exception as e:
-                # Catch exceptions from the iterator, e.g., if a worker fails.
-                logger.error(f"❌ An error occurred while retrieving a result: {e}")
-                # We can't identify the specific job, so we continue.
+                logger.error("Failed to retrieve math scoring result: %s", e)
                 pbar.update(1)
                 continue
 
             pbar.update(1)
             if result is not None:
-                fallback_matched = bool(getattr(result, "fallback_matched", False))
-                failure_stage = str(getattr(result, "failure_stage", "none"))
-                failure_reason = getattr(result, "failure_reason", None)
                 idx, is_correct, extracted_answer, extracted_gold = result
-                status = _math_record_status(
-                    eval_dataset[idx],
-                    label_key,
-                    response_key,
-                    extracted_answer,
-                    failure_stage,
-                )
+                status = "failed" if result.failed else "completed"
 
-                # Update results atomically
                 eval_dataset[idx].update(
                     {
                         "accuracy": is_correct,
                         "extracted_gold": extracted_gold,
                         "extracted_answer": extracted_answer,
                         "evaluation_status": status,
-                        "failure_stage": failure_stage,
-                        "failure_reason": failure_reason,
-                        "fallback_matched": fallback_matched,
+                        "fallback_matched": result.fallback_matched,
                         "filter_trace": result.filter_trace,
                     }
                 )
                 processed_indices.add(idx)
 
-                # Update statistics
                 if status == "completed" and is_correct == 1.0:
                     stats.correct += 1
-                if status == "timeout":
-                    stats.timeout += 1
                 elif status == "failed":
-                    stats.error += 1
-                elif status == "skipped":
-                    stats.skipped += 1
+                    stats.failed += 1
 
     # Handle any jobs that were not processed. Workers convert their own
     # errors into sentinel results, so a missing index means the pool-level
@@ -620,29 +493,27 @@ def _score_math_records(
             eval_dataset[idx].update(
                 {
                     "accuracy": 0.0,
-                    "extracted_gold": "Timeout",
-                    "extracted_answer": "Timeout",
-                    "evaluation_status": "timeout",
-                    "failure_stage": "verification",
-                    "failure_reason": "pool timeout",
+                    "extracted_gold": None,
+                    "extracted_answer": None,
+                    "evaluation_status": "failed",
                     **_filter_artifacts(eval_dataset[idx].get(response_key)),
                 }
             )
-            stats.timeout += 1
+            stats.failed += 1
 
     logger.info(f"Summary: {total} eval_dataset processed.")
 
-    # Log performance summary
-    logger.info(f"""
-    Performance Summary:
-    -------------------
-    Total Jobs: {stats.total}
-    Correct: {stats.correct} ({stats.correct_rate:.1f}%)
-    Timeouts: {stats.timeout} ({stats.timeout_rate:.1f}%)
-    Errors: {stats.error} ({stats.error_rate:.1f}%)
-    Skipped: {stats.skipped}
-    Workers Used: {optimal_workers}
-    """)
+    logger.info(
+        "Math scoring: total=%d effective=%d correct=%d (%.1f%%) "
+        "failed=%d (%.1f%%) workers=%d",
+        stats.total,
+        stats.effective,
+        stats.correct,
+        stats.correct_rate,
+        stats.failed,
+        stats.failed_rate,
+        optimal_workers,
+    )
 
     # Calculate and return the average accuracy
     eligible_accuracy = [
@@ -678,22 +549,9 @@ def score_math_result(
         for item in scoring_dataset
         if item.get("evaluation_status", "completed") == "completed"
     ]
-    timeout_count = sum(
-        item.get("evaluation_status") == "timeout" for item in scoring_dataset
-    )
     failed_count = sum(
         item.get("evaluation_status") == "failed" for item in scoring_dataset
     )
-    skipped_count = sum(
-        item.get("evaluation_status") == "skipped" for item in scoring_dataset
-    )
-    failure_counts: dict[str, int] = Counter()
-    for item in scoring_dataset:
-        stage = str(item.get("failure_stage", "none"))
-        if item.get("evaluation_status") == "failed":
-            failure_counts[f"{stage}_failed"] += 1
-        elif item.get("evaluation_status") == "timeout":
-            failure_counts["timeout"] += 1
     wrong_answer_count = sum(
         item.get("evaluation_status", "completed") == "completed"
         and float(item.get("accuracy", 0.0)) != 1.0
@@ -721,11 +579,8 @@ def score_math_result(
             ],
         },
         sample_count=len(scoring_dataset),
-        effective_sample_count=len(observations),
+        effective_sample_count=len(scoring_dataset) - failed_count,
         failed_count=failed_count,
-        skipped_count=skipped_count,
-        timeout_count=timeout_count,
-        failure_counts=failure_counts,
     )
 
 

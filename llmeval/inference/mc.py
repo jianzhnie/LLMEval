@@ -621,16 +621,11 @@ class MCRunner:
                         with self._stats_lock:
                             self._stats["failed"] += 1
                     else:
-                        if result.get("error"):
-                            logger.warning("Inference item returned no usable result")
-                            with self._stats_lock:
-                                self._stats["failed"] += 1
-                        else:
-                            self._write_result(result)
-                            with self._stats_lock:
-                                self._stats["processed"] += 1
-                                if result.get("correct"):
-                                    self._stats["correct"] += 1
+                        self._write_result(result)
+                        with self._stats_lock:
+                            self._stats["processed"] += 1
+                            if result.get("correct"):
+                                self._stats["correct"] += 1
                     pbar.update(1)
 
     def _write_result(self, result: dict[str, Any]) -> None:
@@ -691,6 +686,7 @@ class MCRunner:
         if scoring_mode == "first_token":
             logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)
         elif scoring_mode == "continuation":
+            choice_tokens = self._choice_continuations(prompt, choice_tokens)
             logprobs = self.client.score_continuations(prompt, choice_tokens)
         else:
             raise RuntimeError(f"Unsupported loglikelihood mode: {scoring_mode!r}")
@@ -750,6 +746,15 @@ class MCRunner:
                 f"Too many choices for letter-token scoring: {num_choices}"
             )
         return [chr(ord("A") + i) for i in range(num_choices)]
+
+    @staticmethod
+    def _choice_continuations(prompt: str, choice_tokens: list[str]) -> list[str]:
+        """Match the answer separator used by conventional MC prompts."""
+        if prompt[-1].isspace():
+            return choice_tokens
+        return [
+            choice if choice[0].isspace() else f" {choice}" for choice in choice_tokens
+        ]
 
     # ------------------------------------------------------------------
     # Generate mode

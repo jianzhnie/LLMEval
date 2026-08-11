@@ -312,14 +312,11 @@ class TestMCLoglikelihoodClient:
 class TestProcessLoglikelihoodItem:
     def test_context_marker_counts_failed_not_processed(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
-        marker = {
-            "doc_id": "test:0",
-            "prompt": "q",
-            "logprobs": [],
-            "error": "context_length_exceeded",
-        }
 
-        runner._process_concurrently([{"doc_id": "test:0"}], lambda _item: marker)
+        def fail(_item: dict[str, object]) -> dict[str, object]:
+            raise RuntimeError("context length exceeded")
+
+        runner._process_concurrently([{"doc_id": "test:0"}], fail)
 
         assert runner._stats["failed"] == 1
         assert runner._stats["processed"] == 0
@@ -387,26 +384,50 @@ class TestProcessLoglikelihoodItem:
         result = runner.process_loglikelihood_item(
             {
                 "doc_id": "test:0",
-                "prompt": "q",
+                "prompt": "Answer:",
                 "choices": ["a", "b"],
                 "gold": 1,
             }
         )
 
         assert result == {
-            "prompt": "q",
+            "prompt": "Answer:",
             "doc_id": "test:0",
             "sample_index": 0,
             "choices": ["a", "b"],
-            "choice_tokens": ["A", "B"],
+            "choice_tokens": [" A", " B"],
             "gold": 1,
             "logprobs": [-5.0, -1.0],
             "scoring_mode": "continuation",
             "pred": 1,
             "correct": True,
         }
-        runner.client.score_continuations.assert_called_once_with("q", ["A", "B"])
+        runner.client.score_continuations.assert_called_once_with(
+            "Answer:", [" A", " B"]
+        )
         runner.client.get_choices_logprobs.assert_not_called()
+
+    def test_continuation_preserves_existing_answer_separator(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.config.loglikelihood_mode = "continuation"
+        runner.client = MagicMock()
+        runner.client.score_continuations.return_value = [-1.0, -2.0]
+
+        result = runner.process_loglikelihood_item(
+            {
+                "doc_id": "test:0",
+                "prompt": "Answer: ",
+                "choices": ["first", "second"],
+                "gold": 0,
+            }
+        )
+
+        assert result["choice_tokens"] == ["A", "B"]
+        runner.client.score_continuations.assert_called_once_with(
+            "Answer: ", ["A", "B"]
+        )
 
     @pytest.mark.parametrize(
         "item",

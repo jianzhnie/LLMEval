@@ -43,19 +43,17 @@ class TestProcessingStats:
     def test_rates(self) -> None:
         from llmeval.tasks.math_eval.math_score import ProcessingStats
 
-        stats = ProcessingStats(total=10, correct=5, timeout=2, error=1)
+        stats = ProcessingStats(total=10, correct=5, failed=3)
         assert stats.effective == 7
         assert stats.correct_rate == pytest.approx(5 / 7 * 100)
-        assert stats.timeout_rate == pytest.approx(20.0)
-        assert stats.error_rate == pytest.approx(10.0)
+        assert stats.failed_rate == pytest.approx(30.0)
 
     def test_zero_total_no_division_error(self) -> None:
         from llmeval.tasks.math_eval.math_score import ProcessingStats
 
         stats = ProcessingStats()
         assert stats.correct_rate == 0.0
-        assert stats.timeout_rate == 0.0
-        assert stats.error_rate == 0.0
+        assert stats.failed_rate == 0.0
 
 
 # ===========================================================================
@@ -64,9 +62,7 @@ class TestProcessingStats:
 
 
 class TestProcessAnswers:
-    def test_worker_timeout_is_verification_failure(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_worker_timeout_is_failed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import llmeval.tasks.math_eval.math_score as math_mod
 
         monkeypatch.setattr(
@@ -78,9 +74,8 @@ class TestProcessAnswers:
         )
 
         assert result is not None
-        assert result.failure_stage == "verification"
-        assert result.failure_reason == "timeout"
-        assert result.predicted == "Timeout"
+        assert result.failed is True
+        assert result.predicted is None
 
     def test_value_error_fallback_is_marked_without_error_log(
         self,
@@ -139,8 +134,10 @@ class TestProcessAnswers:
         from llmeval.tasks.math_eval.math_score import process_answers
 
         item = {"prompt": "q", "answer": "5", "task": "math_opensource/aime24"}
-        idx, grade, pred, gold = process_answers((3, item, "answer", "gen"))
-        assert (idx, grade, pred, gold) == (3, 0.0, None, None)
+        result = process_answers((3, item, "answer", "gen"))
+        idx, grade, pred, gold = result
+        assert (idx, grade, pred, gold) == (3, 0.0, None, "5")
+        assert result.failed is False
 
     def test_empty_gen_list(self) -> None:
         from llmeval.tasks.math_eval.math_score import process_answers
@@ -224,10 +221,9 @@ class TestComputeScores:
         result = math_mod.process_answers((3, {}, "answer", "gen"))
 
         assert result.index == 3
-        assert result.failure_stage == "verification"
-        assert result.failure_reason == "worker error: bad schema"
+        assert result.failed is True
 
-    def test_extraction_failure_is_separate_from_wrong_answer(
+    def test_extraction_failure_counts_as_wrong_answer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import llmeval.tasks.math_eval.math_score as math_mod
@@ -236,12 +232,10 @@ class TestComputeScores:
             eval_dataset[0].update(
                 accuracy=0.0,
                 evaluation_status="completed",
-                failure_stage="extraction",
             )
             eval_dataset[1].update(
                 accuracy=0.0,
                 evaluation_status="completed",
-                failure_stage="none",
             )
             return 0.0
 
@@ -259,7 +253,6 @@ class TestComputeScores:
 
         assert result.failed_count == 0
         assert result.effective_sample_count == 2
-        assert "extraction_failed" not in result.failure_counts
         assert result.details["wrong_answer_count"] == 2
 
     def test_mixed_accuracy_and_fields(self, tmp_path: Path) -> None:
@@ -312,10 +305,10 @@ class TestComputeScores:
         )
         assert acc == 0.0
 
-    def test_pool_timeout_is_classified_timeout(
+    def test_pool_timeout_is_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A pool-level timeout (missing worker result) is timeout, not failed."""
+        """A missing worker result is represented as a failed sample."""
         import llmeval.tasks.math_eval.math_score as math_mod
 
         class _EmptyFuture:
@@ -348,14 +341,11 @@ class TestComputeScores:
         )
 
         assert result.sample_count == 2
-        assert result.timeout_count == 2
-        assert result.failed_count == 0
+        assert result.failed_count == 2
         assert result.effective_sample_count == 0
-        assert result.failure_counts["timeout"] == 2
-        assert "verification_failed" not in result.failure_counts
-        assert all(item["evaluation_status"] == "timeout" for item in result.records)
+        assert all(item["evaluation_status"] == "failed" for item in result.records)
 
-    def test_structured_result_counts_with_skipped_item(self, tmp_path: Path) -> None:
+    def test_missing_generation_counts_as_incorrect(self, tmp_path: Path) -> None:
         from llmeval.tasks.math_eval.math_score import score_math_result
 
         data = [
@@ -376,8 +366,6 @@ class TestComputeScores:
         assert result.sample_count == 2
         assert result.effective_sample_count == 2
         assert result.failed_count == 0
-        assert result.skipped_count == 0
-        assert "inference_failed" not in result.failure_counts
         assert result.observations["accuracy"] == [1.0, 0.0]
         assert result.metrics["accuracy"] == 0.5
 
@@ -400,7 +388,6 @@ class TestComputeScores:
         assert result.metrics["accuracy"] == 0.0
         assert result.effective_sample_count == 0
         assert result.failed_count == 1
-        assert result.failure_counts["inference_failed"] == 1
 
     def test_multi_sample_problem_metrics(self, tmp_path: Path) -> None:
         from llmeval.tasks.math_eval.math_score import score_math_result
@@ -554,7 +541,7 @@ class TestRepeatedMathRows:
         assert result.failed_count == 0
         assert result.effective_sample_count == 1
         assert result.metrics["accuracy"] == 0.0
-        assert result.records[0]["failure_stage"] == "inference"
+        assert result.records[0]["evaluation_status"] == "completed"
 
     def test_identical_responses_remain_independent_samples(
         self, tmp_path: Path
@@ -656,12 +643,12 @@ class TestProblemCompleteness:
         from llmeval.tasks.math_eval.math_score import _build_problem_level_metrics
 
         completed = _scored_sample("p1", correct=True)
-        timeout = {
+        failed = {
             **_scored_sample("p1", correct=False),
-            "evaluation_status": "timeout",
+            "evaluation_status": "failed",
         }
 
-        problems, metrics, _ = _build_problem_level_metrics([completed, timeout])
+        problems, metrics, _ = _build_problem_level_metrics([completed, failed])
 
         assert problems[0]["sample_count"] == 2
         assert problems[0]["observed_samples"] == 1

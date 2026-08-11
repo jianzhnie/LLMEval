@@ -38,7 +38,6 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from collections.abc import Callable
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -72,7 +71,7 @@ logger = init_logger("mc_score")
 _MC_AGGREGATIONS = frozenset({"first", "majority_vote", "any_correct", "per_sample"})
 
 MC_FILTER_REGISTRY = FilterRegistry()
-MC_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers, version="1")
+MC_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers)
 MC_GENERATION_PIPELINE: TextFilterPipeline
 
 # Precompiled answer-extraction regexes.
@@ -88,7 +87,7 @@ _FALLBACK_STOPWORDS = frozenset({"I", "a"})
 
 
 def _normalize_generate_gold(value: Any) -> str:
-    """Normalize a generate-mode label; missing labels remain empty/skipped."""
+    """Normalize a generate-mode label; missing labels remain empty."""
     return "" if value is None else str(value).strip().upper()
 
 
@@ -372,7 +371,7 @@ def score_items(
             except StopIteration:
                 break
             except TimeoutError:
-                logger.warning("Individual scoring task timed out — marked as timeout.")
+                logger.warning("Individual scoring task timed out; marked as failed")
                 pbar.update(1)
                 continue
             except Exception as exc:
@@ -391,9 +390,7 @@ def score_items(
     for i, item in enumerate(eval_dataset):
         record = results_by_index.get(i)
         if record is None:
-            record = _error_record(
-                item, mode, label_key, response_key, aggregation, "timeout"
-            )
+            record = _error_record(item, mode, label_key, response_key, aggregation)
         records.append(record)
     return records
 
@@ -404,9 +401,8 @@ def _error_record(
     label_key: str,
     response_key: str,
     aggregation: str,
-    status: str,
 ) -> dict[str, Any]:
-    """Build an explicit non-scored record for timed-out or crashed items."""
+    """Build a failed record for an item that could not be scored."""
     if mode == "loglikelihood":
         try:
             gold: int | str = int(item.get("gold", -1))
@@ -427,7 +423,7 @@ def _error_record(
         "correct": False,
         "correct_norm": False,
         "correct_bytes": False,
-        "evaluation_status": status,
+        "evaluation_status": "failed",
         "aggregation": aggregation,
         "scoring_mode": item.get(
             "scoring_mode",
@@ -468,9 +464,7 @@ def process_item(
         return idx, _attach_item_metadata(record, item, mode, aggregation)
     except Exception as exc:
         logger.warning("MC scoring worker failed for item %d: %s", idx, exc)
-        return idx, _error_record(
-            item, mode, label_key, response_key, aggregation, "failed"
-        )
+        return idx, _error_record(item, mode, label_key, response_key, aggregation)
 
 
 def _attach_item_metadata(
@@ -503,20 +497,6 @@ def _sample_weight(record: dict[str, Any]) -> int:
         # generations could not be scored and therefore still count once.
         return 1 if sample_total is None else max(int(sample_total), 0)
     return 1
-
-
-def _count_excluded(
-    records: list[dict[str, Any]], weight: Callable[[dict[str, Any]], int]
-) -> dict[str, int]:
-    """Tally records by non-completed status using the given per-record weight."""
-    return {
-        status: sum(
-            weight(record)
-            for record in records
-            if record.get("evaluation_status") == status
-        )
-        for status in ("failed", "skipped", "timeout")
-    }
 
 
 def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
@@ -593,10 +573,11 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
             observations[name].append(float(bool(record.get(key, False))))
 
     sample_count = sum(_sample_weight(record) for record in result.records)
-    excluded = _count_excluded(result.records, _sample_weight)
-    failure_counts = {
-        status: excluded[status] for status in ("failed", "timeout") if excluded[status]
-    }
+    failed_count = sum(
+        _sample_weight(record)
+        for record in result.records
+        if record.get("evaluation_status") == "failed"
+    )
     return ScorerResult(
         metrics={
             "acc": result.acc,
@@ -607,17 +588,8 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         observations=observations,
         records=result.records,
         sample_count=sample_count,
-        effective_sample_count=max(
-            sample_count
-            - excluded["failed"]
-            - excluded["skipped"]
-            - excluded["timeout"],
-            0,
-        ),
-        failed_count=excluded["failed"],
-        skipped_count=excluded["skipped"],
-        timeout_count=excluded["timeout"],
-        failure_counts=failure_counts,
+        effective_sample_count=sample_count - failed_count,
+        failed_count=failed_count,
     )
 
 
@@ -631,8 +603,7 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
 
     Unscorable items (missing / empty logprobs, invalid gold index, or every
     logprob set to ``-inf`` after a failed API call) receive ``pred = -1``.
-    Dataset errors are skipped; inference failures are excluded from accuracy
-    and exposed through structured failure counts.
+    Invalid data and inference failures are represented uniformly as failed.
     """
     raw_gold = item.get("gold", -1)
     try:
@@ -669,9 +640,8 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         item.get("choice_tokens") or item.get("choices") or item.get("choice_texts", [])
     )
     expected_choices = len(choices) if isinstance(choices, list) and choices else None
-    # Guard: unscorable data → forced-incorrect record.  An out-of-range gold
-    # index is a dataset problem (skipped); empty/all--inf logprobs are an
-    # inference failure (failed).
+    # Invalid gold, malformed scores, and missing inference output cannot be
+    # scored and therefore share the same failed status.
     invalid_shape = (
         valid_logprobs
         and bool(logprobs)
@@ -696,9 +666,7 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
             "correct": False,
             "correct_norm": False,
             "correct_bytes": False,
-            "evaluation_status": (
-                "skipped" if invalid_gold or invalid_shape else "failed"
-            ),
+            "evaluation_status": "failed",
         }
 
     # acc — argmax over raw logprobs (ties broken by smallest index).
@@ -769,14 +737,7 @@ def score_generate_item(
         sample_errors = [bool(item.get("error"))] * max(len(generation_texts), 1)
     relevant_errors = sample_errors[:1] if aggregation == "first" else sample_errors
 
-    if not gold:
-        status = "skipped"
-    elif any(relevant_errors):
-        status = "failed"
-    else:
-        # Empty or unparseable model output is an incorrect observation, not
-        # an infrastructure failure. Explicit inference errors remain failed.
-        status = "completed"
+    status = "failed" if not gold or any(relevant_errors) else "completed"
 
     filtered = [
         MC_GENERATION_PIPELINE.apply_with_trace(text) for text in generation_texts
@@ -859,7 +820,7 @@ def extract_answer(text: str) -> str:
     return ""
 
 
-MC_FILTER_REGISTRY.register("extract_answer", extract_answer, version="1")
+MC_FILTER_REGISTRY.register("extract_answer", extract_answer)
 MC_GENERATION_PIPELINE = MC_FILTER_REGISTRY.build_pipeline(
-    "mc_generation", "1", "strip_reasoning", "extract_answer"
+    "mc_generation", "strip_reasoning", "extract_answer"
 )

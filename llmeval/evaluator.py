@@ -221,7 +221,6 @@ def evaluate_task_result(
         logger.warning("Empty dataset provided for evaluation")
         result = EvaluationResult(
             task_name=task_name,
-            task_version=task.version,
             metrics={
                 spec.name: MetricValue(
                     value=0.0,
@@ -245,16 +244,12 @@ def evaluate_task_result(
             f"{metric.stderr:.6f}" if metric.stderr is not None else "N/A",
         )
     logger.info(
-        "Task %s counts: samples=%d effective=%d failed=%d skipped=%d timeout=%d",
+        "Task %s counts: samples=%d effective=%d failed=%d",
         task_name,
         result.sample_count,
         result.effective_sample_count,
         result.failed_count,
-        result.skipped_count,
-        result.timeout_count,
     )
-    if result.failure_counts:
-        logger.info("Task %s failure breakdown: %s", task_name, result.failure_counts)
     return result
 
 

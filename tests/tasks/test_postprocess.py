@@ -76,19 +76,18 @@ def test_normalize_repeated_samples_orders_and_validates_sample_indices() -> Non
 
 def test_registered_pipeline_records_each_filter_step() -> None:
     registry = FilterRegistry()
-    registry.register("strip", str.strip, version="2")
-    registry.register("upper", str.upper, version="1")
-    pipeline = registry.build_pipeline("test_pipeline", "3", "strip", "upper")
+    registry.register("strip", str.strip)
+    registry.register("upper", str.upper)
+    pipeline = registry.build_pipeline("test_pipeline", "strip", "upper")
 
     output, trace = pipeline.apply_with_trace(" a ")
 
     assert output == "A"
     assert trace["pipeline"] == "test_pipeline"
-    assert trace["pipeline_version"] == "3"
+    assert "pipeline_version" not in trace
     assert [step["name"] for step in trace["filters"]] == ["strip", "upper"]
     assert trace["filters"][0] == {
         "name": "strip",
-        "version": "2",
         "changed": True,
         "input_length": 3,
         "output_length": 1,
@@ -109,4 +108,4 @@ def test_resolve_max_workers_respects_cpu_limit(
 
 def test_pipeline_rejects_unknown_filters() -> None:
     with pytest.raises(ValueError, match="Unknown text filter"):
-        FilterRegistry().build_pipeline("test", "1", "missing")
+        FilterRegistry().build_pipeline("test", "missing")

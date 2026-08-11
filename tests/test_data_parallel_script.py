@@ -49,6 +49,10 @@ def test_stale_lock_is_not_automatically_deleted() -> None:
 def test_task_timeout_and_missing_inputs_fail_the_run() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     assert 'log_error "节点 ${node} 分配到的输入文件均不可用' in source
+    assert (
+        'log_error "❌ 输入文件 ${input_file} 在节点 ${node} 上不存在"\n'
+        "            return 1"
+    ) in source
     assert 'stop_service_on_node "$node" "$port"\n    return 1' in source
 
 

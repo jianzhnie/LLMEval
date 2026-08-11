@@ -340,7 +340,6 @@ class TestScoreGenerate:
             "answer",
             "gen",
             "per_sample",
-            "failed",
         )
 
         assert record["sample_total"] == 1
@@ -417,7 +416,7 @@ class TestMCScoreEdgeCases:
         assert record["pred"] == -1
         assert record["evaluation_status"] == "failed"
 
-    def test_boolean_gold_is_skipped(self) -> None:
+    def test_boolean_gold_is_failed(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
 
         record = score_loglikelihood_item(
@@ -425,15 +424,15 @@ class TestMCScoreEdgeCases:
         )
 
         assert record["pred"] == -1
-        assert record["evaluation_status"] == "skipped"
+        assert record["evaluation_status"] == "failed"
 
-    def test_fractional_gold_is_skipped(self) -> None:
+    def test_fractional_gold_is_failed(self) -> None:
         record = score_loglikelihood_item(
             {"gold": 1.5, "choices": ["A", "B"], "logprobs": [-1.0, -0.1]}
         )
 
         assert record["pred"] == -1
-        assert record["evaluation_status"] == "skipped"
+        assert record["evaluation_status"] == "failed"
 
     def test_context_length_marker_is_excluded_as_inference_failure(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
@@ -466,9 +465,9 @@ class TestMCScoreEdgeCases:
         assert result.metrics["acc"] == 1.0
         assert result.sample_count == 2
         assert result.effective_sample_count == 1
-        assert result.skipped_count == 1
+        assert result.failed_count == 1
 
-    def test_generate_null_gold_is_skipped(self) -> None:
+    def test_generate_null_gold_is_failed(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
         items = [
@@ -478,58 +477,53 @@ class TestMCScoreEdgeCases:
         result = score_generate_result(items, "answer", "gen")
         assert result.metrics["acc"] == 1.0
         assert result.effective_sample_count == 1
-        assert result.skipped_count == 1
+        assert result.failed_count == 1
 
-    def test_per_sample_timeout_remains_visible_in_structured_counts(self) -> None:
+    def test_per_sample_failure_remains_visible_in_structured_counts(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import (
             MCScoreResult,
             _error_record,
             _to_scorer_result,
         )
 
-        timeout_record = _error_record(
+        failed_record = _error_record(
             {"answer": "A", "gen": ["Answer: A", "Answer: B"]},
             "generate",
             "answer",
             "gen",
             "per_sample",
-            "timeout",
         )
         # The generation count is backfilled so per_sample weighting keeps the
         # item visible instead of evaporating from every count.
-        assert timeout_record["sample_total"] == 2
-        result = _to_scorer_result(MCScoreResult(records=[timeout_record]))
+        assert failed_record["sample_total"] == 2
+        result = _to_scorer_result(MCScoreResult(records=[failed_record]))
 
         assert result.sample_count == 2
         assert result.effective_sample_count == 0
-        assert result.timeout_count == 2
-        assert result.failure_counts == {"timeout": 2}
+        assert result.failed_count == 2
 
-    def test_per_sample_timeout_counts_string_generation_as_one_sample(self) -> None:
+    def test_per_sample_failure_counts_string_generation_as_one_sample(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import (
             MCScoreResult,
             _error_record,
             _to_scorer_result,
         )
 
-        timeout_record = _error_record(
+        failed_record = _error_record(
             {"answer": "A", "gen": "Answer: A"},
             "generate",
             "answer",
             "gen",
             "per_sample",
-            "timeout",
         )
 
-        assert timeout_record["sample_total"] == 1
-        result = _to_scorer_result(MCScoreResult(records=[timeout_record]))
+        assert failed_record["sample_total"] == 1
+        result = _to_scorer_result(MCScoreResult(records=[failed_record]))
         assert result.sample_count == 1
-        assert result.timeout_count == 1
+        assert result.failed_count == 1
 
-    def test_pool_timeout_is_classified_timeout(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A pool-level timeout (missing worker result) is timeout, not failed."""
+    def test_pool_timeout_is_failed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A missing worker result is represented as a failed sample."""
         import llmeval.tasks.mc_eval.mc_score as mc_score
 
         class _EmptyFuture:
@@ -562,11 +556,9 @@ class TestMCScoreEdgeCases:
         )
 
         assert result.sample_count == 2
-        assert result.timeout_count == 2
-        assert result.failed_count == 0
+        assert result.failed_count == 2
         assert result.effective_sample_count == 0
-        assert result.failure_counts == {"timeout": 2}
-        assert all(r["evaluation_status"] == "timeout" for r in result.records)
+        assert all(r["evaluation_status"] == "failed" for r in result.records)
 
     def test_loglikelihood_all_neg_inf_counted_wrong(self) -> None:
         """All -inf logprobs (failed inference) must not be argmax-scored."""
@@ -613,7 +605,7 @@ class TestMCScoreEdgeCases:
         assert extract_answer("选 c") == "C"
 
     def test_non_numeric_gold_treated_invalid(self) -> None:
-        """A non-numeric gold is skipped rather than entering the denominator."""
+        """A non-numeric gold is failed rather than entering the denominator."""
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
         items = [

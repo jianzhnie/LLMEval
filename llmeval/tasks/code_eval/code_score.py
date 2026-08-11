@@ -88,7 +88,7 @@ _MBPP_PROMPT_MODES: tuple[str, ...] = (
 )
 
 CODE_FILTER_REGISTRY = FilterRegistry()
-CODE_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers, version="1")
+CODE_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers)
 CODE_GENERATION_PIPELINE: TextFilterPipeline
 
 
@@ -138,9 +138,9 @@ def extract_code(text: object) -> str:
     return text.rstrip()
 
 
-CODE_FILTER_REGISTRY.register("extract_code", extract_code, version="1")
+CODE_FILTER_REGISTRY.register("extract_code", extract_code)
 CODE_GENERATION_PIPELINE = CODE_FILTER_REGISTRY.build_pipeline(
-    "code_generation", "1", "strip_reasoning", "extract_code"
+    "code_generation", "strip_reasoning", "extract_code"
 )
 
 
@@ -256,21 +256,6 @@ def _failure_code_record(item: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _timeout_code_record(item: dict[str, Any]) -> dict[str, Any]:
-    """Build a placeholder record for items lost to a pool-level timeout.
-
-    Worker-internal errors are already converted into ``failed`` records by
-    :func:`_process_code_item`, so a missing pool result means the worker was
-    killed by the pool-level timeout (matching the math/MC classification).
-    """
-    task_id = str(item.get("task_id", ""))
-    return _failure_record(
-        task_id,
-        "pool timeout",
-        evaluation_status="timeout",
-    )
-
-
 def _first_meaningful_line(text: str) -> str:
     """Return the first non-empty, non-comment line from ``text``."""
     for line in text.splitlines():
@@ -380,17 +365,14 @@ def _process_code_item_impl(
     }
 
     # -- guard: missing test harness ---------------------------------------------
-    # An empty test harness is a dataset problem, not a model failure: without
-    # it ANY executable candidate would be scored "passed". Skip the item so
-    # it stays out of the Pass@k denominator while retaining debug artifacts.
+    # Without a test harness any executable candidate would appear to pass,
+    # so the item cannot be scored.
     if not test_code.strip():
-        record = {
-            "task_id": task_id,
-            "passed": False,
-            "result": f"skipped: empty test harness in label field {label_key!r}",
-            "evaluation_status": "skipped",
-            "stderr": "",
-        }
+        record = _failure_record(
+            task_id,
+            f"failed: empty test harness in label field {label_key!r}",
+            evaluation_status="failed",
+        )
         record.update(filter_artifacts)
         return idx, record
 
@@ -487,8 +469,8 @@ def _score_items(
     list[dict[str, Any]]
         One scored record per input item, in the same order.  Items whose
         worker raised are represented by :func:`_failure_code_record`; items
-        whose result never arrived (pool-level timeout) are represented by
-        :func:`_timeout_code_record`.
+        whose result never arrived are represented by
+        :func:`_failure_code_record`.
     """
     total = len(eval_dataset)
     if total == 0:
@@ -546,7 +528,7 @@ def _score_items(
             pbar.update(1)
 
     return [
-        results_by_index.get(i) or _timeout_code_record(item)
+        results_by_index.get(i) or _failure_code_record(item)
         for i, item in enumerate(eval_dataset)
     ]
 
@@ -788,7 +770,7 @@ def _code_record_status(record: dict[str, Any]) -> str:
     worker that had to be killed — are excluded from Pass@k metrics.
     """
     explicit_status = record.get("evaluation_status")
-    if explicit_status in {"completed", "failed", "skipped", "timeout"}:
+    if explicit_status in {"completed", "failed"}:
         return str(explicit_status)
     result = str(record.get("result", "")).lower()
     # "timed out" comes from the worker's result file: the candidate code
@@ -797,7 +779,7 @@ def _code_record_status(record: dict[str, Any]) -> str:
     # past the inner timeout and had to be killed; that is an execution
     # anomaly, not evidence about the model.
     if result == "timed out: worker killed":
-        return "timeout"
+        return "failed"
     if _is_code_infrastructure_failure(record):
         return "failed"
     return "completed"
@@ -834,14 +816,7 @@ def score_code_result(
     statuses = [
         record.get("evaluation_status", "completed") for record in result.records
     ]
-    timeout_count = statuses.count("timeout")
     failed_count = statuses.count("failed")
-    skipped_count = statuses.count("skipped")
-    failure_counts: dict[str, int] = {}
-    if failed_count:
-        failure_counts["failed"] = failed_count
-    if timeout_count:
-        failure_counts["timeout"] = timeout_count
     all_problem_ids = list(
         dict.fromkeys(str(record["task_id"]) for record in result.records)
     )
@@ -858,11 +833,6 @@ def score_code_result(
             "excluded_problem_task_ids": excluded_problem_ids,
         },
         sample_count=result.total,
-        effective_sample_count=max(
-            result.total - failed_count - skipped_count - timeout_count, 0
-        ),
+        effective_sample_count=result.total - failed_count,
         failed_count=failed_count,
-        skipped_count=skipped_count,
-        timeout_count=timeout_count,
-        failure_counts=failure_counts,
     )

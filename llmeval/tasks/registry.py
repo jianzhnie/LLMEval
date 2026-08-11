@@ -54,14 +54,10 @@ class EvaluationResult:
     """Structured result shared by all registered evaluation tasks."""
 
     task_name: str
-    task_version: str
     metrics: dict[str, MetricValue] = field(default_factory=dict)
     sample_count: int = 0
     effective_sample_count: int = 0
     failed_count: int = 0
-    skipped_count: int = 0
-    timeout_count: int = 0
-    failure_counts: dict[str, int] = field(default_factory=dict)
     records: list[dict[str, Any]] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
     primary_metric: str | None = None
@@ -78,9 +74,7 @@ class EvaluationResult:
     def to_dict(self) -> dict[str, Any]:
         """Serialize the aggregate result."""
         payload: dict[str, Any] = {
-            "schema_version": 1,
             "task_name": self.task_name,
-            "task_version": self.task_version,
             "metrics": {
                 name: {
                     "value": metric.value,
@@ -95,9 +89,6 @@ class EvaluationResult:
             "sample_count": self.sample_count,
             "effective_sample_count": self.effective_sample_count,
             "failed_count": self.failed_count,
-            "skipped_count": self.skipped_count,
-            "timeout_count": self.timeout_count,
-            "failure_counts": dict(self.failure_counts),
             "details": self.details,
             "primary_metric": self.primary_metric,
         }
@@ -121,9 +112,6 @@ class ScorerResult:
     sample_count: int = 0
     effective_sample_count: int = 0
     failed_count: int = 0
-    skipped_count: int = 0
-    timeout_count: int = 0
-    failure_counts: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if any(not math.isfinite(float(value)) for value in self.metrics.values()):
@@ -132,24 +120,16 @@ class ScorerResult:
             self.sample_count,
             self.effective_sample_count,
             self.failed_count,
-            self.skipped_count,
-            self.timeout_count,
         )
         if any(count < 0 for count in counts):
             raise ValueError("scorer result counts must be non-negative")
-        if any(
-            not isinstance(name, str) or not isinstance(value, int) or value < 0
-            for name, value in self.failure_counts.items()
-        ):
-            raise ValueError("failure counts must be non-negative integers")
-        excluded_count = self.failed_count + self.skipped_count + self.timeout_count
-        if excluded_count > self.sample_count:
-            raise ValueError("excluded sample counts cannot exceed sample count")
+        if self.failed_count > self.sample_count:
+            raise ValueError("failed sample count cannot exceed sample count")
         if self.effective_sample_count > self.sample_count:
             raise ValueError("effective sample count cannot exceed sample count")
-        if self.effective_sample_count != self.sample_count - excluded_count:
+        if self.effective_sample_count != self.sample_count - self.failed_count:
             raise ValueError(
-                "effective sample count must equal sample_count minus excluded counts"
+                "effective sample count must equal sample_count minus failed_count"
             )
         unknown = set(self.observations) - set(self.metrics)
         if unknown:
@@ -255,7 +235,6 @@ class EvaluationTask(Protocol):
     """Protocol implemented by every registered task adapter."""
 
     family: str
-    version: str
     metric_specs: tuple[MetricSpec, ...]
 
     def prepare_dataset(
@@ -307,14 +286,10 @@ def _build_evaluation_result(
         raise ValueError(f"Scorer omitted declared metrics: {sorted(missing)}")
     return EvaluationResult(
         task_name=context.task_name,
-        task_version=task.version,
         metrics=metrics,
         sample_count=scored.sample_count,
         effective_sample_count=scored.effective_sample_count,
         failed_count=scored.failed_count,
-        skipped_count=scored.skipped_count,
-        timeout_count=scored.timeout_count,
-        failure_counts=dict(scored.failure_counts),
         records=[dict(item) for item in scored.records],
         details=dict(scored.details),
         primary_metric=task.metric_specs[0].name if task.metric_specs else None,
@@ -324,7 +299,6 @@ def _build_evaluation_result(
 def persist_evaluation_result(result: EvaluationResult, result_path: Path) -> None:
     """Persist only the aggregate result summary."""
     summary = result.to_dict()
-    summary["summary_version"] = 1
     metric_values = {name: metric.value for name, metric in result.metrics.items()}
     summary["metric_values"] = metric_values
     for name, value in metric_values.items():
@@ -357,7 +331,6 @@ class MathTask(GeneratedTask):
 
     scorer: StructuredScorer
     family: str = "math_opensource"
-    version: str = "math_v1"
     metric_specs: tuple[MetricSpec, ...] = (MetricSpec("accuracy"),)
 
     def score(self, context: EvaluationContext) -> EvaluationResult:
@@ -378,7 +351,6 @@ class MCTask(GeneratedTask):
     generate_scorer: StructuredScorer
     loglikelihood_scorer: StructuredScorer
     family: str = "mc_opensource"
-    version: str = "mc_v1"
     metric_specs: tuple[MetricSpec, ...] = (
         MetricSpec("acc"),
         MetricSpec("acc_norm"),
@@ -440,7 +412,6 @@ class CodeTask(GeneratedTask):
 
     scorer: StructuredScorer
     family: str = "code_opensource"
-    version: str = "code_v1"
     metric_specs: tuple[MetricSpec, ...] = (MetricSpec("pass@1"),)
 
     def score(self, context: EvaluationContext) -> EvaluationResult:
