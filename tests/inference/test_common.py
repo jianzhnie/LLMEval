@@ -9,7 +9,7 @@ import pytest
 
 from llmeval.inference.common import (
     ResumeState,
-    get_request_seed,
+    derive_request_seed,
     is_explicit_tool_choice,
     load_jsonl,
     load_resume_state,
@@ -21,11 +21,11 @@ from llmeval.inference.common import (
 
 def _resume(
     *,
-    completed_counts: dict[str, int] | None = None,
+    completed_indices: dict[str, set[int]] | None = None,
     prompts: dict[str, str] | None = None,
 ) -> ResumeState:
     return ResumeState(
-        completed_counts=completed_counts or {},
+        completed_indices=completed_indices or {},
         prompts=prompts or {},
     )
 
@@ -72,7 +72,7 @@ class TestResumeState:
 
         state = load_resume_state(path, "prompt", "gen")
 
-        assert state.completed_counts == {"q1": 2, "q2": 1}
+        assert state.completed_indices == {"q1": {0, 1}, "q2": {0}}
         assert state.completed_count == 3
 
     def test_missing_or_null_generation_is_not_completed(self, tmp_path: Path) -> None:
@@ -89,7 +89,7 @@ class TestResumeState:
         path.write_text(
             json.dumps({"doc_id": "q1", "prompt": "p", "logprobs": [0.0]}) + "\n"
         )
-        assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
+        assert load_resume_state(path, "prompt", "gen").completed_indices == {"q1": {0}}
 
     def test_logprobs_with_null_missing_choice_is_completed(
         self, tmp_path: Path
@@ -98,7 +98,7 @@ class TestResumeState:
         path.write_text(
             json.dumps({"doc_id": "q1", "prompt": "p", "logprobs": [None, -0.5]}) + "\n"
         )
-        assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
+        assert load_resume_state(path, "prompt", "gen").completed_indices == {"q1": {0}}
 
     @pytest.mark.parametrize(
         "logprobs",
@@ -111,6 +111,7 @@ class TestResumeState:
             [None, None],  # no choice received a finite score
             [float("nan")],  # non-standard/non-finite JSON number
             [float("inf")],  # non-standard/non-finite JSON number
+            [True],  # bool is an int subclass but not a valid score
         ],
     )
     def test_non_score_logprobs_row_is_not_completed(
@@ -137,9 +138,9 @@ class TestResumeState:
             )
             + "\n"
         )
-        assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
+        assert load_resume_state(path, "prompt", "gen").completed_indices == {"q1": {0}}
 
-    def test_empty_response_error_row_is_completed(self, tmp_path: Path) -> None:
+    def test_empty_response_error_row_remains_retryable(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
         path.write_text(
             json.dumps(
@@ -152,7 +153,7 @@ class TestResumeState:
             )
             + "\n"
         )
-        assert load_resume_state(path, "prompt", "gen").completed_counts == {"q1": 1}
+        assert load_resume_state(path, "prompt", "gen").completed_count == 0
 
     def test_malformed_line_reports_path_and_line(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
@@ -168,7 +169,7 @@ class TestResumeState:
         state = load_resume_state(
             path, "prompt", "gen", repair_truncated_last_line=True
         )
-        assert state.completed_counts == {"q1": 1}
+        assert state.completed_indices == {"q1": {0}}
 
     @pytest.mark.parametrize(
         "content",
@@ -193,9 +194,9 @@ class TestResumeState:
             {"doc_id": "q2", "question": "p", "gen": ["b"]},
         ]
         path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-        assert load_resume_state(path, "question", "response").completed_counts == {
-            "q1": 1,
-            "q2": 1,
+        assert load_resume_state(path, "question", "response").completed_indices == {
+            "q1": {0},
+            "q2": {0},
         }
 
     def test_completed_row_requires_document_id(self, tmp_path: Path) -> None:
@@ -244,51 +245,55 @@ class TestResumeState:
 class TestExpansion:
     def test_copies_each_document_requested_number_of_times(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        expanded = prepare_sample_requests(raw, _resume(), "prompt", 3, base_seed=123)
+        expanded = prepare_sample_requests(raw, _resume(), "prompt", 3)
         assert len(expanded) == 3
-        assert len({get_request_seed(item) for item in expanded}) == 3
+        assert [item["sample_index"] for item in expanded] == [0, 1, 2]
+        assert (
+            len(
+                {
+                    derive_request_seed(
+                        123, item["doc_id"], item["prompt"], item["sample_index"]
+                    )
+                    for item in expanded
+                }
+            )
+            == 3
+        )
 
-    def test_resume_uses_completed_count(self) -> None:
+    def test_resume_uses_exact_completed_indices(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
         expanded = prepare_sample_requests(
             raw,
-            _resume(completed_counts={"q1": 2}),
+            _resume(completed_indices={"q1": {0, 2}}),
             "prompt",
             4,
-            base_seed=123,
         )
         assert len(expanded) == 2
-
-        full = prepare_sample_requests(raw, _resume(), "prompt", 4, base_seed=123)
-        assert [get_request_seed(item) for item in expanded] == [
-            get_request_seed(item) for item in full[2:]
-        ]
+        assert [item["sample_index"] for item in expanded] == [1, 3]
 
     def test_all_completed_yields_nothing(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
         assert (
             prepare_sample_requests(
                 raw,
-                _resume(completed_counts={"q1": 2}),
+                _resume(completed_indices={"q1": {0, 1}}),
                 "prompt",
                 2,
-                base_seed=1,
             )
             == []
         )
 
     def test_too_many_completed_rows_is_rejected(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]
-        with pytest.raises(ValueError, match="exceeding requested"):
+        with pytest.raises(ValueError, match="outside requested"):
             prepare_sample_requests(
                 raw,
-                _resume(completed_counts={"q1": 3}),
+                _resume(completed_indices={"q1": {0, 2}}),
                 "prompt",
                 2,
-                base_seed=1,
             )
 
-    @pytest.mark.parametrize("count", [0, -1])
+    @pytest.mark.parametrize("count", [0, -1, True])
     def test_rejects_non_positive_generation_count(self, count: int) -> None:
         with pytest.raises(ValueError, match="n_samples must be positive"):
             prepare_sample_requests(
@@ -296,18 +301,13 @@ class TestExpansion:
                 _resume(),
                 "prompt",
                 count,
-                base_seed=1,
             )
 
     def test_requires_document_id_and_prompt(self) -> None:
         with pytest.raises(ValueError, match="missing required 'doc_id'"):
-            prepare_sample_requests(
-                [{"prompt": "p"}], _resume(), "prompt", 1, base_seed=1
-            )
+            prepare_sample_requests([{"prompt": "p"}], _resume(), "prompt", 1)
         with pytest.raises(ValueError, match="non-empty string prompt"):
-            prepare_sample_requests(
-                [{"doc_id": "q1"}], _resume(), "prompt", 1, base_seed=1
-            )
+            prepare_sample_requests([{"doc_id": "q1"}], _resume(), "prompt", 1)
 
     @pytest.mark.parametrize("prompt", [{"text": "p"}, ["p"], 42])
     def test_rejects_non_string_prompts(self, prompt: object) -> None:
@@ -317,7 +317,6 @@ class TestExpansion:
                 _resume(),
                 "prompt",
                 1,
-                base_seed=1,
             )
 
     def test_duplicate_document_ids_are_rejected(self) -> None:
@@ -330,32 +329,24 @@ class TestExpansion:
                 _resume(),
                 "prompt",
                 1,
-                base_seed=1,
             )
 
     def test_base_seed_must_be_a_non_negative_integer(self) -> None:
         with pytest.raises(ValueError, match="base_seed must be non-negative"):
-            prepare_sample_requests(
-                [{"doc_id": "q1", "prompt": "p"}],
-                _resume(),
-                "prompt",
-                1,
-                base_seed=-1,
-            )
+            derive_request_seed(-1, "q1", "p", 0)
 
     def test_changed_prompt_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="changed prompt"):
             prepare_sample_requests(
                 [{"doc_id": "q1", "prompt": "new"}],
-                _resume(completed_counts={"q1": 1}, prompts={"q1": "old"}),
+                _resume(completed_indices={"q1": {0}}, prompts={"q1": "old"}),
                 "prompt",
                 2,
-                base_seed=1,
             )
 
     def test_copies_are_independent(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p", "gen": ["existing"]}]
-        expanded = prepare_sample_requests(raw, _resume(), "prompt", 2, base_seed=1)
+        expanded = prepare_sample_requests(raw, _resume(), "prompt", 2)
         expanded[0]["gen"].append("new")
         assert expanded[1]["gen"] == ["existing"]
         assert raw[0]["gen"] == ["existing"]

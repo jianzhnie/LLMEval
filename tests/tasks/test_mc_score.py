@@ -7,9 +7,6 @@ mega-file ``tests/test_mc_eval.py``).
 
 from __future__ import annotations
 
-import json
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -108,47 +105,32 @@ class TestScoreLoglikelihood:
     """Test loglikelihood scoring with acc + acc_norm."""
 
     def test_all_correct(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
         items = [
             {"gold": 1, "logprobs": [-1.0, -0.5, -2.0], "choices": ["a", "b", "c"]},
             {"gold": 0, "logprobs": [-0.1, -1.0, -3.0], "choices": ["x", "y", "z"]},
         ]
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
-            cache = f.name
-        try:
-            acc = score_loglikelihood(items, cache)
-            assert acc == 1.0
-            # Check summary file
-            summary_path = Path(cache).with_suffix(".summary.json")
-            assert summary_path.exists()
-            s = json.loads(summary_path.read_text())
-            assert s["acc"] == 1.0
-            assert s["acc_norm"] == 1.0
-            assert s["acc_bytes"] == 1.0
-        finally:
-            Path(cache).unlink(missing_ok=True)
-            Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
+        result = score_loglikelihood_result(items)
+        assert result.metrics == {
+            "acc": 1.0,
+            "acc_norm": 1.0,
+            "acc_bytes": 1.0,
+            "exact_match": 1.0,
+        }
 
     def test_half_correct(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
         items = [
             {"gold": 1, "logprobs": [-1.0, -0.5, -2.0]},  # correct: index 1
             {"gold": 0, "logprobs": [-0.5, -0.1, -3.0]},  # wrong: index 1 wins, gold 0
         ]
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
-            cache = f.name
-        try:
-            acc = score_loglikelihood(items, cache)
-            assert acc == 0.5
-        finally:
-            Path(cache).unlink(missing_ok=True)
-            Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
+        assert score_loglikelihood_result(items).metrics["acc"] == 0.5
 
     def test_acc_norm_length_penalized(self) -> None:
         """acc_norm should prefer shorter choices with same logprob."""
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
         # Choice A: short, Choice B: very long. Same raw logprob.
         items = [
@@ -158,23 +140,12 @@ class TestScoreLoglikelihood:
                 "choices": ["A", "BBBBBBBBBB"],
             },
         ]
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
-            cache = f.name
-        try:
-            acc = score_loglikelihood(items, cache)
-            # Same logprob: argmax picks index 0 (= gold) → acc correct
-            assert acc == 1.0
-            summary_path = Path(cache).with_suffix(".summary.json")
-            s = json.loads(summary_path.read_text())
-            # acc_norm: "A"(len=1) → -10/1=-10.0, "B"×10 → -10/10=-1.0
-            # argmax picks index 1 (long) ≠ gold 0 → acc_norm wrong
-            assert s["acc_norm"] == 0.0
-        finally:
-            Path(cache).unlink(missing_ok=True)
-            Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
+        result = score_loglikelihood_result(items)
+        assert result.metrics["acc"] == 1.0
+        assert result.metrics["acc_norm"] == 0.0
 
     def test_acc_bytes_uses_utf8_length(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
         items = [
             {
@@ -183,76 +154,48 @@ class TestScoreLoglikelihood:
                 "choices": ["é", "aa"],
             }
         ]
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
-            cache = f.name
-        try:
-            score_loglikelihood(items, cache)
-            summary_path = Path(cache).with_suffix(".summary.json")
-            s = json.loads(summary_path.read_text())
-            assert s["acc_norm"] == 0.0
-            assert s["acc_bytes"] == 1.0
-        finally:
-            Path(cache).unlink(missing_ok=True)
-            Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
+        result = score_loglikelihood_result(items)
+        assert result.metrics["acc_norm"] == 0.0
+        assert result.metrics["acc_bytes"] == 1.0
 
     def test_empty_dataset(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
-            cache = f.name
-        try:
-            acc = score_loglikelihood([], cache)
-            assert acc == 0.0
-        finally:
-            Path(cache).unlink(missing_ok=True)
-            Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
+        assert score_loglikelihood_result([]).metrics["acc"] == 0.0
 
 
 class TestScoreGenerate:
     """Test generation-based scoring."""
 
     def test_exact_match(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_generate
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
         items = [
             {"answer": "B", "gen": ["Some text\nAnswer: B"]},
             {"answer": "A", "gen": ["The answer is A."]},
         ]
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
-            cache = f.name
-        try:
-            acc = score_generate(items, "answer", "gen", cache)
-            assert acc == 1.0
-        finally:
-            Path(cache).unlink(missing_ok=True)
-            Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
+        result = score_generate_result(items, "answer", "gen")
+        assert result.metrics["acc"] == 1.0
 
     def test_mixed(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_generate
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
         items = [
             {"answer": "C", "gen": ["Answer: B"]},
             {"answer": "D", "gen": ["Answer: D"]},
         ]
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
-            cache = f.name
-        try:
-            acc = score_generate(items, "answer", "gen", cache)
-            assert acc == 0.5
-        finally:
-            Path(cache).unlink(missing_ok=True)
-            Path(cache).with_suffix(".summary.json").unlink(missing_ok=True)
+        result = score_generate_result(items, "answer", "gen")
+        assert result.metrics["acc"] == 0.5
 
     @pytest.mark.parametrize(
         ("aggregation", "expected"),
         [("first", 0.0), ("majority_vote", 1.0), ("any_correct", 1.0)],
     )
     def test_multiple_generation_aggregation(
-        self, aggregation: str, expected: float, tmp_path: Path
+        self, aggregation: str, expected: float
     ) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_generate
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
-        cache = tmp_path / f"{aggregation}.jsonl"
         items = [
             {
                 "doc_id": "q0",
@@ -261,17 +204,14 @@ class TestScoreGenerate:
             }
             for generation in ["Answer: A", "Answer: B", "Answer: B"]
         ]
-        assert (
-            score_generate(items, "answer", "gen", cache, aggregation=aggregation)
-            == expected
-        )
+        result = score_generate_result(items, "answer", "gen", aggregation=aggregation)
+        assert result.metrics["acc"] == expected
 
     def test_per_sample_aggregation_uses_sample_denominator(
-        self, tmp_path: Path
+        self,
     ) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_generate
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
-        cache = tmp_path / "per_sample.jsonl"
         items = [
             {
                 "doc_id": "q0",
@@ -280,12 +220,54 @@ class TestScoreGenerate:
             }
             for generation in ["Answer: A", "Answer: B"]
         ]
-        assert (
-            score_generate(items, "answer", "gen", cache, aggregation="per_sample")
-            == 0.5
+        result = score_generate_result(items, "answer", "gen", aggregation="per_sample")
+        assert result.metrics["acc"] == 0.5
+        assert result.sample_count == 2
+
+    def test_explicit_inference_error_is_excluded_per_sample(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        items = [
+            {
+                "doc_id": "q0",
+                "sample_index": 0,
+                "answer": "B",
+                "gen": "Answer: B",
+            },
+            {
+                "doc_id": "q0",
+                "sample_index": 1,
+                "answer": "B",
+                "gen": "",
+                "error": "context_length_exceeded",
+            },
+        ]
+
+        per_sample = score_generate_result(
+            items, "answer", "gen", aggregation="per_sample"
         )
-        summary = json.loads(cache.with_suffix(".summary.json").read_text())
-        assert summary["total"] == 2
+        first = score_generate_result(items, "answer", "gen", aggregation="first")
+
+        assert per_sample.metrics["acc"] == 1.0
+        assert per_sample.sample_count == 2
+        assert per_sample.effective_sample_count == 1
+        assert per_sample.failed_count == 1
+        assert first.metrics["acc"] == 1.0
+        assert first.effective_sample_count == 1
+
+    def test_failed_record_recomputes_untrusted_sample_total(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import _error_record
+
+        record = _error_record(
+            {"doc_id": "q1", "gen": ["A"], "sample_total": "stale"},
+            "generate",
+            "answer",
+            "gen",
+            "per_sample",
+            "failed",
+        )
+
+        assert record["sample_total"] == 1
 
 
 class TestScoreLoglikelihoodItem:
@@ -305,7 +287,7 @@ class TestScoreLoglikelihoodItem:
         assert rec["pred"] == 0
         assert rec["correct"] is True
 
-    def test_choice_logprobs_are_used_without_aggregate_logprobs(self) -> None:
+    def test_nested_choice_logprobs_do_not_override_aggregate_scores(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
 
         rec = score_loglikelihood_item(
@@ -316,8 +298,9 @@ class TestScoreLoglikelihoodItem:
             }
         )
 
-        assert rec["pred"] == 1
-        assert rec["correct"] is True
+        assert rec["pred"] == -1
+        assert rec["correct"] is False
+        assert rec["evaluation_status"] == "failed"
 
     def test_argmax_over_negative_logprobs(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
@@ -347,9 +330,36 @@ class TestMCScoreEdgeCases:
         assert record["pred"] == 0
         assert record["correct"] is True
 
-    def test_context_length_marker_is_excluded_as_inference_failure(
-        self, tmp_path: Path
-    ) -> None:
+    @pytest.mark.parametrize("invalid", [float("nan"), float("inf")])
+    def test_non_finite_logprob_is_failed(self, invalid: float) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
+
+        record = score_loglikelihood_item(
+            {"gold": 0, "choices": ["A", "B"], "logprobs": [invalid, -1.0]}
+        )
+
+        assert record["pred"] == -1
+        assert record["evaluation_status"] == "failed"
+
+    def test_boolean_gold_is_skipped(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
+
+        record = score_loglikelihood_item(
+            {"gold": True, "choices": ["A", "B"], "logprobs": [-0.1, -1.0]}
+        )
+
+        assert record["pred"] == -1
+        assert record["evaluation_status"] == "skipped"
+
+    def test_fractional_gold_is_skipped(self) -> None:
+        record = score_loglikelihood_item(
+            {"gold": 1.5, "choices": ["A", "B"], "logprobs": [-1.0, -0.1]}
+        )
+
+        assert record["pred"] == -1
+        assert record["evaluation_status"] == "skipped"
+
+    def test_context_length_marker_is_excluded_as_inference_failure(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
         result = score_loglikelihood_result(
@@ -361,41 +371,38 @@ class TestMCScoreEdgeCases:
                     "logprobs": [],
                     "error": "context_length_exceeded",
                 }
-            ],
-            tmp_path / "context.jsonl",
+            ]
         )
 
         assert result.sample_count == 1
         assert result.effective_sample_count == 0
         assert result.failed_count == 1
 
-    def test_generate_empty_gold_and_pred_not_correct(self, tmp_path: Path) -> None:
+    def test_generate_empty_gold_and_pred_not_correct(self) -> None:
         """Empty gold + unparseable (empty) pred must NOT count as correct."""
-        from llmeval.tasks.mc_eval.mc_score import score_generate
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
         items = [
             {"answer": "", "gen": ["no letter here"]},
             {"answer": "B", "gen": ["Answer: B"]},
         ]
-        acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
-        assert acc == 1.0  # invalid-gold items are skipped from the denominator
-        summary = json.loads((tmp_path / "c.summary.json").read_text())
-        assert summary["sample_total"] == 2
-        assert summary["effective_sample_count"] == 1
-        assert summary["skipped_count"] == 1
+        result = score_generate_result(items, "answer", "gen")
+        assert result.metrics["acc"] == 1.0
+        assert result.sample_count == 2
+        assert result.effective_sample_count == 1
+        assert result.skipped_count == 1
 
-    def test_generate_null_gold_is_skipped(self, tmp_path: Path) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_generate
+    def test_generate_null_gold_is_skipped(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
         items = [
             {"answer": None, "gen": ["Answer: A"]},
             {"answer": "B", "gen": ["Answer: B"]},
         ]
-        cache = tmp_path / "null_gold.jsonl"
-        assert score_generate(items, "answer", "gen", cache) == 1.0
-        summary = json.loads(cache.with_suffix(".summary.json").read_text())
-        assert summary["effective_sample_count"] == 1
-        assert summary["skipped_count"] == 1
+        result = score_generate_result(items, "answer", "gen")
+        assert result.metrics["acc"] == 1.0
+        assert result.effective_sample_count == 1
+        assert result.skipped_count == 1
 
     def test_per_sample_timeout_remains_visible_in_structured_counts(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import (
@@ -444,7 +451,7 @@ class TestMCScoreEdgeCases:
         assert result.timeout_count == 1
 
     def test_pool_timeout_is_classified_timeout(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A pool-level timeout (missing worker result) is timeout, not failed."""
         import llmeval.tasks.mc_eval.mc_score as mc_score
@@ -474,7 +481,6 @@ class TestMCScoreEdgeCases:
             ],
             "answer",
             "gen",
-            tmp_path / "pool_timeout.jsonl",
             max_workers=2,
             timeout=60,
         )
@@ -486,34 +492,32 @@ class TestMCScoreEdgeCases:
         assert result.failure_counts == {"timeout": 2}
         assert all(r["evaluation_status"] == "timeout" for r in result.records)
 
-    def test_loglikelihood_all_neg_inf_counted_wrong(self, tmp_path: Path) -> None:
+    def test_loglikelihood_all_neg_inf_counted_wrong(self) -> None:
         """All -inf logprobs (failed inference) must not be argmax-scored."""
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
         items = [
             {"gold": 0, "logprobs": [float("-inf")] * 2, "choices": ["a", "b"]},
             {"gold": 1, "logprobs": [-2.0, -1.0], "choices": ["a", "b"]},
         ]
-        acc = score_loglikelihood(items, tmp_path / "c.jsonl")
-        assert acc == 1.0
-        summary = json.loads((tmp_path / "c.summary.json").read_text())
-        assert summary["effective_sample_count"] == 1
-        assert summary["failed_count"] == 1
+        result = score_loglikelihood_result(items)
+        assert result.metrics["acc"] == 1.0
+        assert result.effective_sample_count == 1
+        assert result.failed_count == 1
 
-    def test_acc_norm_uses_choices_when_present(self, tmp_path: Path) -> None:
+    def test_acc_norm_uses_choices_when_present(self) -> None:
         """Length normalization flips the argmax when choices differ in length."""
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
         # raw argmax → index 1; normalized: -2.0/4=-0.5 vs -1.0/1=-1.0 → index 0
         items = [{"gold": 0, "logprobs": [-2.0, -1.0], "choices": ["aaaa", "b"]}]
-        acc = score_loglikelihood(items, tmp_path / "c.jsonl")
-        assert acc == 0.0
-        summary = json.loads((tmp_path / "c.summary.json").read_text())
-        assert summary["acc_norm"] == 1.0
+        result = score_loglikelihood_result(items)
+        assert result.metrics["acc"] == 0.0
+        assert result.metrics["acc_norm"] == 1.0
 
-    def test_acc_norm_prefers_choice_tokens_when_present(self, tmp_path: Path) -> None:
+    def test_acc_norm_prefers_choice_tokens_when_present(self) -> None:
         """Answer-token scoring should not normalize by full option text length."""
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
         items = [
             {
@@ -523,9 +527,8 @@ class TestMCScoreEdgeCases:
                 "choices": ["aaaa", "b"],
             }
         ]
-        score_loglikelihood(items, tmp_path / "c.jsonl")
-        summary = json.loads((tmp_path / "c.summary.json").read_text())
-        assert summary["acc_norm"] == 0.0
+        result = score_loglikelihood_result(items)
+        assert result.metrics["acc_norm"] == 0.0
 
     def test_extract_lowercase_letter(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import extract_answer
@@ -533,30 +536,29 @@ class TestMCScoreEdgeCases:
         assert extract_answer("the answer is b") == "B"
         assert extract_answer("选 c") == "C"
 
-    def test_non_numeric_gold_treated_invalid(self, tmp_path: Path) -> None:
+    def test_non_numeric_gold_treated_invalid(self) -> None:
         """A non-numeric gold is skipped rather than entering the denominator."""
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
 
         items = [
             {"gold": "B", "logprobs": [-2.0, -1.0], "choices": ["a", "b"]},
             {"gold": 1, "logprobs": [-2.0, -1.0], "choices": ["a", "b"]},
         ]
-        acc = score_loglikelihood(items, tmp_path / "c.jsonl")
-        assert acc == 1.0
+        result = score_loglikelihood_result(items)
+        assert result.metrics["acc"] == 1.0
 
-    def test_generate_bare_string_gen_tolerated(self, tmp_path: Path) -> None:
+    def test_generate_bare_string_gen_tolerated(self) -> None:
         """A plain-string gen field (schema expects list) is scored as text."""
-        from llmeval.tasks.mc_eval.mc_score import score_generate
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
         items = [{"answer": "B", "gen": "Answer: B"}]
-        acc = score_generate(items, "answer", "gen", tmp_path / "c.jsonl")
-        assert acc == 1.0
+        result = score_generate_result(items, "answer", "gen")
+        assert result.metrics["acc"] == 1.0
 
 
-def test_generate_filter_trace_preserves_raw_response(tmp_path: Path) -> None:
+def test_generate_filter_trace_preserves_raw_response() -> None:
     from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
-    cache = tmp_path / "mc.jsonl"
     result = score_generate_result(
         [
             {
@@ -566,7 +568,6 @@ def test_generate_filter_trace_preserves_raw_response(tmp_path: Path) -> None:
         ],
         "answer",
         "gen",
-        cache,
     )
 
     record = result.records[0]
@@ -579,7 +580,7 @@ def test_generate_filter_trace_preserves_raw_response(tmp_path: Path) -> None:
     ]
 
 
-def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None:
+def test_generate_merges_resumed_rows_before_aggregation() -> None:
     from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
     items = [
@@ -602,22 +603,18 @@ def test_generate_merges_resumed_rows_before_aggregation(tmp_path: Path) -> None
             "gen": ["Answer: B"],
         },
     ]
-    cache = tmp_path / "resumed.jsonl"
-
     result = score_generate_result(
         items,
         "answer",
         "gen",
-        cache,
         aggregation="majority_vote",
     )
     assert result.metrics["acc"] == 1.0
     assert len(result.records) == 1
     assert result.records[0]["predictions"] == ["A", "B", "B"]
-    summary = json.loads(cache.with_suffix(".summary.json").read_text())
-    assert summary["question_total"] == 1
-    assert summary["sample_total"] == 3
-    assert summary["aggregation"] == "majority_vote"
+    assert result.sample_count == 1
+    assert result.records[0]["sample_total"] == 3
+    assert result.records[0]["aggregation"] == "majority_vote"
 
 
 class TestMCRepeatedRows:
@@ -645,6 +642,35 @@ class TestMCRepeatedRows:
         )
         assert len(merged) == 1
         assert merged[0]["gen"] == ["Answer: A", "Answer: B"]
+
+    def test_repeated_rows_are_ordered_by_sample_index(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import (
+            merge_generate_records,
+            score_generate_result,
+        )
+
+        rows = [
+            self._row(["Answer: A"], sample_index=1),
+            self._row(["Answer: B"], sample_index=0),
+        ]
+        merged = merge_generate_records(rows, "answer", "gen")
+        result = score_generate_result(rows, "answer", "gen", aggregation="first")
+
+        assert merged[0]["gen"] == ["Answer: B", "Answer: A"]
+        assert result.metrics["acc"] == 1.0
+
+    def test_duplicate_sample_index_is_rejected(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+
+        with pytest.raises(ValueError, match="Duplicate sample_index 0"):
+            merge_generate_records(
+                [
+                    self._row(["Answer: A"], sample_index=0),
+                    self._row(["Answer: B"], sample_index=0),
+                ],
+                "answer",
+                "gen",
+            )
 
     def test_multi_generation_row_is_rejected(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import merge_generate_records

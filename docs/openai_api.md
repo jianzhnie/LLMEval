@@ -96,9 +96,9 @@ MC first-token loglikelihood 都调用 Chat Completions；offline 仅在构造 v
 `SamplingParams` 时映射为 vLLM 自己的 `max_tokens` 字段。LLMEval 为每个样本发送独立
 请求，因此 `n_samples` 表示展开后的请求数量，而不是直接发送 OpenAI 的 `n` 参数。
 
-仅当显式设置 `--loglikelihood_mode continuation` 时，MC 才使用传统
-`/v1/completions` 端点及其 `max_tokens`、`echo` 参数。这是为了获取完整 continuation
-的 prompt-token logprobs；当前 Chat Completions 和 Responses API 没有等价能力。
+MC loglikelihood 固定使用 Chat Completions 的首 token `top_logprobs` 近似评分。
+项目不再调用旧 `/v1/completions` 端点。first-token 与 continuation 的通用计算方法
+见 [MC Loglikelihood 评分机制](mc_scoring.md)。
 
 ## 概率与重复控制
 
@@ -307,7 +307,7 @@ LLMEval CLI 的 `--tool_choice` 支持 `none`、`auto` 和 `required`。标准 A
 具体函数需要传入结构化对象，不应直接把函数名作为 `--tool_choice` 的字符串值。
 
 ```bash
-python ./llmeval/inference/online.py \
+python -m llmeval.inference.online \
   --input_file ./data/aime24.jsonl \
   --output_file ./output/aime24.jsonl \
   --base_url http://127.0.0.1:8090/v1 \

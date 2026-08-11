@@ -36,7 +36,7 @@ The system follows a three-stage evaluation pipeline: **Inference → Scoring �
 
 All CLI arguments use `HfArgumentParser` from `transformers` to parse into strongly-typed dataclasses. The inheritance hierarchy is:
 
-- `DataArguments` — input/output paths, task name, batch size
+- `DataArguments` — input/output paths and resume repair
 - `PromptArguments` — input/label/response keys, system prompt selection from `SYSTEM_PROMPT_FACTORY`
 - `GenerationArguments` — temperature, top_p, n_samples, max_completion_tokens, seed
 - `VLLMGenerationArguments` — top_k, thinking, special-token, and repetition controls
@@ -45,7 +45,7 @@ All CLI arguments use `HfArgumentParser` from `transformers` to parse into stron
 
 These are composed via multiple inheritance into mode-specific argument classes:
 - `OnlineInferArguments` → `DataArguments + PromptArguments + GenerationArguments + ServerArguments`
-- `OfflineInferArguments` → `DataArguments + PromptArguments + GenerationArguments + VLLMEngineArguments`
+- `OfflineInferArguments` → `DataArguments + PromptArguments + GenerationArguments + VLLMGenerationArguments + VLLMEngineArguments`
 - `MathEvalArguments`, `MCEvalArguments`, `CodeEvalArguments` — task-family-specific scoring arguments
 
 ### Prompt Templates (`llmeval/utils/prompts.py`)
@@ -56,17 +56,17 @@ System prompts are stored in `SYSTEM_PROMPT_FACTORY`, mapping string names to pr
 
 Three entry points, each a standalone script with its own `main()`:
 
-- **`online.py`** — `InferenceClient` wraps `openai.OpenAI` with exponential backoff retry logic. `InferenceRunner` orchestrates concurrent requests via `ThreadPoolExecutor`, with resume support based on stable `doc_id`. Entry: `python llmeval/inference/online.py --input_file ... --output_file ... --base_url ...`
+- **`online.py`** — `InferenceClient` wraps `openai.OpenAI` with exponential backoff retry logic. `InferenceRunner` orchestrates concurrent requests via `ThreadPoolExecutor`, with resume support based on stable `doc_id`. Entry: `python -m llmeval.inference.online --input_file ... --output_file ... --base_url ...`
 
-- **`offline.py`** — `OfflineInferenceRunner` uses vLLM's native `LLM` class for local batched inference. Converts data to chat message format, handles resume, writes results incrementally. Entry: `python llmeval/inference/offline.py --model_name_or_path ... --input_file ...`
+- **`offline.py`** — `OfflineInferenceRunner` uses vLLM's native `LLM` class for local batched inference. Converts data to chat message format, handles resume, writes results incrementally. Entry: `python -m llmeval.inference.offline --model_name_or_path ... --input_file ...`
 
 - **`mc.py`** — Multiple-choice inference. Loglikelihood mode scores each choice via the completions API (writes `choices` / `gold` / `logprobs`); generate mode produces free-form text (writes `gen`) for letter extraction at scoring time.
 
 ### Evaluation/Scoring Layer (`llmeval/evaluator.py`, `llmeval/tasks/`)
 
-- **`llmeval/evaluator.py`** — Entry point for scoring. Selects `MathEvalArguments`, `MCEvalArguments`, or `CodeEvalArguments` from the task prefix, validates input JSONL, then dispatches to the registered scorer. Entry: `python llmeval/evaluator.py --input_path ... --task_name math_opensource/aime24 --cache_path ...`
+- **`llmeval/evaluator.py`** — Entry point for scoring. Selects `MathEvalArguments`, `MCEvalArguments`, or `CodeEvalArguments` from the task prefix, validates input JSONL, then dispatches to the registered scorer. Entry: `python -m llmeval.evaluator --input_path ... --task_name math_opensource/aime24 --result_path ...`
 
-- **`tasks/math_eval/math_score.py`** — Core math scoring using the `math-verify` library. Uses `ProcessPool` (pebble) for parallel answer verification with timeout support. Implements `math_metric` with both `ExprExtractionConfig` and `LatexExtractionConfig` for robust answer extraction. Tracks statistics (correct, timeout, error counts) and caches results as JSONL.
+- **`tasks/math_eval/math_score.py`** — Core math scoring using the `math-verify` library. Uses `ProcessPool` (pebble) for parallel answer verification with timeout support. Implements `math_metric` with both `ExprExtractionConfig` and `LatexExtractionConfig` for robust answer extraction. The registry writes one aggregate result JSON.
 
 - **`tasks/math_eval/utils_parser.py`** — Ground truth parsing utilities (gsm8k `####` format, olympiadbench, generic).
 
@@ -79,7 +79,7 @@ Three entry points, each a standalone script with its own `main()`:
 1. Input: prepared JSONL with a unique `doc_id`, plus `prompt` and `answer`
 2. Inference: Each prompt is sampled `n_samples` times → output JSONL with `gen` list appended (MC loglikelihood mode instead writes `choices` / `gold` / `logprobs`)
 3. Scoring: `evaluator.py` reads the output JSONL and dispatches to the task-family scorer — math items go through `math-verify` → appends `accuracy`, `extracted_answer`, `extracted_gold` fields
-4. Results: Accuracy score printed and detailed results cached (per-item JSONL + `.summary.json` for MC/code)
+4. Results: Metrics are logged and one aggregate JSON is written to `result_path`
 
 ### Resume Mechanism
 

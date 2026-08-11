@@ -61,8 +61,13 @@ Google-Proof Q&A，博士级科学推理（物理/化学/生物），diamond 为
 ## 通用领域 Multiple-Choice
 
 支持两种评测模式：
-- **loglikelihood**（默认）：比较每个选项的对数似然，选最高分。对齐 lm-evaluation-harness。
+- **loglikelihood**（默认）：使用 Chat Completions 的首 token `top_logprobs`
+  比较答案标记（A-J），选择得分最高的选项。
 - **generate**：生成文本 → 提取答案字母。兼容性好。
+
+loglikelihood 当前采用 first-token 近似评分，不计算完整选项文本的 continuation
+loglikelihood。两种评分方法的原理、限制及适用场景见
+[MC Loglikelihood 评分机制](mc_scoring.md)。
 
 ### MMLU
 Massive Multitask Language Understanding，57 学科多选题。

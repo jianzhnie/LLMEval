@@ -15,7 +15,7 @@ mkdir -p "${output_dir}"
 
 # --- 运行推理任务 ---
 # aime24 (重复采样 64 次)
-python llmeval/inference/offline.py \
+python -m llmeval.inference.offline \
     --input_file "./data/aime24.jsonl" \
     --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
     --batch_size 32 \
@@ -28,7 +28,7 @@ python llmeval/inference/offline.py \
     --n_samples "${n_samples}"
 
 # aime25 (重复采样 64 次)
-python llmeval/inference/offline.py \
+python -m llmeval.inference.offline \
     --input_file "./data/aime25.jsonl" \
     --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
     --batch_size 32 \
@@ -55,7 +55,7 @@ python llmeval/inference/offline.py \
 vLLM 支持 YaRN，可以配置为
 
 ```bash
-python llmeval/inference/offline.py \
+python -m llmeval.inference.offline \
     --input_file "./data/aime24.jsonl" \
     --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
     --batch_size 32 \

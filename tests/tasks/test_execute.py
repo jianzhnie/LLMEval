@@ -118,10 +118,11 @@ class TestCheckCorrectness:
 
 
 class TestResolveMpMethod:
-    def test_default_is_fork_when_supported(
+    def test_linux_default_is_fork_when_supported(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("LLMEVAL_MP_METHOD", raising=False)
+        monkeypatch.setattr(code_execute.sys, "platform", "linux")
         monkeypatch.setattr(
             code_execute.multiprocessing,
             "get_all_start_methods",
@@ -129,12 +130,23 @@ class TestResolveMpMethod:
         )
         assert code_execute._resolve_mp_method() == "fork"
 
+    def test_macos_default_is_spawn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("LLMEVAL_MP_METHOD", raising=False)
+        monkeypatch.setattr(code_execute.sys, "platform", "darwin")
+        monkeypatch.setattr(
+            code_execute.multiprocessing,
+            "get_all_start_methods",
+            lambda: ["fork", "spawn"],
+        )
+        assert code_execute._resolve_mp_method() == "spawn"
+
     def test_spawn_fallback_when_fork_unavailable(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Platforms without fork fall back to spawn, with a logged warning
         and a one-shot info line naming the effective method."""
         monkeypatch.delenv("LLMEVAL_MP_METHOD", raising=False)
+        monkeypatch.setattr(code_execute.sys, "platform", "linux")
         monkeypatch.setattr(
             code_execute.multiprocessing,
             "get_all_start_methods",

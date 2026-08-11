@@ -43,8 +43,17 @@ class TestDataArguments:
         with pytest.raises(ValueError, match=r"does not exist"):
             DataArguments(input_file=str(tmp_path / "nonexistent.jsonl"))
 
+    @pytest.mark.parametrize("output_file", ["", "  "])
+    def test_empty_output_file_raises(self, output_file: str) -> None:
+        with pytest.raises(ValueError, match="output_file must be a non-empty path"):
+            DataArguments(output_file=output_file)
 
-def test_eval_result_path_overrides_legacy_cache_path(tmp_path: Path) -> None:
+    def test_output_file_rejects_directory(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="must be a file path"):
+            DataArguments(output_file=str(tmp_path))
+
+
+def test_eval_result_path_and_code_k_values(tmp_path: Path) -> None:
     input_path = tmp_path / "input.jsonl"
     input_path.touch()
     result_path = tmp_path / "results.jsonl"
@@ -53,7 +62,7 @@ def test_eval_result_path_overrides_legacy_cache_path(tmp_path: Path) -> None:
         input_path=str(input_path), result_path=str(result_path), code_k_values="1,5,5"
     )
 
-    assert args.cache_path == str(result_path)
+    assert args.result_path == str(result_path)
     assert args.code_k_values_tuple == (1, 5)
 
 
@@ -152,10 +161,9 @@ class TestVLLMEngineArguments:
 
 
 class TestMCAndEvaluationP0Config:
-    def test_mc_generation_defaults_to_one_sample_and_auto_scoring(self) -> None:
+    def test_mc_defaults_to_one_sample(self) -> None:
         config = MCInferArguments()
         assert config.n_samples == 1
-        assert config.loglikelihood_mode == "first_token"
 
     def test_invalid_mc_aggregation_raises(self, tmp_path: Path) -> None:
         input_path = tmp_path / "input.jsonl"
@@ -324,6 +332,13 @@ class TestEvalArguments:
         code_args = CodeEvalArguments(input_path=str(input_f), code_k_values="1,5,5")
         assert code_args.task_name.startswith("code_opensource/")
         assert code_args.code_k_values_tuple == (1, 5)
+
+    def test_result_path_rejects_whitespace(self, tmp_path: Path) -> None:
+        input_path = tmp_path / "data.jsonl"
+        input_path.write_text("{}\n")
+
+        with pytest.raises(ValueError, match="result_path is required"):
+            MathEvalArguments(input_path=str(input_path), result_path="  ")
 
     @pytest.mark.parametrize(
         "argument_type", [MathEvalArguments, MCEvalArguments, CodeEvalArguments]

@@ -51,8 +51,8 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
     sys.modules["transformers"] = _tf
 
 from llmeval.evaluator import (
-    _resolve_cache_path,
     evaluate_task,
+    evaluate_task_result,
     select_eval_arguments,
 )
 from llmeval.tasks.registry import ScorerResult
@@ -82,16 +82,6 @@ class TestEvaluateTask:
     ) -> None:
         assert select_eval_arguments(task_name) is argument_type
 
-    def test_cache_directory_path_resolves_to_task_jsonl(self, tmp_path: Path) -> None:
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        resolved = _resolve_cache_path(cache_dir, "math_opensource/aime24")
-        assert resolved == cache_dir / "math_opensource_aime24.jsonl"
-
-    def test_cache_file_path_is_preserved(self, tmp_path: Path) -> None:
-        cache_file = tmp_path / "results.jsonl"
-        assert _resolve_cache_path(cache_file, "math_opensource/aime24") == cache_file
-
     def test_empty_dataset_returns_zero_and_validates_task(
         self, tmp_path: Path
     ) -> None:
@@ -101,7 +91,7 @@ class TestEvaluateTask:
             )
             == 0.0
         )
-        assert (tmp_path / "empty.summary.json").exists()
+        assert (tmp_path / "empty.jsonl").exists()
 
     def test_unsupported_task_raises(self, tmp_path: Path) -> None:
         data = [{"prompt": "q", "answer": "a", "gen": ["r"], "task": "t"}]
@@ -110,8 +100,39 @@ class TestEvaluateTask:
                 data, "unsupported/task", "answer", "gen", str(tmp_path / "cache"), 4
             )
 
+    def test_result_path_rejects_directory(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="file path"):
+            evaluate_task([], "mc_opensource/task", "a", "g", tmp_path, 1)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"max_workers": 0}, "max_workers"),
+            ({"timeout": 0}, "timeout"),
+            ({"exec_timeout": 0}, "exec_timeout"),
+            ({"seed": -1}, "seed"),
+            ({"bootstrap_samples": -1}, "bootstrap_samples"),
+            ({"confidence_level": 1.0}, "confidence_level"),
+            ({"code_k_values": ()}, "code_k_values"),
+        ],
+    )
+    def test_library_api_validates_shared_options(
+        self, tmp_path: Path, kwargs: dict[str, object], message: str
+    ) -> None:
+        arguments: dict[str, object] = {
+            "eval_dataset": [],
+            "task_name": "mc_opensource/task",
+            "label_key": "answer",
+            "response_key": "gen",
+            "result_path": tmp_path / "result.json",
+            "max_workers": 1,
+            **kwargs,
+        }
+        with pytest.raises(ValueError, match=message):
+            evaluate_task_result(**arguments)  # type: ignore[arg-type]
+
     def test_mc_loglikelihood_dispatch(self, tmp_path: Path) -> None:
-        """Items with 'logprobs' route to score_loglikelihood."""
+        """Items with logprobs route to structured loglikelihood scoring."""
         data = [
             {
                 "gold": 1,
@@ -124,10 +145,10 @@ class TestEvaluateTask:
             data, "mc_opensource/mmlu", "answer", "gen", tmp_path / "mc.jsonl", 1
         )
         assert acc == 1.0
-        assert (tmp_path / "mc.summary.json").exists()
+        assert (tmp_path / "mc.jsonl").exists()
 
     def test_mc_generate_dispatch(self, tmp_path: Path) -> None:
-        """Items without 'logprobs' route to score_generate."""
+        """Items without logprobs route to structured generation scoring."""
         data = [
             {
                 "answer": "B",
@@ -230,18 +251,17 @@ class TestEvaluateTask:
 
         called: dict[str, object] = {}
 
-        def _fake_compute_scores(**kwargs: object) -> ScorerResult:
+        def _fake_score_math(**kwargs: object) -> ScorerResult:
             called.update(kwargs)
             return _scorer_result("accuracy", 1.0)
 
         monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(ev, "score_math_result", _fake_compute_scores)
+        monkeypatch.setattr(ev, "score_math_result", _fake_score_math)
         try:
             data = [
                 {
                     "answer": "5",
                     "gen": ["The answer is $\\boxed{5}$"],
-                    "task": "math_opensource/aime24",
                 }
             ]
             acc = evaluate_task(
@@ -256,7 +276,7 @@ class TestEvaluateTask:
             monkeypatch.undo()
 
         assert acc == 1.0
-        assert called["eval_dataset"] == data
+        assert called["eval_dataset"] == [{**data[0], "task": "math_opensource/aime24"}]
         assert called["label_key"] == "answer"
         assert called["response_key"] == "gen"
 

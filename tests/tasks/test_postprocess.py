@@ -48,6 +48,32 @@ def test_normalize_repeated_samples_rejects_conflicts() -> None:
         )
 
 
+def test_normalize_repeated_samples_orders_and_validates_sample_indices() -> None:
+    rows = [
+        {"doc_id": "d0", "answer": "1", "gen": ["second"], "sample_index": 1},
+        {"doc_id": "d1", "answer": "2", "gen": ["only"], "sample_index": 0},
+        {"doc_id": "d0", "answer": "1", "gen": ["first"], "sample_index": 0},
+    ]
+    normalized = normalize_single_generation_samples(
+        rows,
+        "gen",
+        problem_identity=lambda item, _index: str(item["doc_id"]),
+        conflict_keys=("answer",),
+    )
+
+    assert [row["gen"] for row in normalized] == [["first"], ["only"], ["second"]]
+
+    with pytest.raises(ValueError, match="Duplicate sample_index 0"):
+        normalize_single_generation_samples(
+            [
+                {"doc_id": "d0", "gen": ["a"], "sample_index": 0},
+                {"doc_id": "d0", "gen": ["b"], "sample_index": 0},
+            ],
+            "gen",
+            problem_identity=lambda item, _index: str(item["doc_id"]),
+        )
+
+
 def test_registered_pipeline_records_each_filter_step() -> None:
     registry = FilterRegistry()
     registry.register("strip", str.strip, version="2")

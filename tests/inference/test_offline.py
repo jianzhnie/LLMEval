@@ -108,8 +108,8 @@ class TestOfflineInferenceRunner:
             skip_special_tokens=False,
         )
         items = [
-            {"doc_id": "doc:1", "prompt": "q", "_request_seed": 1},
-            {"doc_id": "doc:1", "prompt": "q", "_request_seed": 2},
+            {"doc_id": "doc:1", "prompt": "q", "sample_index": 0},
+            {"doc_id": "doc:1", "prompt": "q", "sample_index": 1},
         ]
 
         params = runner._sampling_params_for_items(items)
@@ -253,8 +253,8 @@ class TestOfflineInferenceRunner:
 
         runner.llm = SimpleNamespace(chat=chat)
         items = [
-            {"doc_id": "good", "prompt": "good", "_request_seed": 1},
-            {"doc_id": "bad", "prompt": "bad", "_request_seed": 2},
+            {"doc_id": "good", "prompt": "good", "sample_index": 0},
+            {"doc_id": "bad", "prompt": "bad", "sample_index": 0},
         ]
         messages = [
             [{"role": "user", "content": "good"}],
@@ -267,5 +267,5 @@ class TestOfflineInferenceRunner:
         assert output["doc_id"] == "good"
         assert output["gen"] == "ok"
         failure = json.loads((tmp_path / "output_failed.jsonl").read_text().strip())
-        assert failure["item"]["doc_id"] == "bad"
+        assert failure["item"] == {"doc_id": "bad", "sample_index": 0}
         assert failure["error_category"] == "inference"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -33,8 +34,8 @@ def test_evaluation_result_summary_excludes_records(tmp_path: Path) -> None:
 
     assert "records" not in result.to_dict()
 
-    persist_evaluation_result(result, tmp_path / "score.jsonl")
-    summary = json.loads((tmp_path / "score.summary.json").read_text())
+    persist_evaluation_result(result, tmp_path / "score.json")
+    summary = json.loads((tmp_path / "score.json").read_text())
     assert "records" not in summary
     assert summary["acc"] == 1.0
 
@@ -98,7 +99,7 @@ def test_mc_registry_uses_one_observation_for_item_aggregation(
         task_name="mc_opensource/test",
         label_key="answer",
         response_key="gen",
-        cache_path=tmp_path / f"{aggregation}.jsonl",
+        result_path=tmp_path / f"{aggregation}.json",
         max_workers=1,
         timeout=1,
         exec_timeout=1.0,
@@ -111,6 +112,14 @@ def test_mc_registry_uses_one_observation_for_item_aggregation(
 
     assert result.metrics["acc"].value == 1.0
     assert result.metrics["acc"].count == 1
+
+
+def test_mc_registry_rejects_non_list_logprobs() -> None:
+    scorer = MagicMock()
+    task = MCTask(scorer, scorer)
+
+    with pytest.raises(ValueError, match="invalid logprobs"):
+        task._mc_schema([{"logprobs": None}])
 
 
 def test_code_registry_preserves_scorer_failure_classification(tmp_path: Path) -> None:
@@ -129,7 +138,7 @@ def test_code_registry_preserves_scorer_failure_classification(tmp_path: Path) -
         task_name="code_opensource/test",
         label_key="answer",
         response_key="gen",
-        cache_path=tmp_path / "code.jsonl",
+        result_path=tmp_path / "code.json",
         max_workers=1,
         timeout=1,
         exec_timeout=1.0,

@@ -167,10 +167,11 @@ class TestProcessItem:
         runner.client = mock_client
 
         item = {
+            "doc_id": "test:0",
             "prompt": "q",
             "answer": "a",
             "gen": ["existing"],
-            "_request_seed": 1,
+            "sample_index": 0,
         }
         original_gen = item["gen"].copy()
         result = runner.process_item(item)
@@ -193,7 +194,12 @@ class TestProcessItem:
         mock_client.get_content.return_value = None  # context-length rejection
         runner.client = mock_client
 
-        item = {"doc_id": "test:0", "prompt": "q", "answer": "a", "_request_seed": 1}
+        item = {
+            "doc_id": "test:0",
+            "prompt": "q",
+            "answer": "a",
+            "sample_index": 0,
+        }
         result = runner.process_item(item)
 
         assert result is not None
@@ -208,7 +214,7 @@ class TestProcessItem:
         assert rows[0]["error"] == "context_length_exceeded"
         assert runner.load_data() == []
 
-    def test_process_item_persists_exhausted_empty_response(
+    def test_process_item_keeps_exhausted_empty_response_retryable(
         self, tmp_path: Path
     ) -> None:
         runner = _make_runner(tmp_path)
@@ -218,14 +224,18 @@ class TestProcessItem:
         runner.client = MagicMock()
         runner.client.get_content.return_value = ""
 
-        result = runner.process_item(
-            {"doc_id": "test:0", "prompt": "q", "answer": "a", "_request_seed": 1}
-        )
+        with pytest.raises(RuntimeError, match="empty content"):
+            runner.process_item(
+                {
+                    "doc_id": "test:0",
+                    "prompt": "q",
+                    "answer": "a",
+                    "sample_index": 0,
+                }
+            )
 
-        assert result is not None
-        assert result["error"] == "empty_response"
-        assert runner._stats["failed"] == 1
-        assert runner.load_data() == []
+        assert not Path(runner.args.output_file).exists()
+        assert len(runner.load_data()) == 1
 
 
 # ── InferenceClient request behavior ──────────────────────────────
@@ -307,12 +317,13 @@ def test_runner_forwards_parsed_extra_body(
 
 
 class TestGetContent:
-    def test_null_content_normalized_to_empty(self) -> None:
-        """Reasoning model truncation returns content=None → ""."""
+    def test_null_content_fails_after_retry_budget(self) -> None:
+        from llmeval.utils.retry import ClientError
+
         client = _make_client()
         client.client.chat.completions.create.return_value = _fake_completion([None])
-        result = client.get_content("q", None, "m", 8, 0.0, 1.0)
-        assert result == ""
+        with pytest.raises(ClientError, match="response content is empty"):
+            client.get_content("q", None, "m", 8, 0.0, 1.0)
 
     def test_empty_content_retried_then_succeeds(
         self, monkeypatch: pytest.MonkeyPatch
@@ -534,7 +545,7 @@ class TestLoadData:
 
         assert len(loaded) == 2
         assert all(item["doc_id"] == "test:0" for item in loaded)
-        assert len({item["_request_seed"] for item in loaded}) == 2
+        assert [item["sample_index"] for item in loaded] == [2, 3]
 
     def test_load_data_uses_completed_row_count(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path, n_samples=4)
@@ -583,7 +594,7 @@ class TestConcurrentProcessing:
         loaded = runner.load_data()
 
         assert len(loaded) == 3
-        assert len({item["_request_seed"] for item in loaded}) == 3
+        assert [item["sample_index"] for item in loaded] == [0, 1, 2]
         runner._process_concurrently(loaded)
 
         assert runner.client.get_content.call_count == 3
@@ -599,8 +610,13 @@ class TestConcurrentProcessing:
         runner.client.get_content.return_value = "ok"
 
         items = [
-            {"prompt": ["multimodal"], "answer": "a", "_request_seed": 1},
-            {"prompt": "q", "answer": "a", "_request_seed": 2},
+            {
+                "doc_id": "bad",
+                "prompt": ["multimodal"],
+                "answer": "a",
+                "sample_index": 0,
+            },
+            {"doc_id": "good", "prompt": "q", "answer": "a", "sample_index": 0},
         ]
         runner._process_concurrently(items)
 
@@ -614,13 +630,14 @@ class TestConcurrentProcessing:
 
         runner._process_concurrently(
             [
-                {"prompt": "qq", "answer": "a", "_request_seed": 1},
-                {"prompt": "qq", "answer": "a", "_request_seed": 2},
+                {"doc_id": "q1", "prompt": "qq", "answer": "a", "sample_index": 0},
+                {"doc_id": "q2", "prompt": "qq", "answer": "a", "sample_index": 0},
             ]
         )
 
         failed_file = tmp_path / "output_failed.jsonl"
         assert failed_file.exists()
         record = json.loads(failed_file.read_text().strip().split("\n")[0])
+        assert record["sample_index"] == 0
         assert record["prompt"] == "qq"
         assert "server down" in record["error"]

@@ -8,11 +8,9 @@ stubbed or avoided entirely.
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import signal
 import sys
-import tempfile
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -36,11 +34,22 @@ from llmeval.tasks.code_eval.code_score import (
     _process_code_item,
     estimate_pass_at_k,
     extract_code,
-    score_code,
     score_code_result,
-    write_cache,
 )
 from llmeval.tasks.postprocess import strip_reasoning_wrappers
+
+
+def _score_code_value(
+    eval_dataset: list[dict],
+    label_key: str,
+    response_key: str,
+    _result_path: Path | None = None,
+    **kwargs: object,
+) -> float:
+    """Return the primary metric while tests exercise the structured API."""
+    return score_code_result(eval_dataset, label_key, response_key, **kwargs).metrics[
+        "pass@1"
+    ]
 
 
 def test_code_failure_record_contains_filter_trace() -> None:
@@ -156,11 +165,30 @@ class TestEstimatePassAtK:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# score_code (serial path only)
+# Structured code scoring (serial path only)
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class TestScoreCode:
+    @pytest.mark.parametrize("k_values", [(), (1.5,), (True,)])
+    def test_invalid_k_values_are_rejected(self, k_values: tuple[object, ...]) -> None:
+        with pytest.raises(ValueError, match="positive integers"):
+            score_code_result(
+                [
+                    {
+                        "task_id": "task/0",
+                        "prompt": "def f():\n",
+                        "answer": "\nassert f() == 1\n",
+                        "gen": "    return 1",
+                    }
+                ],
+                "answer",
+                "gen",
+                k_values=k_values,  # type: ignore[arg-type]
+                max_workers=1,
+                allow_unsafe_code=True,
+            )
+
     def test_worker_exception_returns_indexed_failure(self) -> None:
         import llmeval.tasks.code_eval.code_score as code_score
 
@@ -185,7 +213,6 @@ class TestScoreCode:
             [{"task_id": "task/0", "prompt": "def f():\n", "answer": "", "gen": [""]}],
             "answer",
             "gen",
-            tmp_path / "serial_failure.jsonl",
             max_workers=1,
             allow_unsafe_code=True,
         )
@@ -207,7 +234,6 @@ class TestScoreCode:
             ],
             "answer",
             "gen",
-            tmp_path / "incorrect.jsonl",
             max_workers=1,
             allow_unsafe_code=True,
         )
@@ -215,6 +241,71 @@ class TestScoreCode:
         assert result.metrics["pass@1"] == 0.0
         assert result.failed_count == 0
         assert result.effective_sample_count == 1
+
+    def test_inference_error_is_excluded_from_pass_at_k(self) -> None:
+        result = score_code_result(
+            [
+                {
+                    "task_id": "task/0",
+                    "prompt": "def f():\n",
+                    "answer": "\nassert f() == 1\n",
+                    "gen": "",
+                    "error": "context_length_exceeded",
+                }
+            ],
+            "answer",
+            "gen",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert result.failed_count == 1
+        assert result.effective_sample_count == 0
+        assert result.observations["pass@1"] == []
+
+    def test_incomplete_problem_is_excluded_from_problem_level_pass_at_k(
+        self,
+    ) -> None:
+        result = score_code_result(
+            [
+                {
+                    "task_id": "task/incomplete",
+                    "prompt": "def f():\n",
+                    "answer": "\nassert f() == 1\n",
+                    "gen": "    return 1",
+                    "sample_index": 0,
+                },
+                {
+                    "task_id": "task/incomplete",
+                    "prompt": "def f():\n",
+                    "answer": "\nassert f() == 1\n",
+                    "gen": "",
+                    "error": "context_length_exceeded",
+                    "sample_index": 1,
+                },
+                {
+                    "task_id": "task/complete",
+                    "prompt": "def f():\n",
+                    "answer": "\nassert f() == 1\n",
+                    "gen": "    return 2",
+                    "sample_index": 0,
+                },
+            ],
+            "answer",
+            "gen",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert result.metrics["pass@1"] == 0.0
+        assert result.observations["pass@1"] == [0.0]
+        assert result.effective_sample_count == 2
+        assert result.failed_count == 1
+        assert result.details == {
+            "complete_problem_count": 1,
+            "incomplete_problem_count": 1,
+            "excluded_problem_task_ids": ["task/incomplete"],
+        }
 
     def test_os_exit_candidate_is_completed_not_infra_failure(
         self, tmp_path: Path
@@ -231,7 +322,6 @@ class TestScoreCode:
             ],
             "answer",
             "gen",
-            tmp_path / "os_exit.jsonl",
             max_workers=1,
             allow_unsafe_code=True,
         )
@@ -280,7 +370,6 @@ class TestScoreCode:
             items,
             "answer",
             "gen",
-            tmp_path / "pool_timeout.jsonl",
             max_workers=2,
             allow_unsafe_code=True,
         )
@@ -294,7 +383,7 @@ class TestScoreCode:
 
     def test_execution_requires_explicit_opt_in(self, tmp_path: Path) -> None:
         with pytest.raises(PermissionError, match="executes generated code"):
-            score_code(
+            _score_code_value(
                 [
                     {
                         "prompt": "def f():\n",
@@ -323,30 +412,15 @@ class TestScoreCode:
                 "gen": ["    return a - b"],
             },
         ]
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
-            cache_path = Path(tf.name)
-        try:
-            acc = score_code(
-                items,
-                "answer",
-                "gen",
-                cache_path,
-                max_workers=0,
-                exec_timeout=3.0,
-                allow_unsafe_code=True,
-            )
-            assert acc == 1.0
-
-            # verify cache files
-            assert cache_path.exists()
-            summary_path = cache_path.with_suffix(".summary.json")
-            assert summary_path.exists()
-            summary = json.loads(summary_path.read_text())
-            assert summary["pass_at_1"] == 1.0
-            assert summary["correct"] == 2
-        finally:
-            cache_path.unlink(missing_ok=True)
-            cache_path.with_suffix(".summary.json").unlink(missing_ok=True)
+        acc = _score_code_value(
+            items,
+            "answer",
+            "gen",
+            max_workers=0,
+            exec_timeout=3.0,
+            allow_unsafe_code=True,
+        )
+        assert acc == 1.0
 
     def test_mixed_results(self) -> None:
         items = [
@@ -363,22 +437,15 @@ class TestScoreCode:
                 "gen": ["    return a * b"],
             },  # wrong
         ]
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
-            cache_path = Path(tf.name)
-        try:
-            acc = score_code(
-                items,
-                "answer",
-                "gen",
-                cache_path,
-                max_workers=0,
-                exec_timeout=3.0,
-                allow_unsafe_code=True,
-            )
-            assert acc == 0.5
-        finally:
-            cache_path.unlink(missing_ok=True)
-            cache_path.with_suffix(".summary.json").unlink(missing_ok=True)
+        acc = _score_code_value(
+            items,
+            "answer",
+            "gen",
+            max_workers=0,
+            exec_timeout=3.0,
+            allow_unsafe_code=True,
+        )
+        assert acc == 0.5
 
     def test_parallel_samples_complete_within_timeout(self, tmp_path: Path) -> None:
         """End-to-end timeout regression for the parallel path.
@@ -403,7 +470,7 @@ class TestScoreCode:
                 "gen": ["    return a - b"],
             },
         ]
-        acc = score_code(
+        acc = _score_code_value(
             items,
             "answer",
             "gen",
@@ -416,14 +483,8 @@ class TestScoreCode:
         assert acc == 1.0
 
     def test_empty_dataset(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
-            cache_path = Path(tf.name)
-        try:
-            acc = score_code([], "answer", "gen", cache_path, max_workers=0)
-            assert acc == 0.0
-        finally:
-            cache_path.unlink(missing_ok=True)
-            cache_path.with_suffix(".summary.json").unlink(missing_ok=True)
+        acc = _score_code_value([], "answer", "gen", max_workers=0)
+        assert acc == 0.0
 
     def test_empty_generation_marked_failed(self) -> None:
         items = [
@@ -434,21 +495,14 @@ class TestScoreCode:
                 "gen": [""],
             },
         ]
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
-            cache_path = Path(tf.name)
-        try:
-            acc = score_code(
-                items,
-                "answer",
-                "gen",
-                cache_path,
-                max_workers=0,
-                allow_unsafe_code=True,
-            )
-            assert acc == 0.0
-        finally:
-            cache_path.unlink(missing_ok=True)
-            cache_path.with_suffix(".summary.json").unlink(missing_ok=True)
+        acc = _score_code_value(
+            items,
+            "answer",
+            "gen",
+            max_workers=0,
+            allow_unsafe_code=True,
+        )
+        assert acc == 0.0
 
     def test_multi_sample_pass_at_k_summary(self, tmp_path: Path) -> None:
         items = [
@@ -465,24 +519,19 @@ class TestScoreCode:
                 "gen": ["    return a + b"],
             },
         ]
-        cache_path = tmp_path / "code.jsonl"
-        acc = score_code(
+        result = score_code_result(
             items,
             "answer",
             "gen",
-            cache_path,
             max_workers=0,
             exec_timeout=3.0,
             k_values=(1, 2),
             allow_unsafe_code=True,
         )
 
-        summary = json.loads(cache_path.with_suffix(".summary.json").read_text())
-        assert acc == pytest.approx(0.5)
-        assert summary["pass_at_k"]["pass@1"] == 0.5
-        assert summary["pass_at_k"]["pass@2"] == 1.0
-        assert summary["total"] == 2
-        assert summary["problems"] == 1
+        assert result.metrics["pass@1"] == pytest.approx(0.5)
+        assert result.metrics["pass@2"] == 1.0
+        assert result.sample_count == 2
 
     def test_pass_at_1_reported_when_k_values_exclude_1(self, tmp_path: Path) -> None:
         """pass@1 is computed even when the caller's k_values omit 1."""
@@ -500,12 +549,10 @@ class TestScoreCode:
                 "gen": ["    return a + b"],
             },
         ]
-        cache_path = tmp_path / "code.jsonl"
         result = score_code_result(
             items,
             "answer",
             "gen",
-            cache_path,
             max_workers=0,
             exec_timeout=3.0,
             k_values=(2,),
@@ -515,8 +562,6 @@ class TestScoreCode:
         assert result.metrics["pass@1"] == pytest.approx(0.5)
         assert result.metrics["pass@2"] == pytest.approx(1.0)
         assert result.observations["pass@1"] == [pytest.approx(0.5)]
-        summary = json.loads(cache_path.with_suffix(".summary.json").read_text())
-        assert summary["pass_at_1"] == pytest.approx(0.5)
 
     def test_killed_by_signal_is_completed_observation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -553,7 +598,6 @@ class TestScoreCode:
             items,
             "answer",
             "gen",
-            tmp_path / "killed.jsonl",
             max_workers=0,
             exec_timeout=3.0,
             allow_unsafe_code=True,
@@ -621,7 +665,7 @@ class TestStripThinkTags:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# score_code with reasoning-model wrappers
+# Code scoring with reasoning-model wrappers
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -637,7 +681,7 @@ class TestScoreCodeThinkTags:
                 ],
             }
         ]
-        acc = score_code(
+        acc = _score_code_value(
             items,
             "answer",
             "gen",
@@ -665,7 +709,7 @@ class TestScoreCodePromptModes:
             }
         ]
 
-        acc = score_code(
+        acc = _score_code_value(
             items,
             "answer",
             "gen",
@@ -688,7 +732,7 @@ class TestScoreCodePromptModes:
             }
         ]
 
-        acc = score_code(
+        acc = _score_code_value(
             items,
             "answer",
             "gen",
@@ -708,7 +752,7 @@ class TestScoreCodePromptModes:
                 "gen": ["<answer>```python\n    return a + b\n```</answer>"],
             }
         ]
-        acc = score_code(
+        acc = _score_code_value(
             items,
             "answer",
             "gen",
@@ -717,28 +761,6 @@ class TestScoreCodePromptModes:
             allow_unsafe_code=True,
         )
         assert acc == 1.0
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# write_cache
-# ═══════════════════════════════════════════════════════════════════════
-
-
-class TestWriteCache:
-    def test_writes_summary_only(self, tmp_path: Path) -> None:
-        cache_path = tmp_path / "code.jsonl"
-        records = [
-            {"task_id": "t1", "passed": True, "result": "passed"},
-            {"task_id": "t2", "passed": False, "result": "failed: AssertionError"},
-        ]
-        csr = CodeScoreResult(pass_at_1=0.5, total=2, correct=1, records=records)
-
-        write_cache(csr, cache_path)
-
-        assert not cache_path.exists()
-        summary = json.loads(cache_path.with_suffix(".summary.json").read_text())
-        assert summary["pass_at_1"] == 0.5
-        assert summary["total"] == 2
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -764,12 +786,10 @@ class TestCodeRepeatedRows:
         }
 
     def _score(self, items: list[dict], tmp_path: Path):
-        cache_path = tmp_path / "code.jsonl"
         result = score_code_result(
             items,
             "answer",
             "gen",
-            cache_path,
             max_workers=0,
             exec_timeout=3.0,
             k_values=(1, 2),
@@ -863,7 +883,6 @@ class TestTimeoutClassification:
             items,
             "answer",
             "gen",
-            tmp_path / "loop.jsonl",
             max_workers=0,
             exec_timeout=1.0,
             allow_unsafe_code=True,
@@ -911,7 +930,6 @@ class TestDefaultScoringPath:
             items,
             "answer",
             "gen",
-            tmp_path / "default_path.jsonl",
             max_workers=2,
             timeout=60,
             exec_timeout=5.0,

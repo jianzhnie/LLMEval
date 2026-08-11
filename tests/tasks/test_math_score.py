@@ -205,7 +205,7 @@ class TestProcessAnswers:
 
 
 # ===========================================================================
-# compute_scores (parallel driver)
+# Math scoring driver
 # ===========================================================================
 
 
@@ -232,7 +232,7 @@ class TestComputeScores:
     ) -> None:
         import llmeval.tasks.math_eval.math_score as math_mod
 
-        def fake_compute_scores(*, eval_dataset, **_kwargs):
+        def fake_score_math_records(*, eval_dataset, **_kwargs):
             eval_dataset[0].update(
                 accuracy=0.0,
                 evaluation_status="failed",
@@ -245,7 +245,7 @@ class TestComputeScores:
             )
             return 0.0
 
-        monkeypatch.setattr(math_mod, "compute_scores", fake_compute_scores)
+        monkeypatch.setattr(math_mod, "_score_math_records", fake_score_math_records)
         result = math_mod.score_math_result(
             eval_dataset=[
                 _math_item("5", ["unparseable"]),
@@ -253,7 +253,6 @@ class TestComputeScores:
             ],
             label_key="answer",
             response_key="gen",
-            cache_path=str(tmp_path / "cache.jsonl"),
             max_workers=1,
             timeout=60,
         )
@@ -265,18 +264,16 @@ class TestComputeScores:
         assert result.details["wrong_answer_count"] == 1
 
     def test_mixed_accuracy_and_fields(self, tmp_path: Path) -> None:
-        from llmeval.tasks.math_eval.math_score import compute_scores
+        from llmeval.tasks.math_eval.math_score import _score_math_records
 
         data = [
             _math_item("5", ["$\\boxed{5}$"]),  # correct
             _math_item("4", ["$\\boxed{3}$"]),  # wrong
         ]
-        cache = tmp_path / "cache.jsonl"
-        acc = compute_scores(
+        acc = _score_math_records(
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
-            cache_path=str(cache),
             max_workers=2,
             timeout=60,
         )
@@ -289,32 +286,27 @@ class TestComputeScores:
         assert data[0]["raw_gen"] == "$\\boxed{5}$"
         assert data[0]["filtered_gen"] == "$\\boxed{5}$"
         assert data[0]["filter_trace"]["pipeline"] == "math_response"
-        summary = json.loads((tmp_path / "cache.summary.json").read_text())
-        assert summary["accuracy"] == pytest.approx(0.5)
-        assert not cache.exists()
 
     def test_all_correct(self, tmp_path: Path) -> None:
-        from llmeval.tasks.math_eval.math_score import compute_scores
+        from llmeval.tasks.math_eval.math_score import _score_math_records
 
         data = [_math_item("2", ["$\\boxed{2}$"]), _math_item("3", ["$\\boxed{3}$"])]
-        acc = compute_scores(
+        acc = _score_math_records(
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
-            cache_path=str(tmp_path / "cache.jsonl"),
             max_workers=2,
             timeout=60,
         )
         assert acc == 1.0
 
     def test_empty_dataset(self, tmp_path: Path) -> None:
-        from llmeval.tasks.math_eval.math_score import compute_scores
+        from llmeval.tasks.math_eval.math_score import _score_math_records
 
-        acc = compute_scores(
+        acc = _score_math_records(
             eval_dataset=[],
             label_key="answer",
             response_key="gen",
-            cache_path=str(tmp_path / "cache.jsonl"),
             max_workers=2,
             timeout=60,
         )
@@ -351,7 +343,6 @@ class TestComputeScores:
             ],
             label_key="answer",
             response_key="gen",
-            cache_path=str(tmp_path / "cache.jsonl"),
             max_workers=2,
             timeout=60,
         )
@@ -379,7 +370,6 @@ class TestComputeScores:
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
-            cache_path=str(tmp_path / "cache.jsonl"),
             max_workers=2,
             timeout=60,
         )
@@ -426,7 +416,6 @@ class TestComputeScores:
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
-            cache_path=str(tmp_path / "multi.jsonl"),
             max_workers=2,
             timeout=60,
         )
@@ -469,7 +458,7 @@ class TestAtomicWriteJsonl:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Regression: os.makedirs('') crashed for cache paths without a
-        directory component (e.g. --cache_path results.jsonl)."""
+        directory component."""
         from llmeval.tasks.postprocess import atomic_write_jsonl
 
         monkeypatch.chdir(tmp_path)
@@ -500,7 +489,6 @@ class TestRepeatedMathRows:
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
-            cache_path=str(tmp_path / "cache.jsonl"),
             max_workers=2,
             timeout=60,
         )
@@ -691,7 +679,6 @@ class TestProblemCompleteness:
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
-            cache_path=str(tmp_path / "cache.jsonl"),
             max_workers=2,
             timeout=60,
         )
@@ -723,7 +710,6 @@ class TestProblemCompleteness:
             eval_dataset=data,
             label_key="answer",
             response_key="gen",
-            cache_path=str(tmp_path / "cache.jsonl"),
             max_workers=2,
             timeout=60,
         )

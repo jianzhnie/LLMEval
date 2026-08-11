@@ -154,7 +154,7 @@ mkdir -p "${output_dir}"
 
 # --- Run Inference Tasks ---
 # aime24 (repeated sample 64 times)
-python ./llmeval/inference/online.py \
+python -m llmeval.inference.online \
     --input_file "./data/aime24.jsonl" \
     --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
     --base_url "${base_url}" \
@@ -164,7 +164,7 @@ python ./llmeval/inference/online.py \
     --max_workers 8
 
 # aime25 (repeated sample 64 times)
-python ./llmeval/inference/online.py \
+python -m llmeval.inference.online \
     --input_file "./data/aime25.jsonl" \
     --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \
     --base_url "${base_url}" \
@@ -228,16 +228,16 @@ Alternatively, use the CLI directly:
 
 ```bash
 # Math evaluation
-python ./llmeval/evaluator.py \
+python -m llmeval.evaluator \
     --input_path "./output/longcat-flash/aime24_bz32.jsonl" \
-    --cache_path "./output/longcat-flash/eval_score/aime24_bz32.jsonl" \
+    --result_path "./output/longcat-flash/eval_score/aime24_bz32.json" \
     --task_name "math_opensource/aime24" \
     --max_workers 16
 
 # Code evaluation (pass@k summary, 5s execution timeout)
-python ./llmeval/evaluator.py \
+python -m llmeval.evaluator \
     --input_path "./output/longcat-flash/humaneval_bz1.jsonl" \
-    --cache_path "./output/longcat-flash/eval_score/humaneval_bz1.jsonl" \
+    --result_path "./output/longcat-flash/eval_score/humaneval_bz1.json" \
     --task_name "code_opensource/humaneval" \
     --max_workers 32 \
     --exec_timeout 5.0 \
@@ -275,8 +275,8 @@ Online mode specific:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--base_url` | Required | API server URL |
-| `--model_name` | Required | Model name for API |
+| `--base_url` | `https://api.openai.com/v1` | API server URL |
+| `--model_name` | `gpt-4o` | Model name for API |
 | `--max_workers` | 128 | Concurrent request threads |
 | `--extra_body` | `{}` | JSON object for provider-specific request extensions |
 

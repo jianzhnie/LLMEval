@@ -7,17 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from llmeval.tasks.postprocess import atomic_write_jsonl, persist_results
+from llmeval.tasks.postprocess import atomic_write_json, atomic_write_jsonl
 
 
-def test_persist_results_writes_adjacent_summary_only(tmp_path: Path) -> None:
-    output = tmp_path / "result.jsonl"
+def test_atomic_json_writes_exact_destination(tmp_path: Path) -> None:
+    output = tmp_path / "result.json"
 
-    summary_path = persist_results(output, {"accuracy": 1.0})
+    atomic_write_json(output, {"accuracy": 1.0}, indent=2)
 
-    assert not output.exists()
-    assert summary_path == tmp_path / "result.summary.json"
-    assert json.loads(summary_path.read_text()) == {"accuracy": 1.0}
+    assert json.loads(output.read_text()) == {"accuracy": 1.0}
 
 
 def test_atomic_jsonl_replaces_existing_file(tmp_path: Path) -> None:

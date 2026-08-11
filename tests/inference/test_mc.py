@@ -53,11 +53,6 @@ if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
     sys.modules["tqdm"] = _tqdm
 
 from llmeval.inference.mc import FewShotFormatter, MCLoglikelihoodClient, MCRunner
-from llmeval.inference.schema import (
-    ChoiceLoglikelihood,
-    LoglikelihoodRequest,
-    LoglikelihoodResult,
-)
 from llmeval.utils.config import MCInferArguments
 
 
@@ -68,6 +63,7 @@ def _make_ll_client(max_retries: int = 0) -> MCLoglikelihoodClient:
     client.max_retries = max_retries
     client.base_url = "http://test/v1"
     client.seed = 0
+    client.system_prompt = None
     client.extra_body = {}
     client.client = MagicMock()
     return client
@@ -126,7 +122,6 @@ def _make_mc_runner(
         "failed": 0,
         "correct": 0,
         "skipped": 0,
-        "continuation_fallback": 0,
     }
     return runner
 
@@ -152,34 +147,6 @@ def _write_input(path: Path) -> None:
 
 
 class TestMCLoglikelihoodClient:
-    def test_continuation_schema_value_error_propagates(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import llmeval.inference.mc as mc_mod
-
-        client = _make_ll_client()
-        monkeypatch.setattr(
-            mc_mod, "call_with_retry", MagicMock(side_effect=ValueError("bad schema"))
-        )
-
-        with pytest.raises(ValueError, match="bad schema"):
-            client.score_continuations(LoglikelihoodRequest("q", ("A",)))
-
-    def test_continuation_unexpected_backend_error_is_item_local(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import llmeval.inference.mc as mc_mod
-
-        client = _make_ll_client()
-        monkeypatch.setattr(
-            mc_mod, "call_with_retry", MagicMock(side_effect=RuntimeError("backend"))
-        )
-
-        result = client.score_continuations(LoglikelihoodRequest("q", ("A",)))
-
-        assert result.exact is False
-        assert result.error == "backend"
-
     def test_empty_key_is_quiet_for_local_endpoint(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -207,6 +174,33 @@ class TestMCLoglikelihoodClient:
         assert call_kwargs["top_logprobs"] == 20
         assert call_kwargs["max_completion_tokens"] == 1
         assert "max_tokens" not in call_kwargs
+
+    def test_system_prompt_is_sent(self) -> None:
+        client = _make_ll_client()
+        client.system_prompt = "Follow the format."
+        client.client.chat.completions.create.return_value = _fake_top_probs_resp(
+            {" A": -0.1}
+        )
+
+        client.get_choices_logprobs("prompt", ["A"])
+
+        assert client.client.chat.completions.create.call_args.kwargs["messages"] == [
+            {"role": "system", "content": "Follow the format."},
+            {"role": "user", "content": "prompt"},
+        ]
+
+    def test_malformed_response_is_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+        client = _make_ll_client(max_retries=1)
+        client.client.chat.completions.create.side_effect = [
+            _fake_top_probs_resp({}),
+            _fake_top_probs_resp({" A": -0.1}),
+        ]
+
+        assert client.get_choices_logprobs("prompt", ["A"]) == [-0.1]
+        assert client.client.chat.completions.create.call_count == 2
 
     def test_tool_choice_none_is_omitted(self) -> None:
         client = _make_ll_client()
@@ -240,161 +234,6 @@ class TestMCLoglikelihoodClient:
         with pytest.raises(RuntimeError, match="down"):
             client.get_choices_logprobs("prompt", ["A", "B"])
 
-    def test_continuation_returns_only_choice_token_scores(self) -> None:
-        client = _make_ll_client()
-        first = MagicMock()
-        first.logprobs.text_offset = [0, 6, 8]
-        first.logprobs.token_logprobs = [None, -0.2, -9.0]
-        first.logprobs.tokens = ["prompt", " A", "x"]
-        first.logprobs.token_ids = [1, 2, 3]
-        first.index = 0
-        second = MagicMock()
-        second.logprobs.text_offset = [0, 6, 8]
-        second.logprobs.token_logprobs = [None, -1.3, -9.0]
-        second.logprobs.tokens = ["prompt", " B", "x"]
-        second.logprobs.token_ids = [1, 4, 3]
-        second.index = 1
-        client.client.completions.create.return_value.choices = [first, second]
-
-        result = client.score_continuations(
-            LoglikelihoodRequest("prompt", (" A", " B"))
-        )
-
-        assert result.exact is True
-        assert [list(c.token_logprobs) for c in result.choices] == [[-0.2], [-1.3]]
-        assert [list(c.token_texts) for c in result.choices] == [[" A"], [" B"]]
-        assert [list(c.token_ids) for c in result.choices] == [[2], [4]]
-
-    def test_continuation_handles_leading_space_and_multitoken_chinese(self) -> None:
-        client = _make_ll_client()
-        choice = MagicMock()
-        choice.index = 0
-        choice.logprobs.text_offset = [0, 2, 4]
-        choice.logprobs.token_logprobs = [None, -0.4, -0.2]
-        choice.logprobs.tokens = ["题:", " 答", "案"]
-        choice.logprobs.token_ids = [10, 11, 12]
-        client.client.completions.create.return_value.choices = [choice]
-
-        result = client.score_continuations(LoglikelihoodRequest("题:", (" 答案",)))
-
-        assert result.exact is True
-        assert [list(c.token_logprobs) for c in result.choices] == [[-0.4, -0.2]]
-        assert [list(c.token_texts) for c in result.choices] == [[" 答", "案"]]
-        assert [list(c.token_ids) for c in result.choices] == [[11, 12]]
-
-    def test_continuation_accepts_utf8_byte_offsets(self) -> None:
-        client = _make_ll_client()
-        choice = MagicMock(index=0)
-        choice.logprobs.text_offset = [0, 4, 8]
-        choice.logprobs.token_logprobs = [None, -0.4, -0.2]
-        choice.logprobs.tokens = ["题:", " 答", "案"]
-        choice.logprobs.token_ids = [10, 11, 12]
-        client.client.completions.create.return_value.choices = [choice]
-
-        result = client.score_continuations(LoglikelihoodRequest("题:", (" 答案",)))
-
-        assert result.exact is True
-        assert [list(c.token_logprobs) for c in result.choices] == [[-0.4, -0.2]]
-        assert [list(c.token_texts) for c in result.choices] == [[" 答", "案"]]
-
-    def test_continuation_scores_trailing_context_whitespace_like_harness(
-        self,
-    ) -> None:
-        client = _make_ll_client()
-        choice = MagicMock(index=0)
-        choice.logprobs.text_offset = [0, 2]
-        choice.logprobs.token_logprobs = [None, -0.3]
-        choice.logprobs.tokens = ["Q:", " A"]
-        choice.logprobs.token_ids = [10, 11]
-        client.client.completions.create.return_value.choices = [choice]
-
-        result = client.score_continuations(LoglikelihoodRequest("Q: ", ("A",)))
-
-        assert result.exact is True
-        assert [list(c.token_logprobs) for c in result.choices] == [[-0.3]]
-        assert [list(c.token_texts) for c in result.choices] == [[" A"]]
-
-    def test_continuation_rejects_token_crossing_prompt_boundary(self) -> None:
-        client = _make_ll_client(max_retries=3)
-        choice = MagicMock()
-        choice.index = 0
-        choice.logprobs.text_offset = [0, 5]
-        choice.logprobs.token_logprobs = [None, -0.2]
-        choice.logprobs.tokens = ["promp", "t A"]
-        client.client.completions.create.return_value.choices = [choice]
-
-        result = client.score_continuations(LoglikelihoodRequest("prompt", (" A",)))
-
-        assert result.exact is False
-        assert [list(c.token_logprobs) for c in result.choices] == [[]]
-        assert client.client.completions.create.call_count == 1
-
-    def test_continuation_rejects_misaligned_token_offsets(self) -> None:
-        client = _make_ll_client()
-        choice = MagicMock(index=0)
-        choice.logprobs.text_offset = [0, 6, 6]
-        choice.logprobs.token_logprobs = [None, -0.2, -0.3]
-        choice.logprobs.tokens = ["prompt", " ", "A"]
-        choice.logprobs.token_ids = [1, 2, 3]
-        client.client.completions.create.return_value.choices = [choice]
-
-        result = client.score_continuations(LoglikelihoodRequest("prompt", (" A",)))
-
-        assert result.exact is False
-        assert [list(c.token_logprobs) for c in result.choices] == [[]]
-
-    def test_continuation_retries_malformed_response_then_succeeds(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A structurally malformed response is retried, not failed fast."""
-        monkeypatch.setattr(time, "sleep", lambda s: None)
-        client = _make_ll_client(max_retries=2)
-        good = MagicMock(index=0)
-        good.logprobs.text_offset = [0, 6]
-        good.logprobs.token_logprobs = [None, -0.2]
-        good.logprobs.tokens = ["prompt", " A"]
-        good.logprobs.token_ids = None
-        bad_response = MagicMock()
-        bad_response.choices = []  # completion count mismatch
-        good_response = MagicMock()
-        good_response.choices = [good]
-        client.client.completions.create.side_effect = [bad_response, good_response]
-
-        result = client.score_continuations(LoglikelihoodRequest("prompt", (" A",)))
-
-        assert result.exact is True
-        assert [list(c.token_logprobs) for c in result.choices] == [[-0.2]]
-        assert client.client.completions.create.call_count == 2
-
-    def test_continuation_persistent_malformed_response_fails_after_retries(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Retries exhausted on malformed responses → failed (non-exact) result."""
-        monkeypatch.setattr(time, "sleep", lambda s: None)
-        client = _make_ll_client(max_retries=2)
-        client.client.completions.create.return_value.choices = []
-
-        result = client.score_continuations(LoglikelihoodRequest("prompt", (" A",)))
-
-        assert result.exact is False
-        assert result.error is not None
-        assert client.client.completions.create.call_count == 3
-
-    @pytest.mark.parametrize("index", [None, "0", True, -1, 1])
-    def test_continuation_rejects_invalid_choice_index(self, index: object) -> None:
-        client = _make_ll_client(max_retries=0)
-        choice = MagicMock(index=index)
-        choice.logprobs.text_offset = [0, 6]
-        choice.logprobs.token_logprobs = [None, -0.2]
-        choice.logprobs.tokens = ["prompt", " A"]
-        choice.logprobs.token_ids = None
-        client.client.completions.create.return_value.choices = [choice]
-
-        result = client.score_continuations(LoglikelihoodRequest("prompt", (" A",)))
-
-        assert result.exact is False
-        assert "indices" in str(result.error)
-
 
 class TestProcessLoglikelihoodItem:
     def test_context_marker_counts_failed_not_processed(self, tmp_path: Path) -> None:
@@ -419,10 +258,7 @@ class TestProcessLoglikelihoodItem:
         with patch("llmeval.inference.mc.logger.info") as log_info:
             runner.run_loglikelihood([{"prompt": "q"}])
 
-        assert log_info.call_args_list[0].args == (
-            "effective_loglikelihood_mode=%s",
-            "first_token",
-        )
+        assert log_info.call_args_list[0].args == ("scoring_mode=first_token",)
 
     def test_all_neg_inf_raises(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
@@ -451,24 +287,57 @@ class TestProcessLoglikelihoodItem:
         assert result["pred"] == 1
         assert result["correct"] is True
         assert result["choice_tokens"] == ["A", "B"]
+        assert set(result) == {
+            "prompt",
+            "doc_id",
+            "sample_index",
+            "choices",
+            "choice_tokens",
+            "gold",
+            "logprobs",
+            "scoring_mode",
+            "pred",
+            "correct",
+        }
 
-    def test_auto_uses_first_token_without_probing_continuation(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        "item",
+        [
+            {"doc_id": "q", "prompt": "q", "choices": "AB", "gold": 0},
+            {"doc_id": "q", "prompt": "q", "choices": ["A", "B"], "gold": "1"},
+            {"doc_id": "q", "prompt": "q", "choices": ["A", "B"], "gold": 2},
+            {
+                "doc_id": "q",
+                "prompt": "q",
+                "choices": ["A", "B"],
+                "choice_tokens": ["A"],
+                "gold": 0,
+            },
+        ],
+    )
+    def test_invalid_schema_fails_before_request(
+        self, tmp_path: Path, item: dict[str, object]
     ) -> None:
         runner = _make_mc_runner(tmp_path)
-        runner.config.loglikelihood_mode = "auto"
         runner.client = MagicMock()
-        runner.client.get_choices_logprobs.return_value = [-0.2, -1.0]
 
-        result = runner.process_loglikelihood_item(
-            {"doc_id": "test:0", "prompt": "q", "choices": ["a", "b"], "gold": 0}
-        )
+        with pytest.raises(ValueError):
+            runner.process_loglikelihood_item(item)
 
-        assert result["scoring_mode"] == "first_token"
-        assert result["logprobs"] == [-0.2, -1.0]
-        assert result["loglikelihood_exact"] is False
-        assert result["scoring_approximation"] == "first_token_top_logprobs"
-        runner.client.score_continuations.assert_not_called()
+        runner.client.get_choices_logprobs.assert_not_called()
+
+    def test_rejects_preformatted_chat_prompt(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.client = MagicMock()
+        with pytest.raises(ValueError, match="chat_template"):
+            runner.process_loglikelihood_item(
+                {
+                    "doc_id": "q",
+                    "prompt": "<|user|> question",
+                    "choices": ["A", "B"],
+                    "gold": 0,
+                }
+            )
 
     def test_missing_top_logprob_is_persisted_as_json_null(
         self, tmp_path: Path
@@ -484,54 +353,10 @@ class TestProcessLoglikelihoodItem:
         assert result["logprobs"] == [-0.2, None]
         json.dumps(result, allow_nan=False)
 
-    def test_explicit_continuation_uses_exact_scoring(self, tmp_path: Path) -> None:
-        runner = _make_mc_runner(tmp_path)
-        runner.config.loglikelihood_mode = "continuation"
-        runner.client = MagicMock()
-        request = LoglikelihoodRequest("q", ("A", "B"))
-        runner.client.score_continuations.return_value = LoglikelihoodResult(
-            request=request,
-            choices=(
-                ChoiceLoglikelihood("A", "A", (-0.5,), ("A",)),
-                ChoiceLoglikelihood("B", "B", (-0.2,), ("B",)),
-            ),
-            exact=True,
-        )
-
-        result = runner.process_loglikelihood_item(
-            {"doc_id": "test:0", "prompt": "q", "choices": ["a", "b"], "gold": 1}
-        )
-
-        assert result["scoring_mode"] == "continuation"
-        assert result["loglikelihood_exact"] is True
-        runner.client.score_continuations.assert_called_once_with(request)
-        runner.client.get_choices_logprobs.assert_not_called()
-
-    def test_continuation_context_length_returns_permanent_failure_row(
-        self, tmp_path: Path
-    ) -> None:
-        """Context-length rejection is deterministic: a marked row, not a retry."""
-        runner = _make_mc_runner(tmp_path)
-        runner.config.loglikelihood_mode = "continuation"
-        runner.client = MagicMock()
-        runner.client.score_continuations.return_value = LoglikelihoodResult.failure(
-            LoglikelihoodRequest("q", ("A", "B")), "context_length_exceeded"
-        )
-
-        result = runner.process_loglikelihood_item(
-            {"doc_id": "test:0", "prompt": "q", "choices": ["a", "b"], "gold": 1}
-        )
-
-        assert result["error"] == "context_length_exceeded"
-        assert result["logprobs"] == []
-        assert result["pred"] == -1
-        assert result["correct"] is False
-
     def test_first_token_context_length_returns_permanent_failure_row(
         self, tmp_path: Path
     ) -> None:
         runner = _make_mc_runner(tmp_path)
-        runner.config.loglikelihood_mode = "first_token"
         runner.client = MagicMock()
         runner.client.get_choices_logprobs.return_value = None
 
@@ -553,7 +378,14 @@ class TestProcessGenerateItem:
         ]
 
         result = runner.process_generate_item(
-            {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+            {
+                "doc_id": "test:0",
+                "sample_index": 0,
+                "prompt": "q",
+                "answer": "A",
+            },
+            client,
+            [],
         )
 
         assert result["gen"] == "ans"
@@ -567,7 +399,14 @@ class TestProcessGenerateItem:
         ]
 
         runner.process_generate_item(
-            {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+            {
+                "doc_id": "test:0",
+                "sample_index": 0,
+                "prompt": "q",
+                "answer": "A",
+            },
+            client,
+            [],
         )
 
         assert client.chat.completions.create.call_args.kwargs["tool_choice"] == "auto"
@@ -582,7 +421,14 @@ class TestProcessGenerateItem:
         ]
 
         runner.process_generate_item(
-            {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+            {
+                "doc_id": "test:0",
+                "sample_index": 0,
+                "prompt": "q",
+                "answer": "A",
+            },
+            client,
+            [],
         )
 
         request = client.chat.completions.create.call_args.kwargs
@@ -596,8 +442,40 @@ class TestProcessGenerateItem:
 
         with pytest.raises(RuntimeError, match="no usable text"):
             runner.process_generate_item(
-                {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+                {
+                    "doc_id": "test:0",
+                    "sample_index": 0,
+                    "prompt": "q",
+                    "answer": "A",
+                },
+                client,
+                [],
             )
+
+    def test_empty_content_is_retried(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+        runner = _make_mc_runner(tmp_path, mode="generate", max_retries=1)
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            MagicMock(choices=[_generation_choice(None)]),
+            MagicMock(choices=[_generation_choice("answer")]),
+        ]
+
+        result = runner.process_generate_item(
+            {
+                "doc_id": "test:0",
+                "sample_index": 0,
+                "prompt": "q",
+                "answer": "A",
+            },
+            client,
+            [],
+        )
+
+        assert result["gen"] == "answer"
+        assert client.chat.completions.create.call_count == 2
 
     def test_context_length_returns_permanent_failure_row(self, tmp_path: Path) -> None:
         """Context-length rejection yields a marked row instead of raising."""
@@ -608,7 +486,12 @@ class TestProcessGenerateItem:
         )
 
         result = runner.process_generate_item(
-            {"doc_id": "test:0", "prompt": "q", "answer": "A", "_request_seed": 1},
+            {
+                "doc_id": "test:0",
+                "sample_index": 0,
+                "prompt": "q",
+                "answer": "A",
+            },
             client,
             [],
         )
@@ -627,7 +510,7 @@ class TestProcessGenerateItem:
                 "doc_id": "q1",
                 "prompt": "q",
                 "answer": "A",
-                "_request_seed": 123,
+                "sample_index": 2,
             },
             client,
             [],
@@ -636,7 +519,7 @@ class TestProcessGenerateItem:
         assert result["gen"] == "b"
         request = client.chat.completions.create.call_args.kwargs
         assert "n" not in request
-        assert request["seed"] == 123
+        assert isinstance(request["seed"], int)
         assert request["max_completion_tokens"] == runner.config.max_completion_tokens
         assert "max_tokens" not in request
 
@@ -653,7 +536,7 @@ class TestMCStableResume:
 
         first = runner.load_data()
         assert len(first) == 3
-        assert len({item["_request_seed"] for item in first}) == 3
+        assert [item["sample_index"] for item in first] == [0, 1, 2]
         assert all(
             not any(key.startswith("_llmeval_") for key in item) for item in first
         )
@@ -896,26 +779,20 @@ class TestFewShotFormatter:
         with pytest.raises(ValueError, match="insufficient after excluding"):
             fmt.get_prefix("question", "same")
 
-
-class TestContinuationScoring:
-    def test_acc_norm_uses_harness_character_counts(self, tmp_path: Path) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood
-
-        items = [
-            {
-                "gold": 0,
-                "logprobs": [-1.0, -1.2],
-                "choice_logprobs": [[-1.0], [-0.3, -0.3, -0.3, -0.3]],
-                "choice_tokens": ["AB", "C"],
-                "choice_token_count": [1, 4],
-                "choice_char_count": [2, 1],
-                "choice_byte_count": [2, 1],
-            }
-        ]
-        cache = tmp_path / "continuation.jsonl"
-        assert score_loglikelihood(items, cache) == 1.0
-        summary = json.loads(cache.with_suffix(".summary.json").read_text())
-        assert summary["acc_norm"] == 1.0
+    @pytest.mark.parametrize(
+        "item, message",
+        [
+            ({"answer": "A"}, "few-shot prompt"),
+            ({"prompt": "question"}, "few-shot answer"),
+            (
+                {"prompt": "<|user|> question", "answer": "A"},
+                "chat_template",
+            ),
+        ],
+    )
+    def test_invalid_demo_is_rejected(self, item: dict[str, str], message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            FewShotFormatter._format_demo(item)
 
 
 # Extend existing classes with the remaining tests from tests/test_mc_eval.py.
@@ -954,6 +831,19 @@ TestMCLoglikelihoodClient.test_token_form_variants_are_checked = (
 )
 
 
+def _mc_client_lowercase_target_matches_uppercase_token(self) -> None:
+    client = _make_ll_client()
+    client.client.chat.completions.create.return_value = _fake_top_probs_resp(
+        {" A": -0.2}
+    )
+    assert client.get_choices_logprobs("p", ["a"]) == [-0.2]
+
+
+TestMCLoglikelihoodClient.test_lowercase_target_matches_uppercase_token = (
+    _mc_client_lowercase_target_matches_uppercase_token
+)
+
+
 def _mc_client_4xx_aborts_without_retry(self) -> None:
     """Non-retryable 4xx errors propagate after the first request."""
     from llmeval.utils.retry import ClientError
@@ -970,49 +860,17 @@ TestMCLoglikelihoodClient.test_4xx_aborts_without_retry = (
 )
 
 
-def _mc_client_empty_top_logprobs_returns_all_neg_inf(self) -> None:
-    """An empty top_logprobs dict yields -inf for every choice."""
+def _mc_client_empty_top_logprobs_is_malformed(self) -> None:
+    from llmeval.utils.retry import ClientError
+
     client = _make_ll_client(max_retries=0)
     client.client.chat.completions.create.return_value = _fake_top_probs_resp({})
-    assert client.get_choices_logprobs("p", ["A", "B"]) == [
-        float("-inf"),
-        float("-inf"),
-    ]
+    with pytest.raises(ClientError, match="no alternatives"):
+        client.get_choices_logprobs("p", ["A", "B"])
 
 
-TestMCLoglikelihoodClient.test_empty_top_logprobs_returns_all_neg_inf = (
-    _mc_client_empty_top_logprobs_returns_all_neg_inf
-)
-
-
-def _mc_client_complete_continuation_uses_choice_offsets(self) -> None:
-    client = _make_ll_client()
-    response = MagicMock()
-    response.choices = []
-    for index, (text, values) in enumerate((("AB", [-1.0, -2.0]), ("C", [-0.5]))):
-        choice = MagicMock()
-        choice.index = index
-        choice.logprobs.text_offset = [0, *range(2, 2 + len(text))]
-        choice.logprobs.token_logprobs = [None, *values]
-        choice.logprobs.tokens = ["Q:", *text]
-        choice.logprobs.token_ids = None
-        response.choices.append(choice)
-    client.client.completions.create.return_value = response
-
-    result = client.score_continuations(LoglikelihoodRequest("Q:", ("AB", "C")))
-
-    assert result.exact is True
-    assert [list(c.token_logprobs) for c in result.choices] == [
-        [-1.0, -2.0],
-        [-0.5],
-    ]
-    kwargs = client.client.completions.create.call_args.kwargs
-    assert kwargs["prompt"] == ["Q:AB", "Q:C"]
-    assert kwargs["echo"] is True
-
-
-TestMCLoglikelihoodClient.test_complete_continuation_uses_choice_offsets = (
-    _mc_client_complete_continuation_uses_choice_offsets
+TestMCLoglikelihoodClient.test_empty_top_logprobs_is_malformed = (
+    _mc_client_empty_top_logprobs_is_malformed
 )
 
 
@@ -1052,7 +910,14 @@ def _mc_process_gen_persistent_error_raises_after_retries(self, tmp_path: Path) 
     client.chat.completions.create.side_effect = RuntimeError("down")
     with pytest.raises(RuntimeError):
         runner.process_generate_item(
-            {"prompt": "q", "answer": "A", "_request_seed": 1}, client, []
+            {
+                "doc_id": "test:0",
+                "sample_index": 0,
+                "prompt": "q",
+                "answer": "A",
+            },
+            client,
+            [],
         )
 
 

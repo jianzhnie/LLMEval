@@ -173,7 +173,7 @@ bash examples/longcat-flash/get_score.sh      # 数学评分
 
 在线模式：
 ```bash
-python ./llmeval/inference/online.py \
+python -m llmeval.inference.online \
     --input_file "./data/aime24.jsonl" \
     --output_file "./output/aime24.jsonl" \
     --base_url "http://127.0.0.1:8090/v1" \
@@ -184,7 +184,7 @@ python ./llmeval/inference/online.py \
 
 离线模式（无需启动服务器）：
 ```bash
-python llmeval/inference/offline.py \
+python -m llmeval.inference.offline \
     --input_file "./data/aime24.jsonl" \
     --output_file "./output/aime24.jsonl" \
     --model_name_or_path "Qwen/QwQ-32B" \
@@ -196,16 +196,16 @@ python llmeval/inference/offline.py \
 
 ```bash
 # 数学评分
-python ./llmeval/evaluator.py \
+python -m llmeval.evaluator \
     --input_path "./output/aime24.jsonl" \
-    --cache_path "./output/aime24_scores.jsonl" \
+    --result_path "./output/aime24_scores.json" \
     --task_name "math_opensource/aime24" \
     --max_workers 16
 
 # 代码评分（pass@k summary，执行超时 5 秒）
-python ./llmeval/evaluator.py \
+python -m llmeval.evaluator \
     --input_path "./output/humaneval.jsonl" \
-    --cache_path "./output/humaneval_scores.jsonl" \
+    --result_path "./output/humaneval_scores.json" \
     --task_name "code_opensource/humaneval" \
     --max_workers 32 \
     --exec_timeout 5.0 \
@@ -230,8 +230,8 @@ python ./llmeval/evaluator.py \
 
 | 参数             | 默认值   | 说明                     |
 |----------------|---------|------------------------|
-| `--base_url`    | 必填     | API 服务器地址             |
-| `--model_name`  | 必填     | API 使用的模型名称          |
+| `--base_url`    | `https://api.openai.com/v1` | API 服务器地址 |
+| `--model_name`  | `gpt-4o` | API 使用的模型名称          |
 | `--max_workers` | 128     | 并发请求线程数              |
 | `--extra_body`  | `{}`     | 服务商扩展请求字段的 JSON 对象 |
 
