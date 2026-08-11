@@ -16,6 +16,11 @@ from typing import Any
 
 from datasets import get_dataset_config_names, load_dataset
 
+try:
+    from .io_utils import atomic_output_path
+except ImportError:  # Direct script execution
+    from io_utils import atomic_output_path
+
 # Multiple-choice benchmarks: need special formatting (choices → prompt)
 BENCHMARKS: dict[str, dict] = {
     "mmlu": {
@@ -93,9 +98,12 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
     if not all_rows:
         raise RuntimeError(f"No rows loaded for {name}; refusing to write cache")
 
-    with open(output_file, "w", encoding="utf-8") as f:
+    with (
+        atomic_output_path(output_file) as temporary,
+        temporary.open("w", encoding="utf-8") as handle,
+    ):
         for row in all_rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     print(f"[DONE] {name}: {len(all_rows)} examples → {output_file}")
     return str(output_file)
 

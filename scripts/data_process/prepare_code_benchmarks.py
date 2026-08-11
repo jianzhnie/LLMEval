@@ -22,6 +22,11 @@ from typing import Any
 
 from datasets import load_dataset
 
+try:
+    from .io_utils import atomic_output_path
+except ImportError:  # Direct script execution
+    from io_utils import atomic_output_path
+
 # ---------------------------------------------------------------------------
 # Benchmark definitions
 # ---------------------------------------------------------------------------
@@ -160,9 +165,12 @@ def main() -> int:
             continue
 
         out_path = output_dir / f"{name}.jsonl"
-        with open(out_path, "w", encoding="utf-8") as f:
-            for rec in records:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with (
+            atomic_output_path(out_path) as temporary,
+            temporary.open("w", encoding="utf-8") as handle,
+        ):
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         print(f"[OK]   {name}: {len(records)} items -> {out_path}")
 

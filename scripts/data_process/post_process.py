@@ -1,10 +1,16 @@
 import argparse
+import glob
 import logging
 from pathlib import Path
 from typing import Any, Final
 
 from datasets import Dataset, load_dataset
 from transformers import AutoTokenizer
+
+try:
+    from .io_utils import atomic_output_path
+except ImportError:  # Direct script execution
+    from io_utils import atomic_output_path
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -99,7 +105,19 @@ def load_and_validate_args() -> argparse.Namespace:
         "--num_proc", type=int, default=16, help="Number of processes for filtering"
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_token_length <= 0:
+        parser.error("--max_token_length must be positive")
+    if args.num_proc <= 0:
+        parser.error("--num_proc must be positive")
+    output_path = Path(args.output_file).resolve()
+    matched_inputs = {Path(path).resolve() for path in glob.glob(args.input_path)}
+    if output_path in matched_inputs or (
+        not any(marker in args.input_path for marker in "*?[]")
+        and Path(args.input_path).resolve() == output_path
+    ):
+        parser.error("--output_file must not be included in --input_path")
+    return args
 
 
 def process_dataset(
@@ -179,7 +197,8 @@ def main():
 
         # Save results
         logger.info(f"Saving filtered dataset to: {output_file}")
-        processed_dataset.to_json(str(output_file), lines=True, force_ascii=False)
+        with atomic_output_path(output_file) as temporary:
+            processed_dataset.to_json(str(temporary), lines=True, force_ascii=False)
         logger.info("Processing completed successfully")
 
     except Exception as e:

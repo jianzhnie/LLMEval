@@ -15,17 +15,17 @@ mkdir -p "${reval_dir}"
 # --- Evaluate Each Task ---
 # Evaluate aime24
 
-python ./llmeval/evaluator.py \
+python -m llmeval.evaluator \
     --input_path "${output_dir}/aime24_bz${n_samples}.jsonl" \
-    --cache_path "${reval_dir}/aime24_bz${n_samples}.jsonl" \
+    --result_path "${reval_dir}/aime24_bz${n_samples}.json" \
     --task_name "math_opensource/aime24" \
     --max_workers 16 \
     > "${reval_dir}/aime24_bz${n_samples}_res_result.txt"
 
 # Evaluate aime25
-python ./llmeval/evaluator.py \
+python -m llmeval.evaluator \
     --input_path "${output_dir}/aime25_bz${n_samples}.jsonl" \
-    --cache_path "${reval_dir}/aime25_bz${n_samples}.jsonl" \
+    --result_path "${reval_dir}/aime25_bz${n_samples}.json" \
     --task_name "math_opensource/aime25" \
     --max_workers 16 \
     > "${reval_dir}/aime25_bz${n_samples}_res_result.txt"

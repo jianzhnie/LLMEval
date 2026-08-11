@@ -43,8 +43,8 @@ for task in $BENCHMARKS; do
     fi
 
     input_file="${INPUT_DIR}/${task}_bz1.jsonl"
-    cache_file="${EVAL_DIR}/${task}_bz1.jsonl"
-    result_file="${EVAL_DIR}/${task}_bz1_score.txt"
+    result_file="${EVAL_DIR}/${task}_bz1.json"
+    log_file="${EVAL_DIR}/${task}_bz1_score.txt"
 
     if [[ ! -f "$input_file" ]]; then
         echo "[ERROR] 输入文件不存在: $input_file" >&2; continue
@@ -55,21 +55,21 @@ for task in $BENCHMARKS; do
 
     if [[ "$PARALLEL" == "1" ]]; then
         {
-            python llmeval/evaluator.py \
+            python -m llmeval.evaluator \
                 --input_path "$input_file" \
-                --cache_path "$cache_file" \
+                --result_path "$result_file" \
                 --task_name "$task_name" \
                 --max_workers "$MAX_WORKERS" \
-                --timeout "$TIMEOUT" > "$result_file" 2>&1
+                --timeout "$TIMEOUT" > "$log_file" 2>&1
         } &
         TASK_PIDS+=($!)
     else
-        python llmeval/evaluator.py \
+        python -m llmeval.evaluator \
             --input_path "$input_file" \
-            --cache_path "$cache_file" \
+            --result_path "$result_file" \
             --task_name "$task_name" \
             --max_workers "$MAX_WORKERS" \
-            --timeout "$TIMEOUT" > "$result_file" 2>&1 || true
+            --timeout "$TIMEOUT" > "$log_file" 2>&1 || true
     fi
 done
 

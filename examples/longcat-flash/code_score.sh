@@ -72,30 +72,30 @@ declare -A BENCHMARK_SAMPLES=(
 run_eval() {
     local task="$1"
     local input_file="$2"
-    local cache_file="$3"
-    local result_file="$4"
+    local result_file="$3"
+    local log_file="$4"
     local task_name="$5"
 
     echo "[INFO] 开始评分: $task ($task_name)"
     echo "[INFO] 输入:     $input_file"
-    echo "[INFO] 缓存:     $cache_file"
     echo "[INFO] 结果:     $result_file"
+    echo "[INFO] 日志:     $log_file"
     echo "[INFO] exec_timeout: ${EXEC_TIMEOUT}s"
 
-    if python llmeval/evaluator.py \
+    if python -m llmeval.evaluator \
         --input_path "$input_file" \
-        --cache_path "$cache_file" \
+        --result_path "$result_file" \
         --task_name "$task_name" \
         --max_workers "$MAX_WORKERS" \
         --timeout "$TIMEOUT" \
         --exec_timeout "$EXEC_TIMEOUT" \
         --allow_unsafe_code \
-        > "$result_file" 2>&1; then
+        > "$log_file" 2>&1; then
         echo "[OK] $task 评分完成"
         # 从结果文件中提取 Pass@1
-        if grep -q "Pass@1" "$result_file" 2>/dev/null; then
+        if grep -q "Pass@1" "$log_file" 2>/dev/null; then
             local score
-            score=$(grep "Pass@1" "$result_file" | tail -1)
+            score=$(grep "Pass@1" "$log_file" | tail -1)
             echo "[SCORE] $score"
         fi
         return 0
@@ -134,8 +134,8 @@ for task in $BENCHMARKS; do
 
     n_samples="${BENCHMARK_SAMPLES[$task]:-$N_SAMPLES}"
     input_file="${INPUT_DIR}/${task}_bz${n_samples}.jsonl"
-    cache_file="${EVAL_DIR}/${task}_bz${n_samples}.jsonl"
-    result_file="${EVAL_DIR}/${task}_bz${n_samples}_score.txt"
+    result_file="${EVAL_DIR}/${task}_bz${n_samples}.json"
+    log_file="${EVAL_DIR}/${task}_bz${n_samples}_score.txt"
 
     if [[ ! -f "$input_file" ]]; then
         echo "[ERROR] 输入文件不存在: $input_file" >&2
@@ -146,10 +146,10 @@ for task in $BENCHMARKS; do
     TASK_NAMES+=("$task")
 
     if [[ "$PARALLEL" == "1" ]]; then
-        run_eval "$task" "$input_file" "$cache_file" "$result_file" "$task_name" &
+        run_eval "$task" "$input_file" "$result_file" "$log_file" "$task_name" &
         TASK_PIDS+=($!)
     else
-        run_eval "$task" "$input_file" "$cache_file" "$result_file" "$task_name" || true
+        run_eval "$task" "$input_file" "$result_file" "$log_file" "$task_name" || true
     fi
 done
 

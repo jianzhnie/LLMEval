@@ -16,7 +16,7 @@ rope_scaling={"rope_type":"yarn","factor":1.0,"original_max_position_embeddings"
 # --- Run Inference Tasks ---
 
 # aime24 (repeated sample 64 times)
-python llmeval/inference/offline.py \
+python -m llmeval.inference.offline \
     --input_file "./data/aime24.jsonl" \
     --input_key "prompt" \
     --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
@@ -34,7 +34,7 @@ python llmeval/inference/offline.py \
     --system_prompt_type deepseek_r1
 
 # aime25 (repeated sample 64 times)
-python llmeval/inference/offline.py \
+python -m llmeval.inference.offline \
     --input_file "./data/aime25.jsonl" \
     --input_key "prompt" \
     --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \

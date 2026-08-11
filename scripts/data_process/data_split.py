@@ -3,6 +3,11 @@ from pathlib import Path
 
 from datasets import load_dataset
 
+try:
+    from .io_utils import atomic_output_path
+except ImportError:  # Direct script execution
+    from io_utils import atomic_output_path
+
 
 def main():
     parser = argparse.ArgumentParser(description="Split a dataset into multiple shards")
@@ -65,7 +70,8 @@ def main():
         # Extract shard and save
         shard = dataset.select(range(offset, min(offset + shard_size, n)))
         shard_filename = out_dir / f"{args.prefix}_{i:03d}.jsonl"
-        shard.to_json(shard_filename, lines=True, force_ascii=False)
+        with atomic_output_path(shard_filename) as temporary:
+            shard.to_json(temporary, lines=True, force_ascii=False)
 
         offset += shard_size
         print(f"Saved shard {i:03d} with {shard_size} examples to {shard_filename}")

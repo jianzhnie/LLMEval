@@ -15,7 +15,7 @@ mkdir -p "${output_dir}"
 
 # --- Run Inference Tasks ---
 # aime24 (repeated sample 64 times)
-python llmeval/inference/offline.py \
+python -m llmeval.inference.offline \
     --input_file "./data/aime24.jsonl" \
     --input_key "prompt" \
     --output_file "${output_dir}/aime24_bz${n_samples}.jsonl" \
@@ -33,7 +33,7 @@ python llmeval/inference/offline.py \
 
 
 # aime25 (repeated sample 64 times)
-python llmeval/inference/offline.py \
+python -m llmeval.inference.offline \
     --input_file "./data/aime25.jsonl" \
     --input_key "prompt" \
     --output_file "${output_dir}/aime25_bz${n_samples}.jsonl" \

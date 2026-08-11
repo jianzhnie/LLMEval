@@ -145,7 +145,7 @@ run_infer() {
         # 并行模式: 独立日志
         {
             echo "[$task] temp=$temperature n=$n_samples"
-            python llmeval/inference/online.py \
+            python -m llmeval.inference.online \
                 --input_file "$input_file" \
                 --input_key "prompt" \
                 --task "$task" \
@@ -165,7 +165,7 @@ run_infer() {
         local rc=$?
     else
         # 串行模式: 直接输出
-        python llmeval/inference/online.py \
+        python -m llmeval.inference.online \
             --input_file "$input_file" \
             --input_key "prompt" \
             --task "$task" \

@@ -16,6 +16,11 @@ from typing import Any
 
 from datasets import load_dataset
 
+try:
+    from .io_utils import atomic_output_path
+except ImportError:  # Direct script execution
+    from io_utils import atomic_output_path
+
 QWEN_MATH_COT_PROMPT = (
     "Please reason step by step, and put your final answer within \\boxed{}."
 )
@@ -118,7 +123,8 @@ def prepare_benchmark(name: str, output_dir: Path) -> str:
         with_indices=True,
         remove_columns=dataset.column_names,
     )
-    formatted.to_json(str(output_file), lines=True, force_ascii=False)
+    with atomic_output_path(output_file) as temporary:
+        formatted.to_json(str(temporary), lines=True, force_ascii=False)
     print(f"[DONE] {name}: {len(formatted)} examples → {output_file}")
     return str(output_file)
 
