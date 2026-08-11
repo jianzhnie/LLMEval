@@ -8,6 +8,7 @@
 #
 # Usage:
 #   bash scripts/longcat-flash/mc_infer.sh                    # loglikelihood
+#   LOGLIKELIHOOD_MODE=continuation bash scripts/longcat-flash/mc_infer.sh
 #   MC_MODE=generate bash scripts/longcat-flash/mc_infer.sh   # generate
 #   BENCHMARKS=ceval bash scripts/longcat-flash/mc_infer.sh   # single benchmark
 #
@@ -25,6 +26,7 @@ BASE_URL="${BASE_URL:-http://127.0.0.1:8200/v1}"
 MODEL_NAME="${MODEL_NAME:-longcat-flash}"
 API_KEY="${API_KEY:-EMPTY}"
 MC_MODE="${MC_MODE:-loglikelihood}"       # loglikelihood | generate
+LOGLIKELIHOOD_MODE="${LOGLIKELIHOOD_MODE:-first_token}" # first_token | continuation
 MAX_WORKERS="${MAX_WORKERS:-64}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-600}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
@@ -52,7 +54,7 @@ export OPENAI_API_KEY="$API_KEY"
 
 echo "============================================"
 echo "[INFO] MC Inference — Mode: $MC_MODE"
-echo "[INFO] Loglikelihood scoring: first-token Chat Completions"
+echo "[INFO] Loglikelihood scoring: $LOGLIKELIHOOD_MODE"
 echo "[INFO] Server: $BASE_URL ($MODEL_NAME)"
 echo "[INFO] Benchmarks: $BENCHMARKS"
 echo "============================================"
@@ -95,6 +97,7 @@ for task in $BENCHMARKS; do
                 --base_url "$BASE_URL" \
                 --model_name "$MODEL_NAME" \
                 --mode "$MC_MODE" \
+                --loglikelihood_mode "$LOGLIKELIHOOD_MODE" \
                 --max_workers "$MAX_WORKERS" \
                 --request_timeout "$REQUEST_TIMEOUT" \
                 --max_retries "$MAX_RETRIES" \
@@ -113,6 +116,7 @@ for task in $BENCHMARKS; do
             --base_url "$BASE_URL" \
             --model_name "$MODEL_NAME" \
             --mode "$MC_MODE" \
+            --loglikelihood_mode "$LOGLIKELIHOOD_MODE" \
             --max_workers "$MAX_WORKERS" \
             --request_timeout "$REQUEST_TIMEOUT" \
             --max_retries "$MAX_RETRIES" \

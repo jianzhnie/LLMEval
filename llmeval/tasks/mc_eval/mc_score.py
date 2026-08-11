@@ -5,14 +5,14 @@ Aligned with lm-evaluation-harness metric definitions.
 Metrics
 -------
 acc         — accuracy (argmax of raw answer-token logprobs, or letter extraction in generate mode)
-acc_norm    — accuracy with Unicode-character-normalized continuation logprobs
-acc_bytes   — accuracy with UTF-8-byte-normalized continuation logprobs
+acc_norm    — accuracy with Unicode-character-normalized choice logprobs
+acc_bytes   — accuracy with UTF-8-byte-normalized choice logprobs
 exact_match — alias for acc in the MC context
 
 Entry points
 ------------
-score_loglikelihood  — score results produced by MC inference loglikelihood mode
-score_generate       — score results produced by MC inference generate mode
+score_loglikelihood_result — score MC inference loglikelihood output
+score_generate_result      — score MC inference generation output
 
 Pipeline
 --------
@@ -23,7 +23,6 @@ Both entry points share one pipeline:
     score_*_item       — per-item scorers (total functions, never raise)
     extract_answer     — answer-letter extraction for generate mode
     build_result       — aggregate records into MCScoreResult
-    write_cache        — persist per-item JSONL + summary JSON
 
 Only lightweight dependencies (pebble / tqdm) are used — the module stays
 independent of the inference environment (no openai / torch).
@@ -36,12 +35,12 @@ Generate:       {"gold": str, "pred": str, "correct": bool}
 
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Literal
 
 from pebble import ProcessPool
@@ -50,9 +49,10 @@ from tqdm import tqdm
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
-    persist_results,
+    normalize_single_generation_samples,
     resolve_max_workers,
     resolve_single_generation,
+    sample_order_indices,
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.registry import ScorerResult
@@ -62,9 +62,7 @@ __all__ = [
     "MCScoreResult",
     "extract_answer",
     "merge_generate_records",
-    "score_generate",
     "score_generate_result",
-    "score_loglikelihood",
     "score_loglikelihood_item",
     "score_loglikelihood_result",
 ]
@@ -92,6 +90,16 @@ _FALLBACK_STOPWORDS = frozenset({"I", "a"})
 def _normalize_generate_gold(value: Any) -> str:
     """Normalize a generate-mode label; missing labels remain empty/skipped."""
     return "" if value is None else str(value).strip().upper()
+
+
+def _mc_problem_identity(item: dict[str, Any], row_index: int) -> str:
+    """Return the stable question identity, falling back to the row position."""
+    document_id = item.get("doc_id")
+    if document_id is None or (
+        isinstance(document_id, str) and not document_id.strip()
+    ):
+        return f"row:{row_index}"
+    return f"doc:{document_id}"
 
 
 @dataclass
@@ -141,10 +149,8 @@ class MCScoreResult:
 
 def score_loglikelihood_result(
     eval_dataset: list[dict[str, Any]],
-    cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
-    persist_legacy: bool = True,
 ) -> ScorerResult:
     """Score loglikelihood-based MC results and return structured metrics.
 
@@ -154,16 +160,11 @@ def score_loglikelihood_result(
         Items with ``gold`` / ``logprobs`` / ``choices`` fields (output of the
         MC inference loglikelihood mode). Newer inference outputs also include
         ``choice_tokens`` to record the actual answer tokens scored.
-    cache_path:
-        Path for the per-item JSONL result file. A ``<stem>.summary.json`` metrics
-        file is written alongside it.
     max_workers:
         Maximum process-pool workers (capped by dataset size and CPU count).
     timeout:
         Per-item scoring timeout in seconds.
 
-    The legacy JSONL/summary artifacts are still written for CLI compatibility,
-    but registry adapters consume the returned object directly.
     """
     if any(
         not (
@@ -184,24 +185,7 @@ def score_loglikelihood_result(
         timeout=timeout,
     )
     metrics = build_result(records)
-    if persist_legacy:
-        write_cache(metrics, cache_path)
     return _to_scorer_result(metrics)
-
-
-def score_loglikelihood(
-    eval_dataset: list[dict[str, Any]],
-    cache_path: str | Path,
-    max_workers: int = 8,
-    timeout: int = 60,
-) -> float:
-    """Compatibility wrapper returning only the primary ``acc`` metric."""
-    return score_loglikelihood_result(
-        eval_dataset,
-        cache_path,
-        max_workers=max_workers,
-        timeout=timeout,
-    ).metrics["acc"]
 
 
 def merge_generate_records(
@@ -216,19 +200,13 @@ def merge_generate_records(
     """
     merged: list[dict[str, Any]] = []
     positions: dict[str, int] = {}
-    samples_by_position: list[list[str]] = []
+    samples_by_position: list[list[tuple[dict[str, Any], str]]] = []
 
     for row_index, source in enumerate(eval_dataset):
         item = source.copy()
         document_id = item.get("doc_id")
-        if document_id is None or (
-            isinstance(document_id, str) and not document_id.strip()
-        ):
-            identity = f"row:{row_index}"
-            problem_id = identity
-        else:
-            identity = f"doc:{document_id}"
-            problem_id = str(document_id)
+        identity = _mc_problem_identity(item, row_index)
+        problem_id = str(document_id) if identity.startswith("doc:") else identity
         position = positions.get(identity)
         if position is None:
             position = len(merged)
@@ -255,10 +233,20 @@ def merge_generate_records(
         generation = resolve_single_generation(
             item, response_key, problem_id=problem_id
         )
-        target_samples.append(generation or "")
+        target_samples.append((item, generation or ""))
 
     for item, samples in zip(merged, samples_by_position, strict=True):
-        item[response_key] = samples
+        problem_id = str(item.get("doc_id") or "unknown")
+        sample_order = sample_order_indices(
+            [sample for sample, _ in samples], problem_id=problem_id
+        )
+        item[response_key] = [
+            samples[index][1]
+            for index in sample_order
+            if not samples[index][0].get("error")
+        ]
+        if item[response_key]:
+            item.pop("error", None)
     return merged
 
 
@@ -266,11 +254,9 @@ def score_generate_result(
     eval_dataset: list[dict[str, Any]],
     label_key: str,
     response_key: str,
-    cache_path: str | Path,
     max_workers: int = 8,
     timeout: int = 60,
     aggregation: str = "first",
-    persist_legacy: bool = True,
 ) -> ScorerResult:
     """Score generation-based MC results and return structured metrics.
 
@@ -287,9 +273,6 @@ def score_generate_result(
         Name of the gold-answer field (e.g. ``"answer"``).
     response_key:
         Name of the generation-list field (e.g. ``"gen"``).
-    cache_path:
-        Path for the per-item JSONL result file. A ``<stem>.summary.json`` metrics
-        file is written alongside it.
     max_workers:
         Maximum process-pool workers (capped by dataset size and CPU count).
     timeout:
@@ -297,8 +280,6 @@ def score_generate_result(
     aggregation:
         Multiple-generation aggregation strategy.
 
-    The legacy JSONL/summary artifacts are still written for CLI compatibility,
-    but registry adapters consume the returned object directly.
     """
     if aggregation not in _MC_AGGREGATIONS:
         raise ValueError(
@@ -306,7 +287,23 @@ def score_generate_result(
             f"expected one of {sorted(_MC_AGGREGATIONS)}"
         )
 
-    merged_dataset = merge_generate_records(eval_dataset, label_key, response_key)
+    if aggregation == "per_sample":
+        merged_dataset = normalize_single_generation_samples(
+            eval_dataset,
+            response_key,
+            problem_identity=_mc_problem_identity,
+            conflict_keys=(
+                label_key,
+                "gold",
+                "prompt",
+                "query",
+                "choices",
+                "choice_tokens",
+            ),
+            record_kind="MC document",
+        )
+    else:
+        merged_dataset = merge_generate_records(eval_dataset, label_key, response_key)
     records = score_items(
         merged_dataset,
         mode="generate",
@@ -317,30 +314,7 @@ def score_generate_result(
         aggregation=aggregation,
     )
     metrics = build_result(records)
-    if persist_legacy:
-        write_cache(metrics, cache_path)
     return _to_scorer_result(metrics)
-
-
-def score_generate(
-    eval_dataset: list[dict[str, Any]],
-    label_key: str,
-    response_key: str,
-    cache_path: str | Path,
-    max_workers: int = 8,
-    timeout: int = 60,
-    aggregation: str = "first",
-) -> float:
-    """Compatibility wrapper returning only the primary ``acc`` metric."""
-    return score_generate_result(
-        eval_dataset,
-        label_key,
-        response_key,
-        cache_path,
-        max_workers=max_workers,
-        timeout=timeout,
-        aggregation=aggregation,
-    ).metrics["acc"]
 
 
 # ===========================================================================
@@ -444,7 +418,7 @@ def _error_record(
     record = {
         **{
             key: item[key]
-            for key in ("doc_id", "sample_total")
+            for key in ("doc_id",)
             if key in item and item[key] is not None
         },
         "gold": gold,
@@ -459,7 +433,7 @@ def _error_record(
             "unknown_legacy" if mode == "loglikelihood" else aggregation,
         ),
     }
-    if mode == "generate" and "sample_total" not in record:
+    if mode == "generate":
         # Keep the generation count visible so per_sample weighting does not
         # drop the item from every count when its worker was lost.
         response = item.get(response_key)
@@ -659,8 +633,13 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     Dataset errors are skipped; inference failures are excluded from accuracy
     and exposed through structured failure counts.
     """
+    raw_gold = item.get("gold", -1)
     try:
-        gold = int(item.get("gold", -1))
+        if isinstance(raw_gold, bool):
+            raise TypeError("boolean gold index")
+        if isinstance(raw_gold, float) and not raw_gold.is_integer():
+            raise ValueError("non-integral gold index")
+        gold = int(raw_gold)
     except (TypeError, ValueError):
         logger.warning(
             f"Invalid gold index {item.get('gold')!r} — treating as -1 (always wrong)."
@@ -668,51 +647,57 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
         gold = -1
     raw_logprobs = item.get("logprobs", [])
     logprobs: list[float] = []
+    valid_logprobs = isinstance(raw_logprobs, list)
     if isinstance(raw_logprobs, list):
         try:
             for value in raw_logprobs:
                 if value is None:
                     logprobs.append(float("-inf"))
                 elif isinstance(value, int | float) and not isinstance(value, bool):
-                    logprobs.append(float(value))
+                    score = float(value)
+                    if math.isnan(score) or score == float("inf"):
+                        raise ValueError("logprob must be finite or -inf")
+                    logprobs.append(score)
                 else:
                     raise TypeError("non-numeric logprob")
         except (TypeError, ValueError):
             logger.warning("Invalid aggregate logprobs; marking item failed")
             logprobs = []
+            valid_logprobs = False
     choices = (
         item.get("choice_tokens") or item.get("choices") or item.get("choice_texts", [])
     )
-    choice_logprobs = item.get("choice_logprobs")
     expected_choices = len(choices) if isinstance(choices, list) and choices else None
-    if (
-        isinstance(choice_logprobs, list)
-        and choice_logprobs
-        and (expected_choices is None or len(choice_logprobs) == expected_choices)
-    ):
-        # Complete continuation scores are preferred when inference recorded
-        # them. Empty per-choice lists remain -inf and cannot become a false
-        # positive through argmax.
-        try:
-            logprobs = [
-                sum(float(score) for score in scores) if scores else float("-inf")
-                for scores in choice_logprobs
-            ]
-        except (TypeError, ValueError):
-            logger.warning("Invalid choice_logprobs; using aggregate logprobs")
-            choice_logprobs = None
     # Guard: unscorable data → forced-incorrect record.  An out-of-range gold
     # index is a dataset problem (skipped); empty/all--inf logprobs are an
     # inference failure (failed).
-    invalid_gold = gold < 0 or (bool(logprobs) and gold >= len(logprobs))
-    if not logprobs or invalid_gold or all(lp == float("-inf") for lp in logprobs):
+    invalid_shape = (
+        valid_logprobs
+        and bool(logprobs)
+        and expected_choices is not None
+        and expected_choices != len(logprobs)
+    )
+    invalid_gold = gold < 0 or (
+        expected_choices is not None and gold >= expected_choices
+    )
+    invalid_gold = invalid_gold or (
+        expected_choices is None and bool(logprobs) and gold >= len(logprobs)
+    )
+    if (
+        not logprobs
+        or invalid_shape
+        or invalid_gold
+        or all(lp == float("-inf") for lp in logprobs)
+    ):
         return {
             "gold": gold,
             "pred": -1,
             "correct": False,
             "correct_norm": False,
             "correct_bytes": False,
-            "evaluation_status": "skipped" if invalid_gold else "failed",
+            "evaluation_status": (
+                "skipped" if invalid_gold or invalid_shape else "failed"
+            ),
         }
 
     # acc — argmax over raw logprobs (ties broken by smallest index).
@@ -722,27 +707,13 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     # lm-eval uses Unicode character length for acc_norm and UTF-8 byte length
     # for acc_bytes. Token counts are useful diagnostics but are not the
     # denominator of either harness metric.
-    char_counts = item.get("choice_char_count")
-    byte_counts = item.get("choice_byte_count")
-    char_count_values = char_counts if isinstance(char_counts, list) else []
-    byte_count_values = byte_counts if isinstance(byte_counts, list) else []
-    has_char_counts = len(char_count_values) == len(logprobs) and all(
-        isinstance(count, int | float) and count > 0 for count in char_count_values
-    )
-    has_byte_counts = len(byte_count_values) == len(logprobs) and all(
-        isinstance(count, int | float) and count > 0 for count in byte_count_values
-    )
-    if has_char_counts:
-        is_correct_norm = argmax_normalized(logprobs, char_count_values) == gold
-    elif choices and len(choices) == len(logprobs):
+    if choices and len(choices) == len(logprobs):
         choice_lens = [max(len(str(choice)), 1) for choice in choices]
         is_correct_norm = argmax_normalized(logprobs, choice_lens) == gold
     else:
         is_correct_norm = is_correct
 
-    if has_byte_counts:
-        is_correct_bytes = argmax_normalized(logprobs, byte_count_values) == gold
-    elif choices and len(choices) == len(logprobs):
+    if choices and len(choices) == len(logprobs):
         choice_bytes = [max(len(str(choice).encode("utf-8")), 1) for choice in choices]
         is_correct_bytes = argmax_normalized(logprobs, choice_bytes) == gold
     else:
@@ -792,7 +763,11 @@ def score_generate_item(
 
     if not gold:
         status = "skipped"
-    elif not generation_texts or all(not text.strip() for text in generation_texts):
+    elif (
+        item.get("error")
+        or not generation_texts
+        or all(not text.strip() for text in generation_texts)
+    ):
         status = "failed"
     else:
         status = "completed"
@@ -884,51 +859,3 @@ MC_FILTER_REGISTRY.register("extract_answer", extract_answer, version="1")
 MC_GENERATION_PIPELINE = MC_FILTER_REGISTRY.build_pipeline(
     "mc_generation", "1", "strip_reasoning", "extract_answer"
 )
-
-
-# ===========================================================================
-# Result persistence
-# ===========================================================================
-
-
-def write_cache(result: MCScoreResult, cache_path: str | Path) -> None:
-    """Persist an aggregated metrics summary (JSON).
-
-    The summary is written next to the JSONL result file.
-    """
-    question_total = len(result.records)
-
-    def sample_count(record: dict[str, Any]) -> int:
-        """Count generations when available, otherwise one scored observation."""
-        if "sample_total" in record:
-            return max(int(record["sample_total"]), 0)
-        return 1
-
-    sample_total = sum(sample_count(record) for record in result.records)
-
-    excluded = _count_excluded(result.records, sample_count)
-    persist_results(
-        cache_path,
-        {
-            "acc": round(result.acc, 6),
-            "acc_norm": round(result.acc_norm, 6),
-            "acc_bytes": round(result.acc_bytes, 6),
-            "exact_match": round(result.exact_match, 6),
-            "total": result.total,
-            "question_total": question_total,
-            "sample_total": sample_total,
-            "effective_sample_count": max(
-                sample_total
-                - excluded["failed"]
-                - excluded["skipped"]
-                - excluded["timeout"],
-                0,
-            ),
-            "failed_count": excluded["failed"],
-            "skipped_count": excluded["skipped"],
-            "timeout_count": excluded["timeout"],
-            "aggregation": (
-                result.records[0].get("aggregation") if result.records else None
-            ),
-        },
-    )

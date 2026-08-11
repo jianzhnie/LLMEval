@@ -100,6 +100,36 @@ class TestResumeState:
         )
         assert load_resume_state(path, "prompt", "gen").completed_indices == {"q1": {0}}
 
+    def test_expected_scoring_mode_must_match(self, tmp_path: Path) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "p",
+                    "logprobs": [-0.5, -1.0],
+                    "scoring_mode": "first_token",
+                }
+            )
+            + "\n"
+        )
+
+        state = load_resume_state(
+            path,
+            "prompt",
+            "gen",
+            expected_scoring_mode="first_token",
+        )
+        assert state.completed_indices == {"q1": {0}}
+
+        with pytest.raises(ValueError, match="expected 'continuation'"):
+            load_resume_state(
+                path,
+                "prompt",
+                "gen",
+                expected_scoring_mode="continuation",
+            )
+
     @pytest.mark.parametrize(
         "logprobs",
         [

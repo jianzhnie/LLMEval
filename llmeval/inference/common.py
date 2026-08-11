@@ -210,8 +210,13 @@ def load_resume_state(
     response_key: str,
     *,
     repair_truncated_last_line: bool = False,
+    expected_scoring_mode: str | None = None,
 ) -> ResumeState:
     """Load completed-row counts keyed by stable document ID."""
+    if expected_scoring_mode is not None and (
+        not isinstance(expected_scoring_mode, str) or not expected_scoring_mode.strip()
+    ):
+        raise ValueError("expected_scoring_mode must be a non-empty string")
     state = ResumeState()
     output_path = Path(output_file)
     if not output_path.exists() or output_path.stat().st_size == 0:
@@ -230,6 +235,15 @@ def load_resume_state(
                 )
             if not _is_completed_record(item, response_key, output_path, line_num):
                 continue
+            if (
+                expected_scoring_mode is not None
+                and item.get("scoring_mode") != expected_scoring_mode
+            ):
+                raise ValueError(
+                    f"Resume file {output_path} line {line_num} has "
+                    f"scoring_mode={item.get('scoring_mode')!r}, expected "
+                    f"{expected_scoring_mode!r}; use a new output file"
+                )
 
             document_id = item.get("doc_id")
             if document_id is None or not str(document_id).strip():

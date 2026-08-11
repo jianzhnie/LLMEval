@@ -200,9 +200,18 @@ BENCHMARKS=HARD bash examples/longcat-flash/run_all.sh
 N_SHOT=5 bash examples/longcat-flash/mc_infer.sh
 bash examples/longcat-flash/mc_score.sh
 
+# Complete-continuation scoring (requires a compatible Completions endpoint)
+LOGLIKELIHOOD_MODE=continuation \
+OUTPUT_DIR=./output/longcat-flash-continuation \
+bash examples/longcat-flash/mc_infer.sh
+
 # Generate mode (alternative)
 MC_MODE=generate bash examples/longcat-flash/mc_infer.sh
 ```
+
+Use a separate output directory when switching loglikelihood modes. See
+[MC loglikelihood scoring](docs/mc_scoring.md) for the algorithm and backend
+requirements.
 
 **Code benchmarks** — generation with guarded subprocess execution + pass@k summary:
 

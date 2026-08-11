@@ -20,6 +20,7 @@ import concurrent.futures
 import dataclasses
 import hashlib
 import json
+import math
 import os
 import random
 import sys
@@ -38,7 +39,8 @@ from llmeval.inference.common import (
     CONTEXT_LENGTH_ERROR,
     append_jsonl,
     build_chat_messages,
-    get_request_seed,
+    derive_request_seed,
+    ensure_raw_prompt,
     is_explicit_tool_choice,
     is_local_endpoint,
     load_jsonl,
@@ -47,67 +49,66 @@ from llmeval.inference.common import (
     redact_config_for_logging,
     save_failed_items,
 )
-from llmeval.inference.schema import (
-    ChoiceLoglikelihood,
-    LoglikelihoodRequest,
-    LoglikelihoodResult,
-)
 from llmeval.utils.config import MCInferArguments
 from llmeval.utils.log import init_logger
-from llmeval.utils.retry import (
-    ClientError,
-    MalformedResponseError,
-    call_with_retry,
-)
+from llmeval.utils.retry import MalformedResponseError, call_with_retry
 
 logger = init_logger("mc_infer")
 
 
 class ContinuationAlignmentError(ValueError):
-    """A deterministic backend token-offset mismatch that should not be retried."""
+    """The backend did not return a complete, alignable continuation."""
 
 
-def _aligned_continuation_tokens(
+def _text_length(value: str, *, count_bytes: bool) -> int:
+    """Measure text in Unicode characters or UTF-8 bytes."""
+    return len(value.encode("utf-8")) if count_bytes else len(value)
+
+
+def _aligned_continuation_logprobs(
     offsets: Sequence[int | None],
     token_logprobs: Sequence[float | None],
-    tokens: Sequence[Any],
+    tokens: Sequence[str],
     context: str,
     continuation: str,
-) -> tuple[list[int], tuple[str, ...]]:
-    """Locate a continuation using character or UTF-8 byte offsets."""
-    for byte_offsets in (False, True):
-        text_length = (
-            (lambda value: len(value.encode("utf-8"))) if byte_offsets else len
-        )
-        start = text_length(context)
-        end = start + text_length(continuation)
-        selected = [
+) -> list[float]:
+    """Return the logprobs for a continuation from an echoed completion.
+
+    Compatible backends disagree on whether ``text_offset`` counts Unicode
+    characters or UTF-8 bytes, so both representations are checked. A score
+    is returned only when the selected token text exactly reconstructs the
+    requested continuation.
+    """
+    for count_bytes in (False, True):
+        start = _text_length(context, count_bytes=count_bytes)
+        end = start + _text_length(continuation, count_bytes=count_bytes)
+        indices = [
             index
-            for index, (offset, logprob) in enumerate(
-                zip(offsets, token_logprobs, strict=True)
-            )
-            if offset is not None and start <= offset < end and logprob is not None
+            for index, offset in enumerate(offsets)
+            if offset is not None and start <= offset < end
         ]
-        if not selected or offsets[selected[0]] != start:
+        if not indices or offsets[indices[0]] != start:
             continue
 
-        selected_tokens = tuple(str(tokens[index]) for index in selected)
         expected_offset = start
-        aligned = True
-        for selected_index, token in zip(selected, selected_tokens, strict=True):
-            if offsets[selected_index] != expected_offset:
-                aligned = False
+        selected_tokens: list[str] = []
+        selected_logprobs: list[float] = []
+        for index in indices:
+            if offsets[index] != expected_offset:
                 break
-            expected_offset += text_length(token)
-        if (
-            aligned
-            and expected_offset == end
-            and "".join(selected_tokens) == continuation
-        ):
-            return selected, selected_tokens
+            token = tokens[index]
+            logprob = token_logprobs[index]
+            if logprob is None:
+                break
+            selected_tokens.append(token)
+            selected_logprobs.append(float(logprob))
+            expected_offset += _text_length(token, count_bytes=count_bytes)
+        else:
+            if expected_offset == end and "".join(selected_tokens) == continuation:
+                return selected_logprobs
 
     raise ContinuationAlignmentError(
-        "continuation token offsets do not align in characters or UTF-8 bytes"
+        "continuation token offsets do not exactly reconstruct the candidate"
     )
 
 
@@ -189,8 +190,13 @@ class FewShotFormatter:
     @staticmethod
     def _format_demo(item: dict[str, Any]) -> str:
         """Format one few-shot demonstration."""
-        prompt = item.get("prompt", "")
-        answer = item.get("answer", "")
+        prompt = item.get("prompt")
+        answer = item.get("answer")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("few-shot prompt must be a non-empty string")
+        if not isinstance(answer, str) or not answer.strip():
+            raise ValueError("few-shot answer must be a non-empty string")
+        ensure_raw_prompt(prompt)
         # prompt already ends with "Answer:", append the answer
         return f"{prompt} {answer}"
 
@@ -215,6 +221,7 @@ class MCLoglikelihoodClient:
         max_retries: int = 3,
         api_key: str | None = None,
         seed: int = 0,
+        system_prompt: str | None = None,
         organization: str | None = None,
         extra_body: dict[str, Any] | None = None,
     ) -> None:
@@ -233,6 +240,7 @@ class MCLoglikelihoodClient:
         self.timeout: int = timeout
         self.max_retries: int = max_retries
         self.seed = seed
+        self.system_prompt = system_prompt
         self.extra_body: dict[str, Any] = dict(extra_body or {})
         self.api_key: str = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
 
@@ -278,10 +286,15 @@ class MCLoglikelihoodClient:
             prompt exceeded the model context and must not be retried.
         """
 
+        if not choice_texts or any(
+            not isinstance(choice, str) or not choice for choice in choice_texts
+        ):
+            raise ValueError("choice_texts must contain non-empty strings")
+
         def do_request() -> list[float]:
             call_args: dict[str, Any] = {
                 "model": self.model_name,
-                "messages": build_chat_messages(prompt, None),
+                "messages": build_chat_messages(prompt, self.system_prompt),
                 "max_completion_tokens": 1,
                 "temperature": 0,
                 "logprobs": True,
@@ -293,26 +306,37 @@ class MCLoglikelihoodClient:
                 call_args["extra_body"] = dict(self.extra_body)
             resp = self.client.chat.completions.create(**call_args)
             choices = getattr(resp, "choices", []) or []
-            choice_logprobs = getattr(choices[0], "logprobs", None) if choices else None
+            if not isinstance(choices, list | tuple) or not choices:
+                raise MalformedResponseError("logprob response contains no choices")
+            choice_logprobs = getattr(choices[0], "logprobs", None)
             content = getattr(choice_logprobs, "content", None) or []
-            alternatives = (
-                getattr(content[0], "top_logprobs", None) if content else None
-            )
-            top_dict = {
-                str(token): float(logprob)
-                for entry in alternatives or []
-                if (token := getattr(entry, "token", None)) is not None
-                and (logprob := getattr(entry, "logprob", None)) is not None
-            }
+            if not isinstance(content, list | tuple) or not content:
+                raise MalformedResponseError(
+                    "logprob response contains no token content"
+                )
+            alternatives = getattr(content[0], "top_logprobs", None) or []
+            if not isinstance(alternatives, list | tuple) or not alternatives:
+                raise MalformedResponseError(
+                    "logprob response contains no alternatives"
+                )
+            top_dict: dict[str, float] = {}
+            for entry in alternatives:
+                token = getattr(entry, "token", None)
+                logprob = getattr(entry, "logprob", None)
+                if (
+                    not isinstance(token, str)
+                    or not isinstance(logprob, int | float)
+                    or isinstance(logprob, bool)
+                    or not math.isfinite(float(logprob))
+                ):
+                    raise MalformedResponseError("invalid top_logprobs entry")
+                score = float(logprob)
+                top_dict[token] = max(score, top_dict.get(token, float("-inf")))
             results = []
             for target in choice_texts:
                 best = float("-inf")
-                for form in {
-                    target,
-                    f" {target}",
-                    target.lower(),
-                    f" {target.lower()}",
-                }:
+                variants = {target, target.lower(), target.upper()}
+                for form in variants | {f" {variant}" for variant in variants}:
                     lp = top_dict.get(form)
                     if lp is not None and lp > best:
                         best = lp
@@ -324,29 +348,33 @@ class MCLoglikelihoodClient:
             return None
         return choice_logprobs
 
-    def score_continuations(self, request: LoglikelihoodRequest) -> LoglikelihoodResult:
-        """Score complete continuations and return a validated typed result.
+    def score_continuations(
+        self, prompt: str, continuations: list[str]
+    ) -> list[float] | None:
+        """Return exact loglikelihoods for complete candidate continuations.
 
-        The traditional Completions endpoint is required because Chat
-        Completions cannot echo prompt-token logprobs. Its ``max_tokens`` and
-        ``echo`` parameters are therefore intentional, not stale Chat
-        Completions fields.
-
-        Structurally malformed responses (missing fields, mismatched choice
-        counts) raise :class:`MalformedResponseError` inside the retry loop
-        and are retried; deterministic token-offset mismatches
-        (:class:`ContinuationAlignmentError`) and exhausted retries return a
-        failed (non-exact) result instead.
+        This requires a Completions-compatible endpoint that supports ``echo``
+        and returns prompt-token logprobs with text offsets. The legacy request
+        fields below are deliberately isolated to this endpoint; Chat
+        Completions continues to use ``max_completion_tokens``.
         """
+        if not continuations or any(
+            not isinstance(continuation, str) or not continuation
+            for continuation in continuations
+        ):
+            raise ValueError("continuations must contain non-empty strings")
+        if self.system_prompt:
+            raise ValueError(
+                "continuation loglikelihood cannot represent a separate system prompt"
+            )
 
-        def do_request() -> LoglikelihoodResult:
-            prompts = [
-                f"{request.context}{continuation}"
-                for continuation in request.continuations
-            ]
+        scoring_context = prompt.rstrip()
+        continuation_prefix = prompt[len(scoring_context) :]
+
+        def do_request() -> list[float]:
             call_args: dict[str, Any] = {
                 "model": self.model_name,
-                "prompt": prompts,
+                "prompt": [f"{prompt}{continuation}" for continuation in continuations],
                 "max_tokens": 1,
                 "temperature": 0,
                 "logprobs": 20,
@@ -357,118 +385,78 @@ class MCLoglikelihoodClient:
             if self.extra_body:
                 call_args["extra_body"] = dict(self.extra_body)
             response = self.client.completions.create(**call_args)
-            completions = getattr(response, "choices", []) or []
-            if len(completions) != len(request.continuations):
+            completions = getattr(response, "choices", None)
+            if not isinstance(completions, list | tuple) or len(completions) != len(
+                continuations
+            ):
                 raise MalformedResponseError(
                     "completion count does not match continuation count"
                 )
 
-            ordered_completions: list[Any | None] = [None] * len(request.continuations)
+            ordered: list[Any | None] = [None] * len(continuations)
             for completion in completions:
                 index = getattr(completion, "index", None)
                 if (
                     type(index) is not int
-                    or index < 0
-                    or index >= len(request.continuations)
-                    or ordered_completions[index] is not None
+                    or not 0 <= index < len(continuations)
+                    or ordered[index] is not None
                 ):
                     raise MalformedResponseError(
-                        "completion indices are missing, invalid, or duplicated"
+                        "completion indices are invalid or duplicated"
                     )
-                ordered_completions[index] = completion
+                ordered[index] = completion
 
-            choice_results: list[ChoiceLoglikelihood] = []
-            for choice_index, (completion, continuation) in enumerate(
-                zip(ordered_completions, request.continuations, strict=True)
-            ):
+            scores: list[float] = []
+            for index, continuation in enumerate(continuations):
+                completion = ordered[index]
                 logprobs = getattr(completion, "logprobs", None)
-                offsets = getattr(logprobs, "text_offset", None) if logprobs else None
-                token_logprobs = (
-                    getattr(logprobs, "token_logprobs", None) if logprobs else None
-                )
-                if not isinstance(offsets, list | tuple) or not isinstance(
-                    token_logprobs, list | tuple
+                offsets = getattr(logprobs, "text_offset", None)
+                token_logprobs = getattr(logprobs, "token_logprobs", None)
+                tokens = getattr(logprobs, "tokens", None)
+                if not (
+                    isinstance(offsets, list | tuple)
+                    and isinstance(token_logprobs, list | tuple)
+                    and isinstance(tokens, list | tuple)
+                    and len(offsets) == len(token_logprobs) == len(tokens)
                 ):
                     raise MalformedResponseError(
-                        "completion is missing token offsets or logprobs"
+                        "completion is missing aligned prompt token logprobs"
                     )
-                if len(offsets) != len(token_logprobs) or any(
-                    offset is not None and not isinstance(offset, int)
-                    for offset in offsets
+                if any(
+                    offset is not None and type(offset) is not int for offset in offsets
+                ) or any(not isinstance(token, str) for token in tokens):
+                    raise MalformedResponseError(
+                        "completion token offsets or text are malformed"
+                    )
+                if any(
+                    logprob is not None
+                    and (
+                        not isinstance(logprob, int | float)
+                        or isinstance(logprob, bool)
+                        or not math.isfinite(float(logprob))
+                    )
+                    for logprob in token_logprobs
                 ):
                     raise MalformedResponseError(
-                        "completion token offsets are malformed"
+                        "completion token logprobs are malformed"
                     )
 
-                tokens = getattr(logprobs, "tokens", None)
-                if not isinstance(tokens, list | tuple) or len(tokens) != len(
-                    token_logprobs
-                ):
-                    raise MalformedResponseError(
-                        "completion is missing aligned token text"
-                    )
-                scored_text = request.scored_continuation(choice_index)
-                selected_indices, selected_tokens = _aligned_continuation_tokens(
+                scored_continuation = f"{continuation_prefix}{continuation}"
+                token_scores = _aligned_continuation_logprobs(
                     offsets,
                     token_logprobs,
                     tokens,
-                    request.scoring_context,
-                    scored_text,
+                    scoring_context,
+                    scored_continuation,
                 )
+                scores.append(math.fsum(token_scores))
+            return scores
 
-                backend_ids = getattr(logprobs, "token_ids", None)
-                if backend_ids is not None and (
-                    not isinstance(backend_ids, list | tuple)
-                    or len(backend_ids) != len(token_logprobs)
-                ):
-                    raise MalformedResponseError("completion token IDs are malformed")
-                selected_ids = (
-                    tuple(int(backend_ids[index]) for index in selected_indices)
-                    if backend_ids is not None
-                    else None
-                )
-                choice_results.append(
-                    ChoiceLoglikelihood(
-                        continuation=continuation,
-                        scored_text=scored_text,
-                        token_logprobs=tuple(
-                            float(token_logprobs[index]) for index in selected_indices
-                        ),
-                        token_texts=selected_tokens,
-                        token_ids=selected_ids,
-                    )
-                )
-            return LoglikelihoodResult(
-                request=request,
-                choices=tuple(choice_results),
-                exact=True,
-            )
-
-        try:
-            result = call_with_retry(
-                do_request,
-                self.max_retries,
-                fail_fast_exceptions=(ContinuationAlignmentError,),
-            )
-        except ContinuationAlignmentError as exc:
-            logger.debug("Continuation scoring fallback: %s", exc)
-            return LoglikelihoodResult.failure(request, str(exc))
-        except ClientError as exc:
-            logger.warning("Continuation logprob request failed: %s", exc)
-            return LoglikelihoodResult.failure(request, str(exc))
-        except ValueError:
-            # Schema/invariant errors are programming defects, not alignment
-            # fallback signals. Let the per-item runner audit them explicitly.
-            raise
-        except Exception as exc:
-            # Continuation scoring issues several completions for one item.
-            # Keep an unexpected backend failure local to that item; the
-            # first-token path remains fail-fast for programming errors.
-            logger.warning("Continuation logprob request failed: %s", exc)
-            return LoglikelihoodResult.failure(request, str(exc))
-        if result is None:
-            return LoglikelihoodResult.failure(request, CONTEXT_LENGTH_ERROR)
-        return result
+        return call_with_retry(
+            do_request,
+            self.max_retries,
+            fail_fast_exceptions=(ContinuationAlignmentError,),
+        )
 
 
 # ===========================================================================
@@ -507,6 +495,7 @@ class MCRunner:
                     max_retries=config.max_retries,
                     api_key=config.api_key,
                     seed=config.seed,
+                    system_prompt=config.system_prompt,
                     organization=config.organization,
                     extra_body=config.extra_body_dict,
                 )
@@ -538,19 +527,6 @@ class MCRunner:
     # Resume
     # ------------------------------------------------------------------
 
-    @property
-    def effective_loglikelihood_mode(self) -> str:
-        """Resolve compatibility ``auto`` to the fast first-token path."""
-        return (
-            "continuation"
-            if self.config.loglikelihood_mode == "continuation"
-            else "first_token"
-        )
-
-    # ------------------------------------------------------------------
-    # Data loading
-    # ------------------------------------------------------------------
-
     def load_data(self) -> list[dict[str, Any]]:
         """Load the dataset and apply resume filtering.
 
@@ -572,6 +548,11 @@ class MCRunner:
             self.config.input_key,
             self.config.response_key,
             repair_truncated_last_line=self.config.repair_resume,
+            expected_scoring_mode=(
+                self.config.loglikelihood_mode
+                if self.config.mode == "loglikelihood"
+                else None
+            ),
         )
         target_samples = self.config.n_samples if self.config.mode == "generate" else 1
         remaining = prepare_sample_requests(
@@ -579,7 +560,6 @@ class MCRunner:
             resume_state,
             self.config.input_key,
             target_samples,
-            base_seed=self.config.seed,
             prompt_resolver=self.build_prompt,
         )
 
@@ -604,6 +584,7 @@ class MCRunner:
                 f"Prompt under {self.config.input_key!r} or 'prompt' must be a "
                 "non-empty string"
             )
+        ensure_raw_prompt(prompt)
         fs_prefix = (
             self._few_shot_fmt.get_prefix(prompt, str(item.get("doc_id", "")))
             if self._few_shot_fmt
@@ -681,10 +662,7 @@ class MCRunner:
         Args:
             remaining: Items left after resume filtering (see load_data)
         """
-        logger.info(
-            "effective_loglikelihood_mode=%s",
-            self.effective_loglikelihood_mode,
-        )
+        logger.info("scoring_mode=%s", self.config.loglikelihood_mode)
         logger.info("⏳ Processing %d loglikelihood items", len(remaining))
         self._process_concurrently(remaining, self.process_loglikelihood_item)
         self.log_stats()
@@ -710,67 +688,48 @@ class MCRunner:
                 and retry it on the next resume run.
         """
         prompt = self.build_prompt(item)
-        choices = item.get("choices", [])
-        gold = item.get("gold", -1)
+        choices = item.get("choices")
+        gold = item.get("gold")
 
-        if not choices:
+        if choices == [] or choices is None:
             return None
+        if not isinstance(choices, list) or any(
+            not isinstance(choice, str) or not choice.strip() for choice in choices
+        ):
+            raise ValueError("choices must be a non-empty list of non-empty strings")
+        if type(gold) is not int or not 0 <= gold < len(choices):
+            raise ValueError(
+                f"gold must be an integer index in [0, {len(choices) - 1}], got {gold!r}"
+            )
 
         if self.client is None:
             raise RuntimeError("Loglikelihood client is not initialized")
         choice_tokens = self._choice_tokens(item, len(choices))
-        scoring_mode = self.effective_loglikelihood_mode
-        choice_logprobs: list[list[float]] = []
-        choice_scored_tokens: list[list[str]] = []
-        choice_token_ids: list[list[int] | None] | None = None
+        scoring_mode = self.config.loglikelihood_mode
 
         def context_length_result() -> dict[str, Any]:
             return {
                 self.config.input_key: prompt,
                 "doc_id": item["doc_id"],
+                "sample_index": item.get("sample_index", 0),
                 "choices": choices,
                 "choice_tokens": choice_tokens,
                 "gold": gold,
                 "logprobs": [],
+                "scoring_mode": scoring_mode,
                 "pred": -1,
                 "correct": False,
                 "error": CONTEXT_LENGTH_ERROR,
             }
 
-        if scoring_mode == "continuation":
-            continuation_result = self.client.score_continuations(
-                LoglikelihoodRequest(prompt, tuple(choice_tokens))
-            )
-            if not continuation_result.exact:
-                reason = continuation_result.error or "unknown reason"
-                if reason == CONTEXT_LENGTH_ERROR:
-                    return context_length_result()
-                raise RuntimeError(f"Continuation logprob request failed: {reason}")
-            choice_logprobs = [
-                list(choice.token_logprobs) for choice in continuation_result.choices
-            ]
-            choice_scored_tokens = [
-                list(choice.token_texts) for choice in continuation_result.choices
-            ]
-            candidate_token_ids = [
-                list(choice.token_ids) if choice.token_ids is not None else None
-                for choice in continuation_result.choices
-            ]
-            if any(token_ids is not None for token_ids in candidate_token_ids):
-                choice_token_ids = candidate_token_ids
-
         if scoring_mode == "first_token":
             logprobs = self.client.get_choices_logprobs(prompt, choice_tokens)
-            if logprobs is None:
-                return context_length_result()
-            choice_logprobs = [
-                [score] if score != float("-inf") else [] for score in logprobs
-            ]
-            choice_scored_tokens = [[] for _ in choice_tokens]
         elif scoring_mode == "continuation":
-            logprobs = [
-                sum(scores) if scores else float("-inf") for scores in choice_logprobs
-            ]
+            logprobs = self.client.score_continuations(prompt, choice_tokens)
+        else:
+            raise RuntimeError(f"Unsupported loglikelihood mode: {scoring_mode!r}")
+        if logprobs is None:
+            return context_length_result()
         if all(lp == float("-inf") for lp in logprobs):
             raise RuntimeError("Logprob request failed for all choices")
 
@@ -779,6 +738,7 @@ class MCRunner:
         return {
             self.config.input_key: prompt,
             "doc_id": item["doc_id"],
+            "sample_index": item.get("sample_index", 0),
             "choices": choices,
             "choice_tokens": choice_tokens,
             "gold": gold,
@@ -787,35 +747,28 @@ class MCRunner:
             "logprobs": [
                 None if score == float("-inf") else score for score in logprobs
             ],
-            "choice_logprobs": choice_logprobs,
             "scoring_mode": scoring_mode,
-            "loglikelihood_exact": scoring_mode == "continuation",
-            "scoring_approximation": (
-                None if scoring_mode == "continuation" else "first_token_top_logprobs"
-            ),
-            "choice_scored_tokens": choice_scored_tokens,
-            "choice_token_ids": choice_token_ids,
-            "choice_token_count": (
-                [len(scores) for scores in choice_logprobs]
-                if scoring_mode == "continuation"
-                else None
-            ),
-            # Harness normalizes MC likelihood by Unicode character count and
-            # UTF-8 byte count. Token count is retained only as diagnostics.
-            "choice_char_count": [len(token) for token in choice_tokens],
-            "choice_byte_count": [
-                len(token.encode("utf-8")) for token in choice_tokens
-            ],
             "pred": pred,
             "correct": is_correct,
         }
 
     @staticmethod
     def _choice_tokens(item: dict[str, Any], num_choices: int) -> list[str]:
-        """Resolve answer tokens used by first-token loglikelihood scoring."""
+        """Resolve candidate answer text used by loglikelihood scoring."""
         explicit = item.get("choice_tokens")
-        if isinstance(explicit, list) and len(explicit) == num_choices:
-            return [str(token) for token in explicit]
+        if explicit is not None:
+            if (
+                not isinstance(explicit, list)
+                or len(explicit) != num_choices
+                or any(
+                    not isinstance(token, str) or not token.strip()
+                    for token in explicit
+                )
+            ):
+                raise ValueError(
+                    "choice_tokens must align with choices and contain non-empty strings"
+                )
+            return explicit
 
         choices = item.get("choices", [])
         if isinstance(choices, list) and len(choices) == num_choices:
@@ -906,7 +859,12 @@ class MCRunner:
             "temperature": self.config.temperature,
             "top_p": self.config.top_p,
             "timeout": self.config.request_timeout,
-            "seed": get_request_seed(item),
+            "seed": derive_request_seed(
+                self.config.seed,
+                str(item.get("doc_id", "")),
+                prompt,
+                item.get("sample_index"),
+            ),
         }
         if self.config.extra_body_dict:
             call_args["extra_body"] = dict(self.config.extra_body_dict)
@@ -925,9 +883,9 @@ class MCRunner:
             if not raw_choices:
                 raise MalformedResponseError("Generate returned no choices")
             content = getattr(getattr(raw_choices[0], "message", None), "content", None)
-            if not content:
-                raise RuntimeError("Generate returned empty content")
-            return str(content)
+            if not isinstance(content, str) or not content.strip():
+                raise MalformedResponseError("Generate returned empty content")
+            return content
 
         generation: str | None = None
         try:
@@ -938,7 +896,6 @@ class MCRunner:
             # Context-length rejection can never succeed on retry: persist a
             # permanent-failure row so resume treats the sample as completed.
             result = dict(item)
-            result.pop("_request_seed", None)
             result[self.config.input_key] = prompt
             result[self.config.label_key] = gold
             result[self.config.response_key] = ""
@@ -949,7 +906,6 @@ class MCRunner:
             raise RuntimeError("Generate produced no usable text (empty response)")
 
         result = dict(item)
-        result.pop("_request_seed", None)
         result[self.config.input_key] = prompt
         result[self.config.label_key] = gold
         result[self.config.response_key] = generation

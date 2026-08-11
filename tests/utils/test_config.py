@@ -252,6 +252,7 @@ class TestMCInferArguments:
     def test_defaults_valid(self) -> None:
         args = MCInferArguments()
         assert args.mode == "loglikelihood"
+        assert args.loglikelihood_mode == "first_token"
         assert args.max_workers > 0
         assert args.n_shot == 0
         assert args.max_completion_tokens == 32768
@@ -274,6 +275,17 @@ class TestMCInferArguments:
     def test_invalid_mode_raises(self) -> None:
         with pytest.raises(ValueError, match="mode"):
             MCInferArguments(mode="bogus")
+
+    def test_invalid_loglikelihood_mode_raises(self) -> None:
+        with pytest.raises(ValueError, match="loglikelihood_mode"):
+            MCInferArguments(loglikelihood_mode="auto")
+
+    def test_continuation_rejects_system_prompt(self) -> None:
+        with pytest.raises(ValueError, match="does not support a system prompt"):
+            MCInferArguments(
+                loglikelihood_mode="continuation",
+                system_prompt_type="default",
+            )
 
     def test_nonempty_input_reuses_data_validation(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="does not exist"):

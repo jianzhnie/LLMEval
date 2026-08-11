@@ -69,13 +69,20 @@ class DataArguments:
 
     def __post_init__(self) -> None:
         """Validate an explicitly configured input path."""
+        if not isinstance(self.output_file, str) or not self.output_file.strip():
+            raise ValueError("output_file must be a non-empty path")
+        output_path = Path(self.output_file)
+        if output_path.exists() and output_path.is_dir():
+            raise ValueError("output_file must be a file path, not a directory")
         if not self.input_file:
             return
-        if not Path(self.input_file).exists():
+        input_path = Path(self.input_file)
+        if not input_path.is_file():
             raise ValueError(
-                f"Input file '{self.input_file}' does not exist. "
-                "Please provide a valid input file path."
+                f"Input file '{self.input_file}' does not exist or is not a file."
             )
+        if input_path.resolve() == output_path.resolve():
+            raise ValueError("input_file and output_file must be different paths")
 
 
 def _validate_field_names(**field_names: str) -> None:
@@ -595,9 +602,8 @@ class MCInferArguments(
         default="first_token",
         metadata={
             "help": (
-                "MC scoring mode: first_token (default, Chat Completions), "
-                "continuation (legacy Completions compatibility), or auto "
-                "(alias for first_token)."
+                "MC loglikelihood scoring: first_token (Chat Completions) or "
+                "continuation (Completions echo with prompt-token logprobs)."
             )
         },
     )
@@ -627,10 +633,10 @@ class MCInferArguments(
             raise ValueError(
                 f"mode must be one of {('loglikelihood', 'generate')}, got: {self.mode!r}"
             )
-        if self.loglikelihood_mode not in ("auto", "continuation", "first_token"):
+        if self.loglikelihood_mode not in ("first_token", "continuation"):
             raise ValueError(
-                "loglikelihood_mode must be one of ('auto', 'continuation', "
-                f"'first_token'), got: {self.loglikelihood_mode!r}"
+                "loglikelihood_mode must be one of "
+                f"{('first_token', 'continuation')}, got: {self.loglikelihood_mode!r}"
             )
         if self.n_shot < 0:
             raise ValueError(f"n_shot must be non-negative, got: {self.n_shot}")
@@ -638,6 +644,19 @@ class MCInferArguments(
             raise ValueError(
                 "few_shot_file is required when n_shot is greater than zero; "
                 "do not sample demonstrations from the evaluation set"
+            )
+        if self.mode == "loglikelihood" and self.n_samples != 1:
+            raise ValueError("loglikelihood mode requires n_samples=1")
+        if self.mode == "loglikelihood" and self.tool_choice != "none":
+            raise ValueError("loglikelihood mode does not support tool_choice")
+        if (
+            self.mode == "loglikelihood"
+            and self.loglikelihood_mode == "continuation"
+            and self.system_prompt
+        ):
+            raise ValueError(
+                "continuation loglikelihood does not support a system prompt; "
+                "use system_prompt_type=empty"
             )
 
 
@@ -658,13 +677,9 @@ class ShareEvalArguments:
     response_key: str = field(
         default="gen", metadata={"help": "Key for model generated text."}
     )
-    cache_path: str = field(
-        default="./cache/results.jsonl",
-        metadata={"help": "Legacy JSONL path for evaluation results."},
-    )
     result_path: str = field(
-        default="",
-        metadata={"help": "Preferred result path; overrides cache_path."},
+        default="./results/evaluation.json",
+        metadata={"help": "Path for the aggregate evaluation result JSON."},
     )
     max_workers: int = field(
         default=128,
@@ -687,12 +702,18 @@ class ShareEvalArguments:
     def __post_init__(self) -> None:
         if not self.input_path:
             raise ValueError("input_path is required")
-        if not Path(self.input_path).exists():
-            raise ValueError(f"input_path {self.input_path} does not exist")
-        if self.result_path:
-            self.cache_path = self.result_path
-        if not self.cache_path:
-            raise ValueError("result_path or cache_path is required")
+        input_path = Path(self.input_path)
+        if not input_path.is_file():
+            raise ValueError(
+                f"input_path {self.input_path} does not exist or is not a file"
+            )
+        if not isinstance(self.result_path, str) or not self.result_path.strip():
+            raise ValueError("result_path is required")
+        result_path = Path(self.result_path)
+        if result_path.exists() and result_path.is_dir():
+            raise ValueError("result_path must be a file path, not a directory")
+        if input_path.resolve() == result_path.resolve():
+            raise ValueError("input_path and result_path must be different paths")
         _validate_field_names(
             task_name=self.task_name,
             label_key=self.label_key,

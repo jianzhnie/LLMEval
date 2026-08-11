@@ -151,7 +151,15 @@ BENCHMARKS=HARD bash examples/longcat-flash/run_all.sh    # 高难度
 ```bash
 N_SHOT=5 bash examples/longcat-flash/mc_infer.sh   # 5-shot 推理
 bash examples/longcat-flash/mc_score.sh              # 评分
+
+# 完整 continuation 评分（要求后端支持 Completions prompt-token logprobs）
+LOGLIKELIHOOD_MODE=continuation \
+OUTPUT_DIR=./output/longcat-flash-continuation \
+bash examples/longcat-flash/mc_infer.sh
 ```
+
+切换 loglikelihood 评分方式时应使用不同的输出目录。算法原理和后端要求见
+[MC Loglikelihood 评分机制](docs/mc_scoring.md)。
 
 **代码 benchmark** — 代码生成 + 沙箱执行 pass@k summary：
 

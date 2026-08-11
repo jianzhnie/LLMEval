@@ -52,7 +52,13 @@ if "tqdm" not in sys.modules and not importlib.util.find_spec("tqdm"):
     _tqdm.tqdm = MagicMock
     sys.modules["tqdm"] = _tqdm
 
-from llmeval.inference.mc import FewShotFormatter, MCLoglikelihoodClient, MCRunner
+from llmeval.inference.mc import (
+    ContinuationAlignmentError,
+    FewShotFormatter,
+    MCLoglikelihoodClient,
+    MCRunner,
+    _aligned_continuation_logprobs,
+)
 from llmeval.utils.config import MCInferArguments
 
 
@@ -90,6 +96,28 @@ def _fake_top_probs_resp(top_probs: dict[str, float]) -> MagicMock:
     choice.logprobs.content = [token]
     resp.choices = [choice]
     return resp
+
+
+def _fake_continuation_resp(
+    context: str, continuations: list[str], scores: list[float]
+) -> types.SimpleNamespace:
+    scoring_context = context.rstrip()
+    prefix = context[len(scoring_context) :]
+    start = len(scoring_context)
+    choices = [
+        types.SimpleNamespace(
+            index=index,
+            logprobs=types.SimpleNamespace(
+                text_offset=[0, start],
+                token_logprobs=[None, score],
+                tokens=[scoring_context, f"{prefix}{continuation}"],
+            ),
+        )
+        for index, (continuation, score) in enumerate(
+            zip(continuations, scores, strict=True)
+        )
+    ]
+    return types.SimpleNamespace(choices=list(reversed(choices)))
 
 
 def _generation_choice(content: str | None, index: int = 0) -> MagicMock:
@@ -234,6 +262,65 @@ class TestMCLoglikelihoodClient:
         with pytest.raises(RuntimeError, match="down"):
             client.get_choices_logprobs("prompt", ["A", "B"])
 
+    def test_continuation_scores_complete_candidates(self) -> None:
+        client = _make_ll_client()
+        client.client.completions.create.return_value = _fake_continuation_resp(
+            "Q ", ["A", "B"], [-0.2, -1.3]
+        )
+
+        result = client.score_continuations("Q ", ["A", "B"])
+
+        assert result == [-0.2, -1.3]
+        request = client.client.completions.create.call_args.kwargs
+        assert request["prompt"] == ["Q A", "Q B"]
+        assert request["echo"] is True
+        assert request["max_tokens"] == 1
+        assert "max_completion_tokens" not in request
+
+    def test_continuation_rejects_system_prompt(self) -> None:
+        client = _make_ll_client()
+        client.system_prompt = "Follow instructions."
+
+        with pytest.raises(ValueError, match="separate system prompt"):
+            client.score_continuations("Q ", ["A"])
+
+        client.client.completions.create.assert_not_called()
+
+    def test_continuation_accepts_utf8_byte_offsets(self) -> None:
+        scores = _aligned_continuation_logprobs(
+            offsets=[0, 3, 4],
+            token_logprobs=[None, -0.2, -0.3],
+            tokens=["题", " ", "答"],
+            context="题",
+            continuation=" 答",
+        )
+
+        assert scores == [-0.2, -0.3]
+
+    def test_continuation_alignment_error_is_not_retried(self) -> None:
+        client = _make_ll_client(max_retries=2)
+        client.client.completions.create.return_value = _fake_continuation_resp(
+            "Q ", ["X"], [-0.2]
+        )
+
+        with pytest.raises(ContinuationAlignmentError):
+            client.score_continuations("Q ", ["A"])
+
+        assert client.client.completions.create.call_count == 1
+
+    def test_malformed_continuation_response_is_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+        client = _make_ll_client(max_retries=1)
+        client.client.completions.create.side_effect = [
+            types.SimpleNamespace(choices=[]),
+            _fake_continuation_resp("Q ", ["A"], [-0.2]),
+        ]
+
+        assert client.score_continuations("Q ", ["A"]) == [-0.2]
+        assert client.client.completions.create.call_count == 2
+
 
 class TestProcessLoglikelihoodItem:
     def test_context_marker_counts_failed_not_processed(self, tmp_path: Path) -> None:
@@ -258,7 +345,10 @@ class TestProcessLoglikelihoodItem:
         with patch("llmeval.inference.mc.logger.info") as log_info:
             runner.run_loglikelihood([{"prompt": "q"}])
 
-        assert log_info.call_args_list[0].args == ("scoring_mode=first_token",)
+        assert log_info.call_args_list[0].args == (
+            "scoring_mode=%s",
+            "first_token",
+        )
 
     def test_all_neg_inf_raises(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
@@ -299,6 +389,36 @@ class TestProcessLoglikelihoodItem:
             "pred",
             "correct",
         }
+
+    def test_continuation_pred_and_compact_output(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.config.loglikelihood_mode = "continuation"
+        runner.client = MagicMock()
+        runner.client.score_continuations.return_value = [-5.0, -1.0]
+
+        result = runner.process_loglikelihood_item(
+            {
+                "doc_id": "test:0",
+                "prompt": "q",
+                "choices": ["a", "b"],
+                "gold": 1,
+            }
+        )
+
+        assert result == {
+            "prompt": "q",
+            "doc_id": "test:0",
+            "sample_index": 0,
+            "choices": ["a", "b"],
+            "choice_tokens": ["A", "B"],
+            "gold": 1,
+            "logprobs": [-5.0, -1.0],
+            "scoring_mode": "continuation",
+            "pred": 1,
+            "correct": True,
+        }
+        runner.client.score_continuations.assert_called_once_with("q", ["A", "B"])
+        runner.client.get_choices_logprobs.assert_not_called()
 
     @pytest.mark.parametrize(
         "item",
@@ -525,6 +645,37 @@ class TestProcessGenerateItem:
 
 
 class TestMCStableResume:
+    def test_loglikelihood_resume_rejects_other_scoring_mode(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.config.loglikelihood_mode = "continuation"
+        Path(runner.config.input_file).write_text(
+            json.dumps(
+                {
+                    "doc_id": "test:0",
+                    "prompt": "q",
+                    "choices": ["a", "b"],
+                    "gold": 0,
+                }
+            )
+            + "\n"
+        )
+        Path(runner.config.output_file).write_text(
+            json.dumps(
+                {
+                    "doc_id": "test:0",
+                    "prompt": "q",
+                    "logprobs": [-0.1, -1.0],
+                    "scoring_mode": "first_token",
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="expected 'continuation'"):
+            runner.load_data()
+
     def test_generate_resume_requests_only_missing_samples(
         self, tmp_path: Path
     ) -> None:
@@ -686,6 +837,7 @@ class TestMCInferArguments:
     def test_defaults(self) -> None:
         c = MCInferArguments()
         assert c.mode == "loglikelihood"
+        assert c.loglikelihood_mode == "first_token"
         assert c.max_workers == 128
         assert c.temperature == 0.6
         assert c.n_shot == 0
