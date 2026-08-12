@@ -10,7 +10,6 @@ mathematical evaluation tasks while providing detailed logging and progress trac
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
 from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 from dataclasses import dataclass, field
 from statistics import mean
@@ -134,30 +133,6 @@ _REMOVED_EXPRESSIONS: tuple[str, ...] = (
 )
 
 
-@dataclass
-class ProcessingStats:
-    """Container for tracking processing statistics."""
-
-    total: int = 0
-    correct: int = 0
-    failed: int = 0
-
-    @property
-    def effective(self) -> int:
-        """Number of samples eligible for the accuracy denominator."""
-        return max(self.total - self.failed, 0)
-
-    @property
-    def correct_rate(self) -> float:
-        """Calculate percentage of correct answers."""
-        return (self.correct / self.effective * 100) if self.effective > 0 else 0.0
-
-    @property
-    def failed_rate(self) -> float:
-        """Calculate percentage of failed evaluations."""
-        return (self.failed / self.total * 100) if self.total > 0 else 0.0
-
-
 @dataclass(frozen=True)
 class MathAnswerResult:
     """Worker result with answer and compact postprocessing diagnostics."""
@@ -169,12 +144,6 @@ class MathAnswerResult:
     fallback_matched: bool = False
     failed: bool = False
     filter_trace: dict[str, Any] = field(default_factory=dict)
-
-    def __iter__(self) -> Iterator[int | float | str | None]:
-        yield self.index
-        yield self.grade
-        yield self.predicted
-        yield self.gold
 
 
 def _last_boxed_only_string(text: str) -> str:
@@ -431,7 +400,8 @@ def _score_math_records(
         return 0.0
 
     total = len(eval_dataset)
-    stats = ProcessingStats(total=total)
+    correct_count = 0
+    failed_count = 0
     processed_indices = set()
 
     optimal_workers = resolve_max_workers(total, max_workers)
@@ -465,7 +435,10 @@ def _score_math_records(
 
             pbar.update(1)
             if result is not None:
-                idx, is_correct, extracted_answer, extracted_gold = result
+                idx = result.index
+                is_correct = result.grade
+                extracted_answer = result.predicted
+                extracted_gold = result.gold
                 status = "failed" if result.failed else "completed"
 
                 eval_dataset[idx].update(
@@ -481,9 +454,9 @@ def _score_math_records(
                 processed_indices.add(idx)
 
                 if status == "completed" and is_correct == 1.0:
-                    stats.correct += 1
+                    correct_count += 1
                 elif status == "failed":
-                    stats.failed += 1
+                    failed_count += 1
 
     # Handle any jobs that were not processed. Workers convert their own
     # errors into sentinel results, so a missing index means the pool-level
@@ -499,19 +472,22 @@ def _score_math_records(
                     **_filter_artifacts(eval_dataset[idx].get(response_key)),
                 }
             )
-            stats.failed += 1
+            failed_count += 1
 
     logger.info(f"Summary: {total} eval_dataset processed.")
 
+    effective_count = total - failed_count
+    correct_rate = correct_count / effective_count * 100 if effective_count else 0.0
+    failed_rate = failed_count / total * 100
     logger.info(
         "Math scoring: total=%d effective=%d correct=%d (%.1f%%) "
         "failed=%d (%.1f%%) workers=%d",
-        stats.total,
-        stats.effective,
-        stats.correct,
-        stats.correct_rate,
-        stats.failed,
-        stats.failed_rate,
+        total,
+        effective_count,
+        correct_count,
+        correct_rate,
+        failed_count,
+        failed_rate,
         optimal_workers,
     )
 

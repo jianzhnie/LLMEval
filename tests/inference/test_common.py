@@ -9,6 +9,7 @@ import pytest
 
 from llmeval.inference.common import (
     ResumeState,
+    append_jsonl,
     derive_request_seed,
     load_jsonl,
     load_resume_state,
@@ -79,6 +80,19 @@ class TestResumeState:
         assert state.completed_indices == {"q1": {0, 1}, "q2": {0}}
         assert state.completed_count == 3
 
+    def test_empty_string_generation_is_completed(self, tmp_path: Path) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(json.dumps({"doc_id": "q1", "prompt": "p", "gen": ""}) + "\n")
+
+        assert load_resume_state(path, "prompt", "gen").completed_indices == {"q1": {0}}
+
+    def test_empty_list_generation_is_completed(self, tmp_path: Path) -> None:
+        """An explicit empty list is one empty answer (scoring convention)."""
+        path = tmp_path / "out.jsonl"
+        path.write_text(json.dumps({"doc_id": "q1", "prompt": "p", "gen": []}) + "\n")
+
+        assert load_resume_state(path, "prompt", "gen").completed_indices == {"q1": {0}}
+
     def test_missing_or_null_generation_is_not_completed(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
         rows = [
@@ -133,6 +147,16 @@ class TestResumeState:
                 "gen",
                 expected_scoring_mode="continuation",
             )
+
+    def test_expected_scoring_mode_error_suggests_migration(
+        self, tmp_path: Path
+    ) -> None:
+        """Legacy rows without scoring_mode fail with a migration hint."""
+        path = tmp_path / "out.jsonl"
+        path.write_text(json.dumps({"doc_id": "q1", "prompt": "p", "gen": "A"}) + "\n")
+
+        with pytest.raises(ValueError, match="scoring_mode='generate'"):
+            load_resume_state(path, "prompt", "gen", expected_scoring_mode="generate")
 
     @pytest.mark.parametrize(
         "logprobs",
@@ -198,6 +222,63 @@ class TestResumeState:
             path, "prompt", "gen", repair_truncated_last_line=True
         )
         assert state.completed_indices == {"q1": {0}}
+        assert path.read_text().endswith("\n")
+
+        append_jsonl(path, [{"doc_id": "q2", "prompt": "p2", "gen": "b"}])
+
+        assert load_resume_state(path, "prompt", "gen").completed_indices == {
+            "q1": {0},
+            "q2": {0},
+        }
+
+    def test_append_repairs_unterminated_existing_file(self, tmp_path: Path) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text('{"doc_id": "q1", "gen": "a"}')
+
+        append_jsonl(path, [{"doc_id": "q2", "gen": "b"}])
+
+        assert load_resume_state(path, "prompt", "gen").completed_indices == {
+            "q1": {0},
+            "q2": {0},
+        }
+
+    @pytest.mark.parametrize("ending", ["", "\r"])
+    def test_repair_adds_newline_to_complete_final_record(
+        self, tmp_path: Path, ending: str
+    ) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps({"doc_id": "q1", "prompt": "p", "gen": "a"}) + ending
+        )
+
+        load_resume_state(path, "prompt", "gen", repair_truncated_last_line=True)
+        append_jsonl(path, [{"doc_id": "q2", "prompt": "p2", "gen": "b"}])
+
+        assert load_resume_state(path, "prompt", "gen").completed_count == 2
+
+    def test_read_only_repair_fallback_does_not_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "out.jsonl"
+        content = json.dumps({"doc_id": "q1", "prompt": "p", "gen": "a"})
+        path.write_text(content)
+        original_open = Path.open
+
+        def open_read_only(
+            target: Path, mode: str = "r", *args: object, **kwargs: object
+        ):
+            if target == path and mode == "r+b":
+                raise PermissionError("read-only filesystem")
+            return original_open(target, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", open_read_only)
+
+        state = load_resume_state(
+            path, "prompt", "gen", repair_truncated_last_line=True
+        )
+
+        assert state.completed_indices == {"q1": {0}}
+        assert path.read_text() == content
 
     @pytest.mark.parametrize(
         "content",

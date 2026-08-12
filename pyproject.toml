@@ -85,7 +85,6 @@ select = [
     "RUF",   # Ruff-specific rules
 ]
 ignore = [
-    "E402",   # Import not at top (intentional: from __future__ + docstring pattern)
     "E501",   # Line too long (handled by formatter)
     "RUF001", # Ambiguous unicode in strings (intentional: Chinese prompt templates)
     "RUF003", # Ambiguous unicode in comments (intentional: Chinese comments in templates)
@@ -93,6 +92,13 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["llmeval"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/inference/test_mc.py" = ["E402"]
+"tests/inference/test_offline.py" = ["E402"]
+"tests/inference/test_online.py" = ["E402"]
+"tests/test_evaluator.py" = ["E402"]
+"tests/utils/test_retry.py" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

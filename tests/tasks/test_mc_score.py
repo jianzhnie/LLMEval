@@ -479,6 +479,133 @@ class TestMCScoreEdgeCases:
         assert result.effective_sample_count == 1
         assert result.failed_count == 1
 
+    def test_generate_invalid_gold_is_failed(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        result = score_generate_result(
+            [{"answer": "invalid", "gen": ["Answer: A"]}],
+            "answer",
+            "gen",
+        )
+
+        assert result.sample_count == 1
+        assert result.effective_sample_count == 0
+        assert result.failed_count == 1
+
+    def test_generate_numeric_gold_resolves_to_option_index(self) -> None:
+        """1-based numeric gold resolves to the matching choice letter."""
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        items = [
+            {
+                "doc_id": "q1",
+                "answer": "1",
+                "choices": ["a", "b"],
+                "gen": ["Answer: A"],
+            },
+            {
+                "doc_id": "q2",
+                "answer": "2",
+                "choices": ["a", "b"],
+                "gen": ["Answer: B"],
+            },
+        ]
+        result = score_generate_result(items, "answer", "gen")
+
+        assert result.metrics["acc"] == 1.0
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 2
+
+    def test_generate_out_of_range_numeric_gold_is_failed(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        result = score_generate_result(
+            [{"answer": "5", "choices": ["a", "b"], "gen": ["Answer: A"]}],
+            "answer",
+            "gen",
+        )
+
+        assert result.failed_count == 1
+        assert result.effective_sample_count == 0
+
+    def test_generate_text_gold_matches_choice_text(self) -> None:
+        """Full-text gold equal to a choice's text resolves to that choice."""
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        items = [
+            {
+                "doc_id": "q1",
+                "answer": "Paris",
+                "choices": ["London", "Paris"],
+                "gen": ["Answer: B"],
+            },
+        ]
+        result = score_generate_result(items, "answer", "gen")
+
+        assert result.metrics["acc"] == 1.0
+        assert result.failed_count == 0
+
+    @pytest.mark.parametrize("aggregation", ["first", "per_sample"])
+    def test_generate_missing_response_key_is_failed(self, aggregation: str) -> None:
+        """A row without the response key is a structural failure, not an
+        empty completed answer."""
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        result = score_generate_result(
+            [{"doc_id": "q", "answer": "A"}],
+            "answer",
+            "gen",
+            max_workers=1,
+            aggregation=aggregation,
+        )
+
+        assert result.sample_count == 1
+        assert result.effective_sample_count == 0
+        assert result.failed_count == 1
+        assert result.observations["acc"] == []
+
+    def test_generate_letter_gold_must_exist_in_choices(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        result = score_generate_result(
+            [{"answer": "J", "choices": ["a", "b"], "gen": ["Answer: J"]}],
+            "answer",
+            "gen",
+        )
+
+        assert result.failed_count == 1
+        assert result.effective_sample_count == 0
+
+    @pytest.mark.parametrize("answer", ["11", "eleventh"])
+    def test_generate_gold_cannot_resolve_past_j(self, answer: str) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        choices = [f"choice {index}" for index in range(1, 11)] + ["eleventh"]
+        result = score_generate_result(
+            [{"answer": answer, "choices": choices, "gen": ["Answer: J"]}],
+            "answer",
+            "gen",
+        )
+
+        assert result.failed_count == 1
+        assert result.effective_sample_count == 0
+
+    def test_per_sample_empty_generation_is_one_completed_wrong_sample(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        result = score_generate_result(
+            [{"doc_id": "q", "answer": "A", "gen": []}],
+            "answer",
+            "gen",
+            max_workers=1,
+            aggregation="per_sample",
+        )
+
+        assert result.sample_count == 1
+        assert result.effective_sample_count == 1
+        assert result.failed_count == 0
+        assert result.observations["acc"] == [0.0]
+
     def test_per_sample_failure_remains_visible_in_structured_counts(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import (
             MCScoreResult,

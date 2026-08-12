@@ -56,16 +56,23 @@ def _check_wrapper_program() -> str:
 
 
 class TestCheckCorrectness:
+    def test_unsafe_execution_disabled_is_failed(self) -> None:
+        result = check_correctness(_add_program(), 3.0, "t0")
+
+        assert result["evaluation_status"] == "failed"
+
     def test_passing_program(self) -> None:
         result = check_correctness(_add_program(), 3.0, "t1", allow_unsafe_code=True)
         assert result["passed"] is True
         assert result["result"] == "passed"
+        assert result["evaluation_status"] == "completed"
 
     def test_failing_program(self) -> None:
         program = "def add(a, b):\n    return a * b\n\nassert add(2, 3) == 5\n"
         result = check_correctness(program, 3.0, "t2", allow_unsafe_code=True)
         assert result["passed"] is False
         assert "AssertionError" in result["result"]
+        assert result["evaluation_status"] == "completed"
 
     def test_syntax_error(self) -> None:
         result = check_correctness(
@@ -86,6 +93,7 @@ class TestCheckCorrectness:
         result = check_correctness(program, 1.0, "t5", allow_unsafe_code=True)
         assert result["passed"] is False
         assert result["result"] == "timed out"
+        assert result["evaluation_status"] == "completed"
 
     def test_long_timeout_still_fires(self) -> None:
         """A long timeout still works correctly for normal code."""

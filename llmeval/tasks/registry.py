@@ -121,6 +121,8 @@ class ScorerResult:
             self.effective_sample_count,
             self.failed_count,
         )
+        if any(type(count) is not int for count in counts):
+            raise TypeError("scorer result counts must be integers")
         if any(count < 0 for count in counts):
             raise ValueError("scorer result counts must be non-negative")
         if self.failed_count > self.sample_count:

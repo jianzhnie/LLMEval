@@ -1,24 +1,6 @@
+"""Validated CLI configuration for inference and task evaluation."""
+
 from __future__ import annotations
-
-"""
-Configuration classes for a large language model evaluation pipeline.
-
-This module defines a set of dataclasses to handle and validate all
-the necessary arguments for a complete evaluation run. The arguments are
-categorized into data, prompt formatting, generation parameters, server,
-and vLLM-specific settings.
-
-The module provides a comprehensive configuration system that supports:
-- Data loading and processing arguments
-- Prompt template configuration
-- Text generation parameters
-- vLLM engine configuration
-- Server/API configuration
-- Specialized inference modes (online, offline, multiple choice)
-
-All configuration classes include validation logic to ensure parameter
-consistency and prevent runtime errors.
-"""
 
 import json
 import os

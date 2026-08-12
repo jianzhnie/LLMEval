@@ -40,7 +40,13 @@ from llmeval.utils.log import init_logger
 
 logger = init_logger("code_execute")
 
+PROCESS_JOIN_MARGIN_SECONDS = 5.0
+#: Bounded rejoin window after ``kill()`` before a hung worker is abandoned.
+PROCESS_KILL_MARGIN = 5.0
+
 __all__ = [
+    "PROCESS_JOIN_MARGIN_SECONDS",
+    "PROCESS_KILL_MARGIN",
     "TimeoutException",
     "check_correctness",
 ]
@@ -484,6 +490,7 @@ def _worker(
         "task_id": task_id,
         "passed": status == "passed",
         "result": status,
+        "evaluation_status": "completed",
         "stderr": stderr,
     }
     with open(result_file, "w", encoding="utf-8") as f:
@@ -576,7 +583,8 @@ def check_correctness(
     Returns
     -------
     dict[str, Any]
-        Keys: ``task_id``, ``passed`` (bool), ``result`` (str), ``stderr`` (str).
+        Keys: ``task_id``, ``passed``, ``result``, ``evaluation_status``, and
+        ``stderr``.
     """
     if not allow_unsafe_code:
         return _fail(task_id, "unsafe execution disabled")
@@ -600,7 +608,7 @@ def check_correctness(
         _cleanup_tmp(tmp_path)
         return _fail(task_id, "failed: could not start worker process")
 
-    p.join(timeout + 5)
+    p.join(timeout + PROCESS_JOIN_MARGIN_SECONDS)
 
     # -- timeout -----------------------------------------------------------------
     # The worker did not finish even after the inner signal-based timeout
@@ -610,7 +618,7 @@ def check_correctness(
     # only the latter counts as an incorrect model observation.
     if p.is_alive():
         p.kill()
-        p.join(5)
+        p.join(PROCESS_KILL_MARGIN)
         _cleanup_tmp(tmp_path)
         return _fail(task_id, "timed out: worker killed")
 
@@ -625,7 +633,11 @@ def check_correctness(
     # worker that simply failed to write its result file.
     if p.exitcode is not None and p.exitcode < 0:
         _cleanup_tmp(tmp_path)
-        return _fail(task_id, f"failed: killed by signal {-p.exitcode}")
+        return _fail(
+            task_id,
+            f"failed: killed by signal {-p.exitcode}",
+            evaluation_status="completed",
+        )
 
     # -- collect result ----------------------------------------------------------
     try:
@@ -639,11 +651,17 @@ def check_correctness(
     return result
 
 
-def _fail(task_id: str, reason: str) -> dict[str, Any]:
-    """Return a uniform failure record."""
+def _fail(
+    task_id: str,
+    reason: str,
+    *,
+    evaluation_status: str = "failed",
+) -> dict[str, Any]:
+    """Return a failed execution result with an explicit binary status."""
     return {
         "task_id": task_id,
         "passed": False,
         "result": reason,
+        "evaluation_status": evaluation_status,
         "stderr": "",
     }

@@ -10,6 +10,7 @@ Architecture matches ``mc_score.py``:
 from __future__ import annotations
 
 import ast
+import math
 import re
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
@@ -18,7 +19,11 @@ from typing import Any
 from pebble import ProcessPool
 from tqdm import tqdm
 
-from llmeval.tasks.code_eval.execute import check_correctness
+from llmeval.tasks.code_eval.execute import (
+    PROCESS_JOIN_MARGIN_SECONDS,
+    PROCESS_KILL_MARGIN,
+    check_correctness,
+)
 from llmeval.tasks.postprocess import (
     FilterRegistry,
     TextFilterPipeline,
@@ -44,6 +49,9 @@ __all__ = [
 
 _DEFAULT_EXEC_TIMEOUT: float = 3.0
 """Default per-item code execution timeout in seconds."""
+
+_MAX_CHECK_PROGRAMS = 2
+_POOL_COORDINATOR_MARGIN_SECONDS = 1.0
 
 # ---------------------------------------------------------------------------
 # Precompiled regular expressions
@@ -416,7 +424,8 @@ def _process_code_item_impl(
         record.update(filter_artifacts)
         return idx, record
     exec_result.setdefault("task_id", task_id)
-    exec_result["evaluation_status"] = _code_record_status(exec_result)
+    if exec_result.get("evaluation_status") not in {"completed", "failed"}:
+        raise ValueError("code execution result is missing a valid evaluation_status")
     exec_result.update(filter_artifacts)
     return idx, exec_result
 
@@ -499,13 +508,20 @@ def _score_items(
         for i, item in enumerate(eval_dataset)
     ]
 
-    # Each pool worker calls ``check_correctness`` once per sample. Linux uses
-    # fork for low startup overhead; macOS uses spawn to avoid unsafe forks.
+    worker_timeout = _code_worker_timeout(timeout, exec_timeout)
+    if worker_timeout > timeout:
+        logger.info(
+            "Expanded code worker timeout from %ss to %ss for exec_timeout=%.1fs",
+            timeout,
+            worker_timeout,
+            exec_timeout,
+        )
+
     with (
         tqdm(total=total, desc="Scoring code", unit="item") as pbar,
         ProcessPool(max_workers=optimal_workers) as pool,
     ):
-        future = pool.map(_process_code_item, iterable, timeout=timeout)
+        future = pool.map(_process_code_item, iterable, timeout=worker_timeout)
         iterator = future.result()
 
         while True:
@@ -531,6 +547,23 @@ def _score_items(
         results_by_index.get(i) or _failure_code_record(item)
         for i, item in enumerate(eval_dataset)
     ]
+
+
+def _code_worker_timeout(configured_timeout: int, exec_timeout: float) -> int:
+    """Cover every nested candidate execution plus coordinator overhead.
+
+    Each ``check_correctness`` call costs at most ``exec_timeout`` (signal
+    timeout) + ``PROCESS_JOIN_MARGIN_SECONDS`` (join) + ``PROCESS_KILL_MARGIN``
+    (kill + rejoin) when the worker hangs, so the per-item budget must use the
+    hung-worker path — not just the signal timeout — for every candidate
+    program the worker may try.
+    """
+    per_check = exec_timeout + PROCESS_JOIN_MARGIN_SECONDS + PROCESS_KILL_MARGIN
+    nested_budget = _MAX_CHECK_PROGRAMS * per_check
+    return max(
+        configured_timeout,
+        math.ceil(nested_budget + _POOL_COORDINATOR_MARGIN_SECONDS),
+    )
 
 
 def _code_identity(item: dict[str, Any], row_index: int) -> str:
@@ -745,44 +778,6 @@ def _code_observations(
             continue
         observations[name] = _pass_at_k_scores(grouped, k)
     return observations
-
-
-def _is_code_infrastructure_failure(record: dict[str, Any]) -> bool:
-    """Distinguish scorer/worker failures from ordinary incorrect programs."""
-    result = str(record.get("result", "")).lower()
-    # Note: "failed: killed by signal N" (e.g. RLIMIT_CPU/OOM killing a worker
-    # running an infinite loop) is deliberately absent — the candidate code
-    # caused it, so it counts as a completed (incorrect) model observation.
-    return result in {
-        "scoring error",
-        "failed: could not start worker process",
-        "failed: segmentationfault",
-        "failed: worker did not produce a result",
-    }
-
-
-def _code_record_status(record: dict[str, Any]) -> str:
-    """Classify execution outcomes for denominator accounting.
-
-    Assertion failures, syntax errors, signal kills, and candidate-level
-    timeouts are completed model observations: the candidate code ran and
-    failed on its own.  Only worker/scorer failures — including a hung
-    worker that had to be killed — are excluded from Pass@k metrics.
-    """
-    explicit_status = record.get("evaluation_status")
-    if explicit_status in {"completed", "failed"}:
-        return str(explicit_status)
-    result = str(record.get("result", "")).lower()
-    # "timed out" comes from the worker's result file: the candidate code
-    # itself exceeded exec_timeout (e.g. an infinite loop) — an incorrect
-    # model observation.  "timed out: worker killed" means the worker hung
-    # past the inner timeout and had to be killed; that is an execution
-    # anomaly, not evidence about the model.
-    if result == "timed out: worker killed":
-        return "failed"
-    if _is_code_infrastructure_failure(record):
-        return "failed"
-    return "completed"
 
 
 def score_code_result(

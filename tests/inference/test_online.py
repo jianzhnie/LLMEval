@@ -1,6 +1,6 @@
 """Tests for llmeval.inference.online.
 
-Focuses on request behavior, thread-safe writing, and independent sample
+Focuses on request behavior, coordinator-owned writing, and independent sample
 processing --
 all testable without a live vLLM server. The shared records/resume helpers are
 covered by tests/test_inference_common.py.
@@ -12,7 +12,6 @@ import importlib.machinery
 import importlib.util
 import json
 import sys
-import threading
 import time
 import types
 from pathlib import Path
@@ -102,8 +101,6 @@ def _make_runner(tmp_path: Path, **overrides: Any) -> InferenceRunner:
         setattr(args, k, v)
     runner.args = args
     runner.system_prompt = None
-    runner._file_lock = threading.Lock()
-    runner._stats_lock = threading.Lock()
     runner._stats = {"processed": 0, "failed": 0}
     return runner
 
@@ -121,25 +118,6 @@ class TestWriteResult:
         data = [json.loads(line) for line in lines]
         assert len(data) == 1
         assert data[0]["gen"] == ["answer"]
-
-    def test_thread_safety(self, tmp_path: Path) -> None:
-        """Multiple concurrent writes should not interleave JSON lines."""
-        import concurrent.futures
-
-        out = tmp_path / "concurrent.jsonl"
-        runner = _make_runner(tmp_path, output_file=str(out))
-
-        items = [{"prompt": f"q{i}", "gen": [f"a{i}"]} for i in range(20)]
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-            list(ex.map(runner._write_result, items))
-
-        lines = out.read_text().strip().split("\n")
-        assert len(lines) == 20
-        for line in lines:
-            data = json.loads(line)
-            assert "prompt" in data
-            assert "gen" in data
 
 
 # ── InferenceRunner.process_item ────────────────────────────────
@@ -197,34 +175,45 @@ class TestProcessItem:
             "answer": "a",
             "sample_index": 0,
         }
-        with pytest.raises(RuntimeError, match="no usable response"):
+        with pytest.raises(RuntimeError, match="no response"):
             runner.process_item(item)
 
         assert not Path(runner.args.output_file).exists()
         assert len(runner.load_data()) == 1
 
-    def test_process_item_keeps_exhausted_empty_response_retryable(
-        self, tmp_path: Path
-    ) -> None:
+    def test_empty_response_is_persisted_as_completed(self, tmp_path: Path) -> None:
         runner = _make_runner(tmp_path)
-        Path(runner.args.input_file).write_text(
-            json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "a"}) + "\n"
-        )
         runner.client = MagicMock()
         runner.client.get_content.return_value = ""
+        item = {
+            "doc_id": "test:0",
+            "prompt": "q",
+            "answer": "a",
+            "sample_index": 0,
+        }
 
-        with pytest.raises(RuntimeError, match="no usable response"):
-            runner.process_item(
-                {
-                    "doc_id": "test:0",
-                    "prompt": "q",
-                    "answer": "a",
-                    "sample_index": 0,
-                }
+        runner._process_concurrently([item])
+
+        assert json.loads(Path(runner.args.output_file).read_text())["gen"] == ""
+        assert runner._stats == {"processed": 1, "failed": 0}
+
+    def test_persistence_failure_aborts_the_run(self, tmp_path: Path) -> None:
+        runner = _make_runner(tmp_path)
+        runner.client = MagicMock()
+        runner.client.get_content.return_value = "ok"
+        runner._write_result = MagicMock(side_effect=OSError("disk full"))
+
+        with pytest.raises(OSError, match="disk full"):
+            runner._process_concurrently(
+                [
+                    {
+                        "doc_id": "test:0",
+                        "prompt": "q",
+                        "answer": "a",
+                        "sample_index": 0,
+                    }
+                ]
             )
-
-        assert not Path(runner.args.output_file).exists()
-        assert len(runner.load_data()) == 1
 
 
 # ── InferenceClient request behavior ──────────────────────────────
@@ -310,16 +299,37 @@ class TestGetContent:
 
         client = _make_client()
         client.client.chat.completions.create.return_value = _fake_completion([None])
-        with pytest.raises(ClientError, match="response content is empty"):
+        with pytest.raises(ClientError, match="response content is missing"):
             client.get_content("q", None, "m", 8, 0.0, 1.0)
 
-    def test_empty_content_retried_then_succeeds(
+    def test_null_content_retried_then_succeeds(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(time, "sleep", lambda s: None)
         client = _make_client(max_retries=2)
         client.client.chat.completions.create.side_effect = [
             _fake_completion([None]),
+            _fake_completion(["ok"]),
+        ]
+
+        assert client.get_content("q", None, "m", 8, 0.0, 1.0) == "ok"
+        assert client.client.chat.completions.create.call_count == 2
+
+    def test_empty_string_content_is_returned(self) -> None:
+        client = _make_client(max_retries=2)
+        client.client.chat.completions.create.return_value = _fake_completion([""])
+
+        assert client.get_content("q", None, "m", 8, 0.0, 1.0) == ""
+        assert client.client.chat.completions.create.call_count == 1
+
+    def test_whitespace_content_is_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Whitespace-only content is a decoding glitch and must be retried."""
+        monkeypatch.setattr(time, "sleep", lambda s: None)
+        client = _make_client(max_retries=2)
+        client.client.chat.completions.create.side_effect = [
+            _fake_completion(["   "]),
             _fake_completion(["ok"]),
         ]
 

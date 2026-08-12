@@ -28,9 +28,8 @@ if "pebble" not in sys.modules and not importlib.util.find_spec("pebble"):
 
 from llmeval.tasks.code_eval.code_score import (
     CodeScoreResult,
-    _code_record_status,
+    _code_worker_timeout,
     _failure_code_record,
-    _is_code_infrastructure_failure,
     _process_code_item,
     estimate_pass_at_k,
     extract_code,
@@ -609,16 +608,6 @@ class TestScoreCode:
         assert result.effective_sample_count == 1
         assert result.metrics["pass@1"] == 0.0
 
-    def test_record_status_classification(self) -> None:
-        """Signal kills are model failures; missing results are infra failures."""
-        killed = {"result": "failed: killed by signal 9"}
-        assert _code_record_status(killed) == "completed"
-        assert not _is_code_infrastructure_failure(killed)
-
-        missing = {"result": "failed: worker did not produce a result"}
-        assert _code_record_status(missing) == "failed"
-        assert _is_code_infrastructure_failure(missing)
-
     def test_failure_record(self) -> None:
         """_failure_code_record marks every item as failed."""
         rec = _failure_code_record({"task_id": "HumanEval/99"})
@@ -863,9 +852,11 @@ class TestCodeRepeatedRows:
 
 
 class TestTimeoutClassification:
-    def test_status_strings(self) -> None:
-        assert _code_record_status({"result": "timed out"}) == "completed"
-        assert _code_record_status({"result": "timed out: worker killed"}) == "failed"
+    def test_pool_timeout_covers_nested_execution_budget(self) -> None:
+        # 2 candidates × (exec_timeout + join margin + kill margin) + overhead
+        assert _code_worker_timeout(20, 3.0) == 27  # 2*(3+5+5)+1 = 27
+        assert _code_worker_timeout(20, 30.0) == 81  # 2*(30+5+5)+1 = 81
+        assert _code_worker_timeout(20, 0.5) == 22  # 2*(0.5+5+5)+1 = 22
 
     def test_candidate_infinite_loop_counts_as_wrong(self, tmp_path: Path) -> None:
         """A candidate that dead-loops must stay in the Pass@k denominator."""

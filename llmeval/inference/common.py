@@ -42,24 +42,35 @@ def reject_nonfinite_json(value: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def append_jsonl(
-    path: str | Path, records: Sequence[dict[str, Any]], lock: Any
-) -> None:
-    """Append JSON objects under a caller-provided synchronization lock."""
+def append_jsonl(path: str | Path, records: Sequence[dict[str, Any]]) -> None:
+    """Append JSON objects to a newline-terminated result file.
+
+    An existing file whose final record lacks a trailing newline (e.g. a
+    crash before flush, which ``load_resume_state`` still parses) is repaired
+    by adding the newline before appending, matching resume semantics.
+    """
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock:
-        try:
-            with output_path.open("a", encoding="utf-8") as handle:
-                for record in records:
-                    handle.write(
-                        json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
-                    )
-                handle.flush()
-        except Exception as exc:
-            raise OSError(
-                f"Failed to append JSONL results to {output_path}: {exc}"
-            ) from exc
+    if not records:
+        return
+    try:
+        payload = "".join(
+            json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
+            for record in records
+        )
+        if output_path.exists() and output_path.stat().st_size:
+            with output_path.open("r+b") as handle:
+                handle.seek(-1, 2)
+                if handle.read(1) != b"\n":
+                    handle.seek(0, 2)
+                    handle.write(b"\n")
+        with output_path.open("a", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+    except Exception as exc:
+        raise OSError(
+            f"Failed to append JSONL results to {output_path}: {exc}"
+        ) from exc
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -84,26 +95,65 @@ def _iter_resume_records(
     *,
     repair_truncated_last_line: bool = False,
 ) -> Iterator[tuple[int, dict[str, Any]]]:
-    """Yield strict resume rows, optionally ignoring one truncated final row."""
+    """Yield strict resume rows, optionally removing one truncated final row.
+
+    When ``repair_truncated_last_line`` is requested, the file is opened
+    read-write so truncation and newline repair can write back; if the file
+    is not writable (read-only mount, permissions), the iterator degrades to
+    read-only mode and the repair is skipped — a readable intact file must
+    still resume normally.
+    """
     resume_path = Path(path)
-    with resume_path.open(encoding="utf-8") as handle:
+    mode = "r+b" if repair_truncated_last_line else "rb"
+    can_repair = repair_truncated_last_line
+    try:
+        handle = resume_path.open(mode)
+    except (OSError, PermissionError) as exc:
+        if not repair_truncated_last_line:
+            raise
+        logger.warning(
+            "Cannot open resume file %s read-write for repair (%s); "
+            "continuing read-only — truncated-final-line repair will be skipped",
+            resume_path,
+            exc,
+        )
+        handle = resume_path.open("rb")
+        can_repair = False
+    with handle:
         line_num = 0
-        line = handle.readline()
-        while line:
+        line_start = handle.tell()
+        raw_line = handle.readline()
+        while raw_line:
             line_num += 1
             next_line = handle.readline()
+            try:
+                line = raw_line.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                is_truncated_final_line = (
+                    can_repair and not next_line and not raw_line.endswith(b"\n")
+                )
+                if is_truncated_final_line:
+                    handle.truncate(line_start)
+                    logger.warning(
+                        "Removed truncated final resume line in %s at line %d",
+                        resume_path,
+                        line_num,
+                    )
+                    return
+                raise ValueError(
+                    f"Invalid UTF-8 in resume file {resume_path} at line {line_num}"
+                ) from exc
             if line.strip():
                 try:
                     item = json.loads(line, parse_constant=reject_nonfinite_json)
                 except json.JSONDecodeError as exc:
                     is_truncated_final_line = (
-                        repair_truncated_last_line
-                        and not next_line
-                        and not line.endswith(("\n", "\r"))
+                        can_repair and not next_line and not raw_line.endswith(b"\n")
                     )
                     if is_truncated_final_line:
+                        handle.truncate(line_start)
                         logger.warning(
-                            "Ignoring truncated final resume line in %s at line %d",
+                            "Removed truncated final resume line in %s at line %d",
                             resume_path,
                             line_num,
                         )
@@ -122,8 +172,20 @@ def _iter_resume_records(
                         f"Resume file {resume_path} line {line_num} must contain an "
                         f"object, got {type(item).__name__}"
                     )
+                if can_repair and not next_line and not raw_line.endswith(b"\n"):
+                    handle.write(b"\n")
+                    handle.flush()
+                    logger.warning(
+                        "Added missing final newline to resume file %s at line %d",
+                        resume_path,
+                        line_num,
+                    )
                 yield line_num, item
-            line = next_line
+            elif can_repair and not next_line and not raw_line.endswith(b"\n"):
+                handle.write(b"\n")
+                handle.flush()
+            line_start = handle.tell() - len(next_line)
+            raw_line = next_line
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +255,19 @@ def load_resume_state(
             if item.get("error"):
                 continue
 
+            if (
+                expected_scoring_mode is not None
+                and item.get("scoring_mode") != expected_scoring_mode
+            ):
+                raise ValueError(
+                    f"Resume file {output_path} line {line_num} has "
+                    f"scoring_mode={item.get('scoring_mode')!r}, expected "
+                    f"{expected_scoring_mode!r}; this row lacks a matching "
+                    "scoring_mode (e.g. output written by an older version). "
+                    "Use a new output file or migrate the row by adding "
+                    f"scoring_mode={expected_scoring_mode!r}."
+                )
+
             logprobs = item.get("logprobs")
             has_valid_logprobs = (
                 isinstance(logprobs, list)
@@ -220,28 +295,25 @@ def load_resume_state(
                 if response is None:
                     continue
                 if isinstance(response, list):
-                    if len(response) != 1:
+                    # An explicit empty list represents one empty model answer
+                    # (same convention as resolve_single_generation) and is a
+                    # completed sample; a multi-generation list is a legacy
+                    # grouped row that must be migrated.
+                    if len(response) == 0:
+                        response = ""
+                    elif len(response) != 1:
                         raise ValueError(
                             f"Resume file {output_path} line {line_num} must contain "
                             "exactly one generation; migrate grouped output to one "
                             "row per sample"
                         )
-                    response = response[0]
-                if not isinstance(response, str) or not response.strip():
+                    else:
+                        response = response[0]
+                if not isinstance(response, str):
                     raise ValueError(
-                        f"Resume file {output_path} line {line_num} has an empty or "
-                        f"invalid {response_key!r} result"
+                        f"Resume file {output_path} line {line_num} has an invalid "
+                        f"{response_key!r} result"
                     )
-
-            if (
-                expected_scoring_mode is not None
-                and item.get("scoring_mode") != expected_scoring_mode
-            ):
-                raise ValueError(
-                    f"Resume file {output_path} line {line_num} has "
-                    f"scoring_mode={item.get('scoring_mode')!r}, expected "
-                    f"{expected_scoring_mode!r}; use a new output file"
-                )
 
             document_id = item.get("doc_id")
             if document_id is None or not str(document_id).strip():

@@ -65,6 +65,17 @@ def test_disabled_bootstrap_omits_uncertainty(n_resamples: int) -> None:
     assert metric.ci_high is None
 
 
+@pytest.mark.parametrize("count", [1.5, True])
+def test_scorer_result_rejects_non_integer_counts(count: object) -> None:
+    with pytest.raises(TypeError, match="counts must be integers"):
+        ScorerResult(
+            metrics={"accuracy": 0.0},
+            observations={"accuracy": []},
+            sample_count=count,  # type: ignore[arg-type]
+            effective_sample_count=count,  # type: ignore[arg-type]
+        )
+
+
 def test_registry_reports_registered_families() -> None:
     task = MathTask(
         lambda **_: ScorerResult(

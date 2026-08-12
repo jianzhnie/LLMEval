@@ -6,7 +6,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from io import TextIOBase
@@ -19,7 +19,6 @@ __all__ = [
     "TextFilter",
     "TextFilterPipeline",
     "atomic_write_json",
-    "atomic_write_jsonl",
     "normalize_single_generation_samples",
     "resolve_max_workers",
     "resolve_single_generation",
@@ -116,21 +115,18 @@ def _coerce_text(value: Any) -> str:
 
 
 def strip_reasoning_wrappers(text: str) -> str:
-    """Remove common reasoning wrappers while preserving raw text fallback."""
+    """Return the model's final tagged answer or post-reasoning text."""
     if not text:
         return ""
 
-    answer_match = _ANSWER_TAG_RE.search(text)
-    if answer_match:
+    for answer_match in reversed(list(_ANSWER_TAG_RE.finditer(text))):
         extracted = answer_match.group(1).strip()
         if extracted:
             return extracted
-        # Empty <answer></answer> tags carry no signal — fall through to the
-        # think/raw-text fallbacks so a real answer outside the tag is kept.
 
-    think_match = _THINK_END_RE.search(text)
-    if think_match:
-        tail = text[think_match.end() :].strip()
+    think_matches = list(_THINK_END_RE.finditer(text))
+    if think_matches:
+        tail = text[think_matches[-1].end() :].strip()
         if tail:
             return tail
 
@@ -144,7 +140,7 @@ DEFAULT_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers)
 def resolve_single_generation(
     item: dict[str, Any], response_key: str, *, problem_id: str
 ) -> str | None:
-    """Return one generation, using ``None`` for a failed empty response."""
+    """Return one generation, using ``None`` only for a missing response."""
     value = item.get(response_key)
     if isinstance(value, list):
         if len(value) > 1:
@@ -152,7 +148,8 @@ def resolve_single_generation(
                 f"Invalid {response_key!r} for problem {problem_id!r}: expected "
                 "one generation per row"
             )
-        value = value[0] if value else None
+        # An explicit empty list represents one empty model answer.
+        value = value[0] if value else ""
     if value is not None and not isinstance(value, str):
         raise ValueError(
             f"Invalid {response_key!r} for problem {problem_id!r}: expected a "
@@ -230,7 +227,8 @@ def normalize_single_generation_samples(
                     )
         response = resolve_single_generation(item, response_key, problem_id=problem_id)
         record = dict(item)
-        record[response_key] = [response] if response is not None else []
+        if response is not None:
+            record[response_key] = [response]
         positions_by_problem.setdefault(problem_id, []).append(len(normalized))
         normalized.append(record)
 
@@ -287,10 +285,3 @@ def atomic_write_json(
         content += "\n"
     with _atomic_text_writer(path) as handle:
         handle.write(content)
-
-
-def atomic_write_jsonl(path: str | Path, records: Iterable[dict[str, Any]]) -> None:
-    """Stream objects to an atomically replaced JSONL file."""
-    with _atomic_text_writer(path) as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")

@@ -91,6 +91,38 @@ def _normalize_generate_gold(value: Any) -> str:
     return "" if value is None else str(value).strip().upper()
 
 
+def _resolve_generate_gold(gold: str, item: dict[str, Any]) -> str | None:
+    """Resolve a generate-mode gold label to a supported answer letter.
+
+    Accepts:
+    - a single letter ``A``-``J``,
+    - a 1-based option index (``"1"`` → first choice), when ``choices`` is
+      present,
+    - the exact text of one of the ``choices``.
+
+    Returns ``None`` when the label cannot be resolved to a supported choice
+    (data error — the row is marked failed rather than scored wrong).
+    """
+    choices = item.get("choices")
+    if choices is None:
+        return gold if len(gold) == 1 and "A" <= gold <= "J" else None
+    if not isinstance(choices, list) or not choices:
+        return None
+    supported_choice_count = min(len(choices), 10)
+    if len(gold) == 1 and "A" <= gold <= "J":
+        index = ord(gold) - ord("A")
+        return gold if index < supported_choice_count else None
+    if gold.isdigit():
+        index = int(gold) - 1
+        if 0 <= index < supported_choice_count:
+            return chr(ord("A") + index)
+        return None
+    for index, choice in enumerate(choices[:supported_choice_count]):
+        if str(choice).strip().upper() == gold:
+            return chr(ord("A") + index)
+    return None
+
+
 def _mc_problem_identity(item: dict[str, Any], row_index: int) -> str:
     """Return the stable question identity, falling back to the row position."""
     document_id = item.get("doc_id")
@@ -240,8 +272,13 @@ def merge_generate_records(
             [sample for sample, _ in samples], problem_id=problem_id
         )
         ordered_samples = [samples[index] for index in sample_order]
+        sample_errors = [
+            bool(sample.get("error"))
+            or response_key not in sample
+            or sample.get(response_key) is None
+            for sample, _ in ordered_samples
+        ]
         item[response_key] = [generation for _, generation in ordered_samples]
-        sample_errors = [sample.get("error") for sample, _ in ordered_samples]
         item.pop("error", None)
         if any(sample_errors):
             # Internal scorer metadata. It is consumed by score_generate_item
@@ -434,7 +471,9 @@ def _error_record(
         # Keep the generation count visible so per_sample weighting does not
         # drop the item from every count when its worker was lost.
         response = item.get(response_key)
-        record["sample_total"] = len(response) if isinstance(response, list) else 1
+        record["sample_total"] = (
+            max(len(response), 1) if isinstance(response, list) else 1
+        )
     return record
 
 
@@ -720,13 +759,22 @@ def score_generate_item(
     if aggregation not in _MC_AGGREGATIONS:
         raise ValueError(f"Unsupported MC aggregation: {aggregation}")
 
-    gold = _normalize_generate_gold(item.get(label_key))
-    generations: Any = item.get(response_key, [])
+    gold = _resolve_generate_gold(_normalize_generate_gold(item.get(label_key)), item)
+    # A missing response key is a structural schema failure, not a completed
+    # empty answer: only an explicit empty list/string is one empty answer.
+    if response_key not in item:
+        response_valid = False
+        generations: Any = []
+    else:
+        generations: Any = item.get(response_key)
+        response_valid = isinstance(generations, str | list)
 
     if isinstance(generations, str):
         generation_texts = [generations]
     elif isinstance(generations, list):
-        generation_texts = [str(generation) for generation in generations]
+        generation_texts = (
+            [str(generation) for generation in generations] if generations else [""]
+        )
     else:
         generation_texts = []
 
@@ -737,7 +785,12 @@ def score_generate_item(
         sample_errors = [bool(item.get("error"))] * max(len(generation_texts), 1)
     relevant_errors = sample_errors[:1] if aggregation == "first" else sample_errors
 
-    status = "failed" if not gold or any(relevant_errors) else "completed"
+    status = (
+        "completed"
+        if gold is not None and response_valid and not any(relevant_errors)
+        else "failed"
+    )
+    gold = gold or ""
 
     filtered = [
         MC_GENERATION_PIPELINE.apply_with_trace(text) for text in generation_texts
@@ -780,7 +833,9 @@ def score_generate_item(
         "filter_trace": [trace for _, trace in filtered],
         "evaluation_status": status,
         "sample_correct": sample_correct,
-        "sample_total": len(predictions),
+        "sample_total": max(len(predictions), 1)
+        if status == "failed"
+        else len(predictions),
         "sample_correct_count": sum(sample_correct),
         "sample_correct_norm_count": sum(sample_correct),
         "sample_correct_bytes_count": sum(sample_correct),

@@ -6,7 +6,6 @@ import importlib.machinery
 import importlib.util
 import json
 import sys
-import threading
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,7 +79,6 @@ def _args(tmp_path: Path, **overrides: object) -> SimpleNamespace:
 def _runner(tmp_path: Path, **overrides: object) -> OfflineInferenceRunner:
     runner = OfflineInferenceRunner.__new__(OfflineInferenceRunner)
     runner.args = _args(tmp_path, **overrides)
-    runner._file_lock = threading.Lock()
     runner._processed_count = 0
     runner._failed_count = 0
     runner.llm = None
@@ -190,6 +188,14 @@ class TestOfflineInferenceRunner:
             for line in Path(runner.args.output_file).read_text().splitlines()
         ]
         assert rows == [{"prompt": "q", "answer": "a", "gen": "answer text"}]
+
+    def test_write_response_results_preserves_empty_text(self, tmp_path: Path) -> None:
+        runner = _runner(tmp_path)
+
+        runner._write_response_results([{"prompt": "q", "answer": "a"}], [""])
+
+        assert json.loads(Path(runner.args.output_file).read_text())["gen"] == ""
+        assert runner._processed_count == 1
 
     def test_setup_vllm_engine_passes_configured_args(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

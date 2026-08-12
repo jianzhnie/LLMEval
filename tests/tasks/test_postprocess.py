@@ -17,6 +17,16 @@ def test_strip_reasoning_wrappers_prefers_answer_tag() -> None:
     assert strip_reasoning_wrappers(text) == "42"
 
 
+def test_strip_reasoning_wrappers_uses_final_answer_tag() -> None:
+    text = "<answer>A</answer> correction <answer>B</answer>"
+    assert strip_reasoning_wrappers(text) == "B"
+
+
+def test_strip_reasoning_wrappers_uses_final_think_block() -> None:
+    text = "<think>x</think> middle <think>y</think> FINAL"
+    assert strip_reasoning_wrappers(text) == "FINAL"
+
+
 def test_normalize_repeated_samples_preserves_identical_responses() -> None:
     rows = [
         {"doc_id": "d0", "answer": "1", "gen": ["a"]},
@@ -31,6 +41,16 @@ def test_normalize_repeated_samples_preserves_identical_responses() -> None:
         record_kind="document",
     )
     assert [row["gen"] for row in normalized] == [["a"], ["b"], ["a"]]
+
+
+def test_normalize_empty_generation_as_one_empty_sample() -> None:
+    normalized = normalize_single_generation_samples(
+        [{"doc_id": "d0", "gen": []}],
+        "gen",
+        problem_identity=lambda item, _index: str(item["doc_id"]),
+    )
+
+    assert normalized[0]["gen"] == [""]
 
 
 def test_normalize_repeated_samples_rejects_conflicts() -> None:

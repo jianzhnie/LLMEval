@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import logging
 import sys
-import threading
 import time
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -56,7 +55,6 @@ class OfflineInferenceRunner:
 
     Attributes:
         args: Configuration arguments for the inference process
-        _file_lock: Thread lock for safe file writing operations
         llm: vLLM engine instance (initialized during setup)
         system_prompt: System prompt text (resolved from system_prompt_type)
     """
@@ -71,7 +69,6 @@ class OfflineInferenceRunner:
             ValueError: If arguments are invalid or missing required fields.
         """
         self.args: OfflineInferArguments = args
-        self._file_lock: threading.Lock = threading.Lock()
         self._processed_count = 0
         self._failed_count = 0
         self.llm: LLM | None = None
@@ -165,15 +162,17 @@ class OfflineInferenceRunner:
         return messages
 
     def _write_response_results(
-        self, original_items: Sequence[dict[str, Any]], responses: Sequence[str]
+        self,
+        original_items: Sequence[dict[str, Any]],
+        responses: Sequence[str | None],
     ) -> None:
-        """Persist non-empty generated responses."""
+        """Persist structurally valid responses, including empty model text."""
         if len(original_items) != len(responses):
             raise ValueError("original_items and responses must have equal length")
         valid_pairs = [
             (item, response)
             for item, response in zip(original_items, responses, strict=True)
-            if response and response.strip()
+            if isinstance(response, str)
         ]
         failed_count = len(original_items) - len(valid_pairs)
         if failed_count:
@@ -189,23 +188,24 @@ class OfflineInferenceRunner:
             result.pop("error", None)
             result[self.args.response_key] = model_response
             results.append(result)
-        append_jsonl(self.args.output_file, results, self._file_lock)
+        append_jsonl(self.args.output_file, results)
         self._processed_count += len(results)
 
-    def _extract_model_response(self, output: RequestOutput) -> str:
-        """Extract the first vLLM response text, or return an empty string."""
+    def _extract_model_response(self, output: RequestOutput) -> str | None:
+        """Extract the first vLLM response text, or return ``None`` if absent."""
         if output is None:
-            return ""
+            return None
 
         try:
             # vLLM chat returns RequestOutput objects with `.outputs`
             # and each contains `.text`.
             if output.outputs and len(output.outputs) > 0:
-                return output.outputs[0].text
-            return ""
+                text = output.outputs[0].text
+                return text if isinstance(text, str) else None
+            return None
         except (AttributeError, IndexError) as e:
             logger.warning(f"Failed to extract response from output: {e}")
-            return ""
+            return None
 
     def load_data(self) -> list[dict[str, Any]]:
         """Load input and expand only requests not completed by resume."""
@@ -365,15 +365,24 @@ class OfflineInferenceRunner:
         with tqdm(total=total_batches, desc="Processing batches", unit="batch") as pbar:
             for start in range(0, len(eval_dataset), self.args.batch_size):
                 batch = eval_dataset[start : start + self.args.batch_size]
-                failed_before = self._failed_count
+                processed_before = self._processed_count
                 try:
                     self.process_and_write_batch(batch)
                 except Exception as exc:
                     if self.args.fail_fast:
                         raise
-                    self._failed_count = failed_before + len(batch)
+                    # process_and_write_batch counts per-item failures itself;
+                    # count only the rows that were neither persisted nor
+                    # counted, instead of clobbering the whole batch.
+                    unprocessed = len(batch) - (
+                        self._processed_count - processed_before
+                    )
+                    if unprocessed > 0:
+                        self._failed_count += unprocessed
                     logger.warning(
-                        "Inference failed for %d sample(s): %s", len(batch), exc
+                        "Inference failed for %d sample(s): %s",
+                        len(batch),
+                        exc,
                     )
                 finally:
                     pbar.update(1)

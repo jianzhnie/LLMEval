@@ -10,7 +10,6 @@ import importlib.util
 import json
 import sys
 import tempfile
-import threading
 import time
 import types
 from pathlib import Path
@@ -143,8 +142,6 @@ def _make_mc_runner(
     runner.client = None
     runner.system_prompt = None
     runner._few_shot_fmt = None
-    runner._file_lock = threading.Lock()
-    runner._stats_lock = threading.Lock()
     runner._stats = {
         "processed": 0,
         "failed": 0,
@@ -519,6 +516,7 @@ class TestProcessGenerateItem:
         )
 
         assert result["gen"] == "ans"
+        assert result["scoring_mode"] == "generate"
         assert "error" not in result
 
     def test_shared_generation_options_are_sent(self, tmp_path: Path) -> None:
@@ -550,7 +548,7 @@ class TestProcessGenerateItem:
         client = MagicMock()
         client.chat.completions.create.return_value.choices = [_generation_choice(None)]
 
-        with pytest.raises(RuntimeError, match="no usable text"):
+        with pytest.raises(RuntimeError, match="Generate request failed"):
             runner.process_generate_item(
                 {
                     "doc_id": "test:0",
@@ -562,7 +560,7 @@ class TestProcessGenerateItem:
                 [],
             )
 
-    def test_empty_content_is_retried(
+    def test_null_content_is_retried(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(time, "sleep", lambda _seconds: None)
@@ -587,6 +585,28 @@ class TestProcessGenerateItem:
         assert result["gen"] == "answer"
         assert client.chat.completions.create.call_count == 2
 
+    def test_empty_string_content_is_preserved(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate", max_retries=1)
+        client = MagicMock()
+        client.chat.completions.create.return_value = MagicMock(
+            choices=[_generation_choice("")]
+        )
+
+        result = runner.process_generate_item(
+            {
+                "doc_id": "test:0",
+                "sample_index": 0,
+                "prompt": "q",
+                "answer": "A",
+            },
+            client,
+            [],
+        )
+
+        assert result["gen"] == ""
+        assert result["scoring_mode"] == "generate"
+        assert client.chat.completions.create.call_count == 1
+
     def test_failed_generation_is_not_returned(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path, mode="generate")
         client = MagicMock()
@@ -594,7 +614,7 @@ class TestProcessGenerateItem:
             "This model's maximum context length is 8192", 400
         )
 
-        with pytest.raises(RuntimeError, match="no usable text"):
+        with pytest.raises(RuntimeError, match="no response"):
             runner.process_generate_item(
                 {
                     "doc_id": "test:0",
@@ -663,6 +683,54 @@ class TestMCStableResume:
         with pytest.raises(ValueError, match="expected 'continuation'"):
             runner.load_data()
 
+    def test_generate_resume_rejects_loglikelihood_output(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate")
+        Path(runner.config.input_file).write_text(
+            json.dumps({"doc_id": "test:0", "prompt": "q", "answer": "A"}) + "\n"
+        )
+        Path(runner.config.output_file).write_text(
+            json.dumps(
+                {
+                    "doc_id": "test:0",
+                    "prompt": "q",
+                    "logprobs": [-0.1, -1.0],
+                    "scoring_mode": "first_token",
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="expected 'generate'"):
+            runner.load_data()
+
+    def test_loglikelihood_resume_rejects_generate_output(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        Path(runner.config.input_file).write_text(
+            json.dumps(
+                {
+                    "doc_id": "test:0",
+                    "prompt": "q",
+                    "choices": ["a", "b"],
+                    "gold": 0,
+                }
+            )
+            + "\n"
+        )
+        Path(runner.config.output_file).write_text(
+            json.dumps(
+                {
+                    "doc_id": "test:0",
+                    "prompt": "q",
+                    "gen": "A",
+                    "scoring_mode": "generate",
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="expected 'first_token'"):
+            runner.load_data()
+
     def test_generate_resume_requests_only_missing_samples(
         self, tmp_path: Path
     ) -> None:
@@ -684,6 +752,7 @@ class TestMCStableResume:
                         "prompt": "q",
                         "answer": "A",
                         "gen": [text],
+                        "scoring_mode": "generate",
                     }
                 )
                 + "\n"
@@ -712,6 +781,7 @@ class TestMCStableResume:
                     "doc_id": stable_id,
                     "prompt": "first",
                     "gen": ["A"],
+                    "scoring_mode": "generate",
                 }
             )
             + "\n"
@@ -720,6 +790,7 @@ class TestMCStableResume:
                     "doc_id": "test:1",
                     "prompt": "second",
                     "gen": ["B"],
+                    "scoring_mode": "generate",
                 }
             )
             + "\n"
@@ -763,6 +834,7 @@ class TestMCStableResume:
                         "prompt": "q",
                         "answer": "A",
                         "gen": [text],
+                        "scoring_mode": "generate",
                     }
                 )
                 + "\n"

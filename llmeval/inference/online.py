@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -127,8 +126,8 @@ class InferenceClient:
     ) -> str | None:
         """Generate one response.
 
-        Empty content is treated as a malformed response and retried. ``None``
-        is reserved for context-length rejection.
+        A string response is returned verbatim, including an empty string.
+        ``None`` is reserved for context-length rejection.
         """
         call_args = self._build_call_args(
             query,
@@ -220,8 +219,13 @@ class InferenceClient:
                 ) from exc
             if content is not None and not isinstance(content, str):
                 raise MalformedResponseError("response content is not a string")
-            if content is None or not content.strip():
-                raise MalformedResponseError("response content is empty")
+            if content is None:
+                raise MalformedResponseError("response content is missing")
+            if content and not content.strip():
+                # Whitespace-only content is a decoding glitch, not an empty
+                # answer — retry it. A literal empty string is a legitimate
+                # (empty) answer and is persisted as-is.
+                raise MalformedResponseError("response content is whitespace-only")
             return completion
 
         return call_with_retry(do_request, self.max_retries)
@@ -251,10 +255,7 @@ class InferenceRunner:
         # System prompt is resolved and validated by PromptArguments at parse time.
         self.system_prompt: str | None = args.system_prompt
 
-        # Initialize thread safety and monitoring
-        self._file_lock: threading.Lock = threading.Lock()
         self._stats: dict[str, int] = {"processed": 0, "failed": 0}
-        self._stats_lock: threading.Lock = threading.Lock()  # Dedicated lock for stats
 
     def load_data(self) -> list[dict[str, Any]]:
         """Load input and expand only requests not completed by resume."""
@@ -295,8 +296,8 @@ class InferenceRunner:
         return prepared_data
 
     def _write_result(self, result: dict[str, Any]) -> None:
-        """Append one result under the runner's write lock."""
-        append_jsonl(self.args.output_file, [result], self._file_lock)
+        """Append one result from the coordinator thread."""
+        append_jsonl(self.args.output_file, [result])
 
     def _extract_query(self, item: Any) -> str:
         """Return a usable query or reject the sample."""
@@ -316,7 +317,7 @@ class InferenceRunner:
         return result
 
     def process_item(self, item: dict[str, Any]) -> dict[str, Any]:
-        """Generate, persist, and account for one expanded request."""
+        """Generate one result without mutating shared runner state."""
         query = self._extract_query(item)
 
         sample_index = item.get("sample_index")
@@ -335,38 +336,39 @@ class InferenceRunner:
             ),
         )
 
-        if response is None or not response.strip():
-            raise RuntimeError("Inference produced no usable response")
-
-        result = self._build_result(item, response)
-        self._write_result(result)
-        with self._stats_lock:
-            self._stats["processed"] += 1
-
-        return result
+        if response is None:
+            raise RuntimeError("Inference produced no response")
+        return self._build_result(item, response)
 
     def _process_concurrently(self, expanded_data: list[dict[str, Any]]) -> None:
-        """Process requests, persisting only successful results."""
+        """Process requests and persist successful results in the coordinator."""
 
-        with concurrent.futures.ThreadPoolExecutor(
+        executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=self.args.max_workers, thread_name_prefix="inference_worker"
-        ) as executor:
-            futures = [
-                executor.submit(self.process_item, item) for item in expanded_data
-            ]
-
+        )
+        futures = [executor.submit(self.process_item, item) for item in expanded_data]
+        try:
             with tqdm(
                 total=len(expanded_data), desc="Processing samples", unit="sample"
             ) as pbar:
                 for future in concurrent.futures.as_completed(futures):
                     try:
-                        future.result()
+                        result = future.result()
                     except Exception as e:
                         logger.warning("Inference sample failed: %s", e)
-                        with self._stats_lock:
-                            self._stats["failed"] += 1
+                        self._stats["failed"] += 1
+                    else:
+                        # Persistence failures are run-level failures, not model
+                        # inference failures, and must stop the run immediately.
+                        self._write_result(result)
+                        self._stats["processed"] += 1
                     finally:
                         pbar.update(1)
+        finally:
+            # Don't wait for in-flight API requests when aborting: their
+            # results would be discarded anyway. cancel_futures stops pending
+            # submissions; running futures finish on their own threads.
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def run(self) -> None:
         """Load, resume, execute, and report online inference."""

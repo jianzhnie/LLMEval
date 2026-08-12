@@ -87,18 +87,3 @@ def init_logger(
         logger.addHandler(file_handler)
 
     return logger
-
-
-def set_log_level(logger: logging.Logger, level: int | str) -> None:
-    """Set the logging level for a logger and all its handlers.
-
-    Args:
-        logger (logging.Logger): The logger to configure.
-        level (Union[int, str]): The logging level.
-    """
-    if isinstance(level, str):
-        level = getattr(logging, level.upper(), logging.INFO)
-
-    logger.setLevel(level)
-    for handler in logger.handlers:
-        handler.setLevel(level)

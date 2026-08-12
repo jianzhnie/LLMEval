@@ -24,7 +24,6 @@ import math
 import os
 import random
 import sys
-import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -462,11 +461,11 @@ class MCLoglikelihoodClient:
 
 
 class MCRunner:
-    """Orchestrates MC inference with resume, threading, and stats.
+    """Orchestrates MC inference with resume, concurrency, and stats.
 
     Mirrors InferenceRunner in online.py: same pipeline stages
     (load → resume filter → concurrent processing → report), the same
-    thread-safety primitives, and success-only result persistence.
+    and success-only result persistence.
     """
 
     def __init__(self, config: MCInferArguments) -> None:
@@ -510,14 +509,11 @@ class MCRunner:
             )
             self._few_shot_fmt.load()
 
-        # Initialize thread safety and monitoring
-        self._file_lock: threading.Lock = threading.Lock()
         self._stats: dict[str, int] = {
             "processed": 0,
             "failed": 0,
             "correct": 0,
         }
-        self._stats_lock: threading.Lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Resume
@@ -547,7 +543,7 @@ class MCRunner:
             expected_scoring_mode=(
                 self.config.loglikelihood_mode
                 if self.config.mode == "loglikelihood"
-                else None
+                else "generate"
             ),
         )
         target_samples = self.config.n_samples if self.config.mode == "generate" else 1
@@ -605,11 +601,11 @@ class MCRunner:
                 process_generate_item binding); returns a result dict,
                 or raises on failure
         """
-        with concurrent.futures.ThreadPoolExecutor(
+        executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=self.config.max_workers, thread_name_prefix="mc_worker"
-        ) as executor:
-            futures = [executor.submit(worker, item) for item in remaining]
-
+        )
+        futures = [executor.submit(worker, item) for item in remaining]
+        try:
             with tqdm(
                 total=len(remaining), desc="Processing samples", unit="sample"
             ) as pbar:
@@ -618,19 +614,21 @@ class MCRunner:
                         result = future.result()
                     except Exception as e:
                         logger.warning(f"Item failed: {e}")
-                        with self._stats_lock:
-                            self._stats["failed"] += 1
+                        self._stats["failed"] += 1
                     else:
                         self._write_result(result)
-                        with self._stats_lock:
-                            self._stats["processed"] += 1
-                            if result.get("correct"):
-                                self._stats["correct"] += 1
+                        self._stats["processed"] += 1
+                        if result.get("correct"):
+                            self._stats["correct"] += 1
                     pbar.update(1)
+        finally:
+            # Don't wait for in-flight API requests when aborting (persistence
+            # failure): their results would be discarded anyway.
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _write_result(self, result: dict[str, Any]) -> None:
-        """Append one result under the runner's write lock."""
-        append_jsonl(self.config.output_file, [result], self._file_lock)
+        """Append one result from the coordinator thread."""
+        append_jsonl(self.config.output_file, [result])
 
     # ------------------------------------------------------------------
     # Loglikelihood mode
@@ -793,25 +791,8 @@ class MCRunner:
         item: dict[str, Any],
         client: openai.OpenAI,
         base_messages: list[dict[str, str]],
-    ) -> dict[str, Any] | None:
-        """Process a single MC item via text generation.
-
-        Args:
-            item: MC item with prompt and answer
-            client: OpenAI client shared by all worker threads (thread-safe)
-            base_messages: Pre-built system messages prepended to every request
-
-        Returns:
-            Result dict with the generated text as a string under the
-            configured response key. The 'correct' key is intentionally
-            absent — generate mode extracts answers at scoring time; only
-            loglikelihood mode computes correctness inline.
-
-        Raises:
-            RuntimeError: When generation produced no usable text (retries
-                exhausted, non-retryable 4xx, or null/empty content). An
-                empty generation is not persisted and remains retryable.
-        """
+    ) -> dict[str, Any]:
+        """Generate one MC answer; answer extraction happens during scoring."""
         prompt = self.build_prompt(item)
         gold = item.get(self.config.label_key, "")
         messages = [*base_messages, *build_chat_messages(prompt, None)]
@@ -844,23 +825,30 @@ class MCRunner:
             if not raw_choices:
                 raise MalformedResponseError("Generate returned no choices")
             content = getattr(getattr(raw_choices[0], "message", None), "content", None)
-            if not isinstance(content, str) or not content.strip():
-                raise MalformedResponseError("Generate returned empty content")
+            if not isinstance(content, str):
+                raise MalformedResponseError("Generate returned missing content")
+            if content and not content.strip():
+                # Whitespace-only content is a decoding glitch, not an empty
+                # answer — retry it. A literal empty string is a legitimate
+                # (empty) answer and is persisted as-is.
+                raise MalformedResponseError(
+                    "Generate returned whitespace-only content"
+                )
             return content
 
-        generation: str | None = None
         try:
             generation = call_with_retry(do_request, self.config.max_retries)
         except RuntimeError as e:
-            raise RuntimeError(f"Generate produced no usable text: {e}") from e
-        if not generation:
-            raise RuntimeError("Generate produced no usable text")
+            raise RuntimeError(f"Generate request failed: {e}") from e
+        if generation is None:
+            raise RuntimeError("Generate request produced no response")
 
         result = dict(item)
         result.pop("error", None)
         result[self.config.input_key] = prompt
         result[self.config.label_key] = gold
         result[self.config.response_key] = generation
+        result["scoring_mode"] = "generate"
         return result
 
     # ------------------------------------------------------------------
