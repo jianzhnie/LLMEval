@@ -699,6 +699,7 @@ class MCRunner:
             self.config.input_key: prompt,
             "doc_id": item["doc_id"],
             "sample_index": item.get("sample_index", 0),
+            "n_samples": item.get("n_samples", 1),
             "choices": choices,
             "choice_tokens": choice_tokens,
             "gold": gold,
@@ -795,6 +796,9 @@ class MCRunner:
         """Generate one MC answer; answer extraction happens during scoring."""
         prompt = self.build_prompt(item)
         gold = item.get(self.config.label_key, "")
+        sample_index = item.get("sample_index")
+        if type(sample_index) is not int:
+            raise ValueError("sample_index must be a non-negative integer")
         messages = [*base_messages, *build_chat_messages(prompt, None)]
 
         call_args: dict[str, Any] = {
@@ -808,7 +812,7 @@ class MCRunner:
                 self.config.seed,
                 str(item.get("doc_id", "")),
                 prompt,
-                item.get("sample_index"),
+                sample_index,
             ),
         }
         if self.config.extra_body_dict:

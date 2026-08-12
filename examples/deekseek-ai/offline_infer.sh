@@ -11,8 +11,6 @@ n_samples=64  # Default sample size for aime24 and aime25
 # Create output directory if it doesn't exist
 mkdir -p "${output_dir}"
 
-rope_scaling={"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":32768}
-
 # --- Run Inference Tasks ---
 
 # aime24 (repeated sample 64 times)

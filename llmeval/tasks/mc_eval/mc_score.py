@@ -38,6 +38,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Sequence
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -46,7 +47,6 @@ from pebble import ProcessPool
 from tqdm import tqdm
 
 from llmeval.tasks.postprocess import (
-    FilterRegistry,
     TextFilterPipeline,
     normalize_single_generation_samples,
     resolve_max_workers,
@@ -69,10 +69,6 @@ __all__ = [
 logger = init_logger("mc_score")
 
 _MC_AGGREGATIONS = frozenset({"first", "majority_vote", "any_correct", "per_sample"})
-
-MC_FILTER_REGISTRY = FilterRegistry()
-MC_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers)
-MC_GENERATION_PIPELINE: TextFilterPipeline
 
 # Precompiled answer-extraction regexes.
 _ANSWER_MARKER_RE: re.Pattern[str] = re.compile(
@@ -220,7 +216,10 @@ def score_loglikelihood_result(
 
 
 def merge_generate_records(
-    eval_dataset: list[dict[str, Any]], label_key: str, response_key: str
+    eval_dataset: list[dict[str, Any]],
+    label_key: str,
+    response_key: str,
+    n_samples: int | None = None,
 ) -> list[dict[str, Any]]:
     """Validate sample rows and group them by stable MC question identity.
 
@@ -261,21 +260,20 @@ def merge_generate_records(
                 if key in item and key not in target:
                     target[key] = item[key]
         target_samples = samples_by_position[position]
-        generation = resolve_single_generation(
-            item, response_key, problem_id=problem_id
-        )
+        generation = resolve_single_generation(item, response_key)
         target_samples.append((item, generation or ""))
 
     for item, samples in zip(merged, samples_by_position, strict=True):
         problem_id = str(item.get("doc_id") or "unknown")
         sample_order = sample_order_indices(
-            [sample for sample, _ in samples], problem_id=problem_id
+            [sample for sample, _ in samples],
+            problem_id=problem_id,
+            n_samples=n_samples,
         )
         ordered_samples = [samples[index] for index in sample_order]
         sample_errors = [
             bool(sample.get("error"))
-            or response_key not in sample
-            or sample.get(response_key) is None
+            or resolve_single_generation(sample, response_key) is None
             for sample, _ in ordered_samples
         ]
         item[response_key] = [generation for _, generation in ordered_samples]
@@ -294,6 +292,7 @@ def score_generate_result(
     max_workers: int = 8,
     timeout: int = 60,
     aggregation: str = "first",
+    n_samples: int | None = None,
 ) -> ScorerResult:
     """Score generation-based MC results and return structured metrics.
 
@@ -338,9 +337,15 @@ def score_generate_result(
                 "choice_tokens",
             ),
             record_kind="MC document",
+            n_samples=n_samples,
         )
     else:
-        merged_dataset = merge_generate_records(eval_dataset, label_key, response_key)
+        merged_dataset = merge_generate_records(
+            eval_dataset,
+            label_key,
+            response_key,
+            n_samples=n_samples,
+        )
     records = score_items(
         merged_dataset,
         mode="generate",
@@ -736,7 +741,7 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def argmax_normalized(logprobs: list[float], lengths: list[int | float]) -> int:
+def argmax_normalized(logprobs: Sequence[float], lengths: Sequence[int | float]) -> int:
     """Return the first argmax after dividing scores by positive lengths."""
     normalized = [
         score / float(length) for score, length in zip(logprobs, lengths, strict=True)
@@ -764,17 +769,20 @@ def score_generate_item(
     # empty answer: only an explicit empty list/string is one empty answer.
     if response_key not in item:
         response_valid = False
-        generations: Any = []
+        generations: Any = None
     else:
-        generations: Any = item.get(response_key)
-        response_valid = isinstance(generations, str | list)
+        generations = item.get(response_key)
+        response_valid = isinstance(generations, str) or (
+            isinstance(generations, list)
+            and (
+                not generations or all(isinstance(value, str) for value in generations)
+            )
+        )
 
     if isinstance(generations, str):
         generation_texts = [generations]
     elif isinstance(generations, list):
-        generation_texts = (
-            [str(generation) for generation in generations] if generations else [""]
-        )
+        generation_texts = generations if response_valid and generations else [""]
     else:
         generation_texts = []
 
@@ -864,18 +872,18 @@ def extract_answer(text: str) -> str:
         return matches[-1].group(1).upper()
 
     # 2. Last standalone A-J letter in the text (excluding "I"/"a" stopwords).
-    matches = [
+    letters = [
         letter
         for letter in _LAST_LETTER_RE.findall(text)
         if letter not in _FALLBACK_STOPWORDS
     ]
-    if matches:
-        return matches[-1].upper()
+    if letters:
+        return letters[-1].upper()
 
     return ""
 
 
-MC_FILTER_REGISTRY.register("extract_answer", extract_answer)
-MC_GENERATION_PIPELINE = MC_FILTER_REGISTRY.build_pipeline(
-    "mc_generation", "strip_reasoning", "extract_answer"
+MC_GENERATION_PIPELINE = TextFilterPipeline(
+    "mc_generation",
+    (("strip_reasoning", strip_reasoning_wrappers), ("extract_answer", extract_answer)),
 )

@@ -334,6 +334,31 @@ class TestResumeState:
         with pytest.raises(ValueError, match="conflicting prompts"):
             load_resume_state(path, "prompt", "gen")
 
+    def test_conflicting_n_samples_for_document_are_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "out.jsonl"
+        rows = [
+            {
+                "doc_id": "q1",
+                "prompt": "p",
+                "gen": "a",
+                "sample_index": 0,
+                "n_samples": 2,
+            },
+            {
+                "doc_id": "q1",
+                "prompt": "p",
+                "gen": "b",
+                "sample_index": 1,
+                "n_samples": 3,
+            },
+        ]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        with pytest.raises(ValueError, match="conflicting n_samples"):
+            load_resume_state(path, "prompt", "gen")
+
 
 class TestExpansion:
     def test_copies_each_document_requested_number_of_times(self) -> None:
@@ -341,6 +366,7 @@ class TestExpansion:
         expanded = prepare_sample_requests(raw, _resume(), "prompt", 3)
         assert len(expanded) == 3
         assert [item["sample_index"] for item in expanded] == [0, 1, 2]
+        assert {item["n_samples"] for item in expanded} == {3}
         assert (
             len(
                 {
@@ -363,6 +389,18 @@ class TestExpansion:
         )
         assert len(expanded) == 2
         assert [item["sample_index"] for item in expanded] == [1, 3]
+
+    def test_resume_rejects_changed_n_samples(self) -> None:
+        resume_state = _resume(completed_indices={"q1": {0}})
+        resume_state.n_samples_by_document["q1"] = 2
+
+        with pytest.raises(ValueError, match="n_samples=2"):
+            prepare_sample_requests(
+                [{"doc_id": "q1", "prompt": "p"}],
+                resume_state,
+                "prompt",
+                3,
+            )
 
     def test_all_completed_yields_nothing(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]

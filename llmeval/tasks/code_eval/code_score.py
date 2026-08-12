@@ -25,10 +25,10 @@ from llmeval.tasks.code_eval.execute import (
     check_correctness,
 )
 from llmeval.tasks.postprocess import (
-    FilterRegistry,
     TextFilterPipeline,
     normalize_single_generation_samples,
     resolve_max_workers,
+    resolve_single_generation,
     strip_reasoning_wrappers,
 )
 from llmeval.tasks.registry import ScorerResult
@@ -95,11 +95,6 @@ _MBPP_PROMPT_MODES: tuple[str, ...] = (
     "instruction",
 )
 
-CODE_FILTER_REGISTRY = FilterRegistry()
-CODE_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers)
-CODE_GENERATION_PIPELINE: TextFilterPipeline
-
-
 # ===========================================================================
 # Code extraction
 # ===========================================================================
@@ -146,9 +141,9 @@ def extract_code(text: object) -> str:
     return text.rstrip()
 
 
-CODE_FILTER_REGISTRY.register("extract_code", extract_code)
-CODE_GENERATION_PIPELINE = CODE_FILTER_REGISTRY.build_pipeline(
-    "code_generation", "strip_reasoning", "extract_code"
+CODE_GENERATION_PIPELINE = TextFilterPipeline(
+    "code_generation",
+    (("strip_reasoning", strip_reasoning_wrappers), ("extract_code", extract_code)),
 )
 
 
@@ -185,13 +180,15 @@ def estimate_pass_at_k(num_samples: int, num_correct: int, k: int) -> float:
     Computed in a numerically-stable product form.  When *k* = 1 this
     simplifies to ``num_correct / num_samples``.
     """
-    n, c = int(num_samples), int(num_correct)
+    if any(type(value) is not int for value in (num_samples, num_correct, k)):
+        raise TypeError("num_samples, num_correct, and k must be integers")
+    n, c = num_samples, num_correct
     if n < 1:
-        return 0.0
+        raise ValueError(f"num_samples must be positive, got {n}")
+    if c < 0 or c > n:
+        raise ValueError(f"num_correct must satisfy 0 <= c <= n, got c={c}, n={n}")
     if k < 1 or k > n:
         raise ValueError(f"pass@k requires 1 <= k <= n, got k={k}, n={n}")
-    if c < 0:
-        c = 0
     if n - c < k:
         return 1.0
     result = 1.0
@@ -358,13 +355,8 @@ def _process_code_item_impl(
     prompt_mode: str = _resolve_prompt_mode(item)
 
     # -- extract model output ---------------------------------------------------
-    gen_raw = item.get(response_key)
-    if isinstance(gen_raw, list):
-        gen_str: str = str(gen_raw[0]) if gen_raw else ""
-    elif isinstance(gen_raw, str):
-        gen_str = gen_raw
-    else:
-        gen_str = ""
+    generation = resolve_single_generation(item, response_key)
+    gen_str = generation or ""
 
     code, filter_trace = CODE_GENERATION_PIPELINE.apply_with_trace(gen_str)
     filter_artifacts = {
@@ -394,6 +386,15 @@ def _process_code_item_impl(
         record.update(filter_artifacts)
         return idx, record
 
+    if generation is None:
+        record = _failure_record(
+            task_id,
+            "failed: missing or malformed generation",
+            evaluation_status="failed",
+        )
+        record.update(filter_artifacts)
+        return idx, record
+
     if not gen_str.strip():
         record = _failure_record(task_id, "failed: empty generation")
         record.update(filter_artifacts)
@@ -418,6 +419,8 @@ def _process_code_item_impl(
             allow_unsafe_code=allow_unsafe_code,
         )
         if exec_result.get("passed"):
+            break
+        if exec_result.get("evaluation_status") == "failed":
             break
     if exec_result is None:
         record = _failure_record(task_id, "failed: no executable candidate")
@@ -578,7 +581,10 @@ def _code_identity(item: dict[str, Any], row_index: int) -> str:
 
 
 def _normalize_code_samples(
-    eval_dataset: list[dict[str, Any]], label_key: str, response_key: str
+    eval_dataset: list[dict[str, Any]],
+    label_key: str,
+    response_key: str,
+    n_samples: int | None = None,
 ) -> list[dict[str, Any]]:
     """Validate and normalize one code generation per input row.
 
@@ -592,6 +598,7 @@ def _normalize_code_samples(
         problem_identity=_code_identity,
         conflict_keys=(label_key, "prompt"),
         record_kind="code task",
+        n_samples=n_samples,
     )
 
 
@@ -656,6 +663,7 @@ def _score_code_task_result(
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
     k_values: tuple[int, ...] = (1, 10, 64),
     allow_unsafe_code: bool = False,
+    n_samples: int | None = None,
 ) -> tuple[CodeScoreResult, dict[str, list[dict[str, Any]]]]:
     """Score a code-generation dataset and return task-native details.
 
@@ -704,7 +712,12 @@ def _score_code_task_result(
         raise ValueError(
             f"k_values must contain only positive integers, got {k_values}"
         )
-    expanded_dataset = _normalize_code_samples(eval_dataset, label_key, response_key)
+    expanded_dataset = _normalize_code_samples(
+        eval_dataset,
+        label_key,
+        response_key,
+        n_samples=n_samples,
+    )
     total = len(expanded_dataset)
 
     logger.info(
@@ -789,6 +802,7 @@ def score_code_result(
     exec_timeout: float = _DEFAULT_EXEC_TIMEOUT,
     k_values: tuple[int, ...] = (1, 10, 64),
     allow_unsafe_code: bool = False,
+    n_samples: int | None = None,
 ) -> ScorerResult:
     """Score code and return the registry's structured scorer contract."""
     result, completed_groups = _score_code_task_result(
@@ -800,6 +814,7 @@ def score_code_result(
         exec_timeout=exec_timeout,
         k_values=k_values,
         allow_unsafe_code=allow_unsafe_code,
+        n_samples=n_samples,
     )
     metrics = dict(result.pass_at_k)
     metrics.setdefault("pass@1", result.pass_at_1)

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,7 @@ def evaluate_task(
     bootstrap_samples: int = 1000,
     confidence_level: float = 0.95,
     code_k_values: tuple[int, ...] = (1, 10, 64),
+    n_samples: int | None = None,
 ) -> float:
     """
     Evaluate model outputs and return the primary metric value.
@@ -116,6 +118,7 @@ def evaluate_task(
         bootstrap_samples=bootstrap_samples,
         confidence_level=confidence_level,
         code_k_values=code_k_values,
+        n_samples=n_samples,
     )
     return result.primary_value
 
@@ -153,6 +156,7 @@ def evaluate_task_result(
     bootstrap_samples: int = 1000,
     confidence_level: float = 0.95,
     code_k_values: tuple[int, ...] = (1, 10, 64),
+    n_samples: int | None = None,
 ) -> EvaluationResult:
     """Evaluate a task through the registry and return all declared metrics."""
     actual_seed = 0 if seed is None else seed
@@ -163,6 +167,7 @@ def evaluate_task_result(
     if (
         not isinstance(exec_timeout, int | float)
         or isinstance(exec_timeout, bool)
+        or not math.isfinite(exec_timeout)
         or exec_timeout <= 0
     ):
         raise ValueError(f"exec_timeout must be positive, got {exec_timeout!r}")
@@ -171,6 +176,10 @@ def evaluate_task_result(
     if type(bootstrap_samples) is not int or bootstrap_samples < 0:
         raise ValueError(
             f"bootstrap_samples must be non-negative, got {bootstrap_samples!r}"
+        )
+    if n_samples is not None and (type(n_samples) is not int or n_samples <= 0):
+        raise ValueError(
+            f"n_samples must be a positive integer or None, got {n_samples!r}"
         )
     if not isinstance(confidence_level, int | float) or not (
         0.0 < confidence_level < 1.0
@@ -211,6 +220,7 @@ def evaluate_task_result(
         timeout=timeout,
         exec_timeout=exec_timeout,
         seed=actual_seed,
+        n_samples=n_samples,
         mc_aggregation=mc_aggregation,
         allow_unsafe_code=allow_unsafe_code,
         bootstrap_samples=bootstrap_samples,
@@ -341,6 +351,7 @@ def main() -> int:
             bootstrap_samples=args.bootstrap_samples,
             confidence_level=args.confidence_level,
             code_k_values=getattr(args, "code_k_values_tuple", (1, 10, 64)),
+            n_samples=args.n_samples,
         )
 
         logger.info("🎉 Evaluation completed successfully!")

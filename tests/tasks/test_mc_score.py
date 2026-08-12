@@ -564,6 +564,20 @@ class TestMCScoreEdgeCases:
         assert result.failed_count == 1
         assert result.observations["acc"] == []
 
+    @pytest.mark.parametrize("generation", [None, [None], 123])
+    def test_generate_malformed_response_is_failed(self, generation: object) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        result = score_generate_result(
+            [{"answer": "A", "gen": generation}],
+            "answer",
+            "gen",
+            max_workers=1,
+        )
+
+        assert result.failed_count == 1
+        assert result.effective_sample_count == 0
+
     def test_generate_letter_gold_must_exist_in_choices(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
@@ -873,15 +887,20 @@ class TestMCRepeatedRows:
                 "gen",
             )
 
-    def test_multi_generation_row_is_rejected(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import merge_generate_records
+    def test_multi_generation_row_is_failed(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
-        with pytest.raises(ValueError, match="one generation per row"):
-            merge_generate_records(
+        for aggregation in ("first", "per_sample"):
+            result = score_generate_result(
                 [self._row(["Answer: A", "Answer: B"])],
                 "answer",
                 "gen",
+                aggregation=aggregation,
             )
+
+            assert result.sample_count == 1
+            assert result.failed_count == 1
+            assert result.effective_sample_count == 0
 
     def test_identical_generations_remain_distinct_samples(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import merge_generate_records

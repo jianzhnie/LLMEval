@@ -115,7 +115,7 @@ class TestProcessAnswers:
             None,
             "5",
         )
-        assert result.failed is False
+        assert result.failed is True
 
     def test_empty_gen_list(self) -> None:
         from llmeval.tasks.math_eval.math_score import process_answers
@@ -330,7 +330,7 @@ class TestComputeScores:
         assert result.effective_sample_count == 0
         assert all(item["evaluation_status"] == "failed" for item in result.records)
 
-    def test_missing_generation_counts_as_incorrect(self, tmp_path: Path) -> None:
+    def test_missing_generation_is_failed(self, tmp_path: Path) -> None:
         from llmeval.tasks.math_eval.math_score import score_math_result
 
         data = [
@@ -349,10 +349,10 @@ class TestComputeScores:
             timeout=60,
         )
         assert result.sample_count == 2
-        assert result.effective_sample_count == 2
-        assert result.failed_count == 0
-        assert result.observations["accuracy"] == [1.0, 0.0]
-        assert result.metrics["accuracy"] == 0.5
+        assert result.effective_sample_count == 1
+        assert result.failed_count == 1
+        assert result.observations["accuracy"] == [1.0]
+        assert result.metrics["accuracy"] == 1.0
 
     def test_explicit_inference_error_is_excluded_even_with_generation(
         self, tmp_path: Path
@@ -461,15 +461,17 @@ class TestRepeatedMathRows:
         assert problems[0]["sample_count"] == 2
         assert problems[0]["correct_samples"] == 1
 
-    def test_multi_generation_row_is_rejected(self, tmp_path: Path) -> None:
+    def test_multi_generation_row_is_failed(self, tmp_path: Path) -> None:
         data = [
             {
                 **_math_item("5", ["$\\boxed{5}$", "$\\boxed{6}$"]),
                 "doc_id": "aime24:0",
             }
         ]
-        with pytest.raises(ValueError, match="one generation per row"):
-            self._score(data, tmp_path)
+        result = self._score(data, tmp_path)
+
+        assert result.failed_count == 1
+        assert result.effective_sample_count == 0
 
     def test_empty_generation_is_recorded(self, tmp_path: Path) -> None:
         data = [

@@ -110,6 +110,8 @@ class TestEvaluateTask:
             ({"max_workers": 0}, "max_workers"),
             ({"timeout": 0}, "timeout"),
             ({"exec_timeout": 0}, "exec_timeout"),
+            ({"exec_timeout": float("nan")}, "exec_timeout"),
+            ({"exec_timeout": float("inf")}, "exec_timeout"),
             ({"seed": -1}, "seed"),
             ({"bootstrap_samples": -1}, "bootstrap_samples"),
             ({"confidence_level": 1.0}, "confidence_level"),

@@ -164,6 +164,13 @@ class TestShouldRetry:
 
 
 class TestCallWithRetry:
+    @pytest.mark.parametrize("max_retries", [-1, 1.5, True])
+    def test_invalid_retry_count_is_rejected(self, max_retries: object) -> None:
+        fn = MagicMock()
+        with pytest.raises(ValueError, match="max_retries"):
+            call_with_retry(fn, max_retries)  # type: ignore[arg-type]
+        fn.assert_not_called()
+
     def test_fail_fast_exception_is_not_retried(self) -> None:
         class AlignmentError(ValueError):
             pass

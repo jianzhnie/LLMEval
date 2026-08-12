@@ -305,6 +305,52 @@ class TestMCLoglikelihoodClient:
         assert client.score_continuations("Q ", ["A"]) == [-0.2]
         assert client.client.completions.create.call_count == 2
 
+    def test_choice_not_in_top_returns_neg_inf(self) -> None:
+        client = _make_ll_client()
+        client.client.chat.completions.create.return_value = _fake_top_probs_resp(
+            {" B": -0.5, " C": -4.2}
+        )
+        assert client.get_choices_logprobs("p", ["A", "B", "C"]) == [
+            float("-inf"),
+            -0.5,
+            -4.2,
+        ]
+
+    def test_token_form_variants_are_checked(self) -> None:
+        client = _make_ll_client()
+        client.client.chat.completions.create.return_value = _fake_top_probs_resp(
+            {"b": -1.2, " C": -3.0}
+        )
+        assert client.get_choices_logprobs("p", ["A", "B", "C"]) == [
+            float("-inf"),
+            -1.2,
+            -3.0,
+        ]
+
+    def test_lowercase_target_matches_uppercase_token(self) -> None:
+        client = _make_ll_client()
+        client.client.chat.completions.create.return_value = _fake_top_probs_resp(
+            {" A": -0.2}
+        )
+        assert client.get_choices_logprobs("p", ["a"]) == [-0.2]
+
+    def test_4xx_aborts_without_retry(self) -> None:
+        from llmeval.utils.retry import ClientError
+
+        client = _make_ll_client(max_retries=3)
+        client.client.chat.completions.create.side_effect = _make_api_error("bad", 400)
+        with pytest.raises(ClientError, match="status=400"):
+            client.get_choices_logprobs("p", ["a", "b"])
+        assert client.client.chat.completions.create.call_count == 1
+
+    def test_empty_top_logprobs_is_malformed(self) -> None:
+        from llmeval.utils.retry import ClientError
+
+        client = _make_ll_client(max_retries=0)
+        client.client.chat.completions.create.return_value = _fake_top_probs_resp({})
+        with pytest.raises(ClientError, match="no alternatives"):
+            client.get_choices_logprobs("p", ["A", "B"])
+
 
 class TestProcessLoglikelihoodItem:
     def test_context_marker_counts_failed_not_processed(self, tmp_path: Path) -> None:
@@ -331,6 +377,26 @@ class TestProcessLoglikelihoodItem:
             "scoring_mode=%s",
             "first_token",
         )
+
+    def test_full_choice_text_uses_answer_letters(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.client = MagicMock()
+        runner.client.get_choices_logprobs.return_value = [-1.0, -5.0]
+        result = runner.process_loglikelihood_item(
+            {
+                "doc_id": "test:0",
+                "prompt": "q",
+                "choices": ["Paris", "London"],
+                "gold": 0,
+            }
+        )
+        assert result["choice_tokens"] == ["A", "B"]
+        assert result["correct"] is True
+
+    def test_no_choices_raises(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        with pytest.raises(ValueError, match="non-empty list"):
+            runner.process_loglikelihood_item({"prompt": "q"})
 
     def test_all_neg_inf_raises(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
@@ -363,6 +429,7 @@ class TestProcessLoglikelihoodItem:
             "prompt",
             "doc_id",
             "sample_index",
+            "n_samples",
             "choices",
             "choice_tokens",
             "gold",
@@ -391,6 +458,7 @@ class TestProcessLoglikelihoodItem:
             "prompt": "Answer:",
             "doc_id": "test:0",
             "sample_index": 0,
+            "n_samples": 1,
             "choices": ["a", "b"],
             "choice_tokens": [" A", " B"],
             "gold": 1,
@@ -650,6 +718,22 @@ class TestProcessGenerateItem:
         assert request["max_completion_tokens"] == runner.config.max_completion_tokens
         assert "max_tokens" not in request
 
+    def test_persistent_error_raises_after_retries(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path, mode="generate", max_retries=0)
+        client = MagicMock()
+        client.chat.completions.create.side_effect = RuntimeError("down")
+        with pytest.raises(RuntimeError):
+            runner.process_generate_item(
+                {
+                    "doc_id": "test:0",
+                    "sample_index": 0,
+                    "prompt": "q",
+                    "answer": "A",
+                },
+                client,
+                [],
+            )
+
 
 class TestMCStableResume:
     def test_loglikelihood_resume_rejects_other_scoring_mode(
@@ -880,6 +964,33 @@ class TestMCRunnerEndToEnd:
 
         assert len(out.read_text().strip().split("\n")) == 2
 
+    def test_failed_items_are_not_written(self, tmp_path: Path) -> None:
+        from llmeval.inference import mc as mc_infer
+
+        class FailLLClient:
+            def __init__(self, **kwargs):
+                pass
+
+            def get_choices_logprobs(self, _prompt, choice_texts):
+                return [float("-inf")] * len(choice_texts)
+
+        input_path = tmp_path / "in.jsonl"
+        output_path = tmp_path / "out.jsonl"
+        _write_input(input_path)
+        config = MCInferArguments(
+            input_file=str(input_path),
+            output_file=str(output_path),
+            mode="loglikelihood",
+            max_workers=2,
+        )
+        with (
+            patch.object(mc_infer, "MCLoglikelihoodClient", FailLLClient),
+            pytest.raises(RuntimeError, match="failed for 2 sample"),
+        ):
+            MCRunner(config).run()
+        assert not output_path.exists()
+        assert not (tmp_path / "out_failed.jsonl").exists()
+
 
 # ===========================================================================
 # Additional inference/client tests (redistributed from tests/test_mc_eval.py)
@@ -1000,170 +1111,6 @@ class TestFewShotFormatter:
     def test_invalid_demo_is_rejected(self, item: dict[str, str], message: str) -> None:
         with pytest.raises(ValueError, match=message):
             FewShotFormatter._format_demo(item)
-
-
-# Extend existing classes with the remaining tests from tests/test_mc_eval.py.
-# Each method below was moved verbatim from that file, reusing the module-level
-# helpers already defined above.
-
-
-def _mc_client_choice_not_in_top_returns_neg_inf(self) -> None:
-    """A target letter absent from top_logprobs gets float('-inf')."""
-    client = _make_ll_client()
-    client.client.chat.completions.create.return_value = _fake_top_probs_resp(
-        {" B": -0.5, " C": -4.2}
-    )
-    result = client.get_choices_logprobs("p", ["A", "B", "C"])
-    assert result == [float("-inf"), -0.5, -4.2]
-
-
-TestMCLoglikelihoodClient.test_choice_not_in_top_returns_neg_inf = (
-    _mc_client_choice_not_in_top_returns_neg_inf
-)
-
-
-def _mc_client_token_form_variants_are_checked(self) -> None:
-    """Letters are looked up as 'X', ' X', 'x', ' x' to handle tokenizer variance."""
-    client = _make_ll_client()
-    # Tokenizer uses lowercase form for some models.
-    client.client.chat.completions.create.return_value = _fake_top_probs_resp(
-        {"b": -1.2, " C": -3.0}
-    )
-    result = client.get_choices_logprobs("p", ["A", "B", "C"])
-    assert result == [float("-inf"), -1.2, -3.0]
-
-
-TestMCLoglikelihoodClient.test_token_form_variants_are_checked = (
-    _mc_client_token_form_variants_are_checked
-)
-
-
-def _mc_client_lowercase_target_matches_uppercase_token(self) -> None:
-    client = _make_ll_client()
-    client.client.chat.completions.create.return_value = _fake_top_probs_resp(
-        {" A": -0.2}
-    )
-    assert client.get_choices_logprobs("p", ["a"]) == [-0.2]
-
-
-TestMCLoglikelihoodClient.test_lowercase_target_matches_uppercase_token = (
-    _mc_client_lowercase_target_matches_uppercase_token
-)
-
-
-def _mc_client_4xx_aborts_without_retry(self) -> None:
-    """Non-retryable 4xx errors propagate after the first request."""
-    from llmeval.utils.retry import ClientError
-
-    client = _make_ll_client(max_retries=3)
-    client.client.chat.completions.create.side_effect = _make_api_error("bad", 400)
-    with pytest.raises(ClientError, match="status=400"):
-        client.get_choices_logprobs("p", ["a", "b"])
-    assert client.client.chat.completions.create.call_count == 1
-
-
-TestMCLoglikelihoodClient.test_4xx_aborts_without_retry = (
-    _mc_client_4xx_aborts_without_retry
-)
-
-
-def _mc_client_empty_top_logprobs_is_malformed(self) -> None:
-    from llmeval.utils.retry import ClientError
-
-    client = _make_ll_client(max_retries=0)
-    client.client.chat.completions.create.return_value = _fake_top_probs_resp({})
-    with pytest.raises(ClientError, match="no alternatives"):
-        client.get_choices_logprobs("p", ["A", "B"])
-
-
-TestMCLoglikelihoodClient.test_empty_top_logprobs_is_malformed = (
-    _mc_client_empty_top_logprobs_is_malformed
-)
-
-
-def _mc_process_ll_full_choice_text_uses_answer_letters(self, tmp_path: Path) -> None:
-    runner = _make_mc_runner(tmp_path)
-    runner.client = MagicMock()
-    runner.client.get_choices_logprobs.return_value = [-1.0, -5.0]
-    item = {
-        "doc_id": "test:0",
-        "prompt": "q",
-        "choices": ["Paris", "London"],
-        "gold": 0,
-    }
-    result = runner.process_loglikelihood_item(item)
-    assert result["choice_tokens"] == ["A", "B"]
-    assert result["correct"] is True
-
-
-TestProcessLoglikelihoodItem.test_full_choice_text_uses_answer_letters = (
-    _mc_process_ll_full_choice_text_uses_answer_letters
-)
-
-
-def _mc_process_ll_no_choices_raises(self, tmp_path: Path) -> None:
-    runner = _make_mc_runner(tmp_path)
-    with pytest.raises(ValueError, match="non-empty list"):
-        runner.process_loglikelihood_item({"prompt": "q"})
-
-
-TestProcessLoglikelihoodItem.test_no_choices_raises = _mc_process_ll_no_choices_raises
-
-
-def _mc_process_gen_persistent_error_raises_after_retries(self, tmp_path: Path) -> None:
-    runner = _make_mc_runner(tmp_path, mode="generate", max_retries=0)
-    client = MagicMock()
-    client.chat.completions.create.side_effect = RuntimeError("down")
-    with pytest.raises(RuntimeError):
-        runner.process_generate_item(
-            {
-                "doc_id": "test:0",
-                "sample_index": 0,
-                "prompt": "q",
-                "answer": "A",
-            },
-            client,
-            [],
-        )
-
-
-TestProcessGenerateItem.test_persistent_error_raises_after_retries = (
-    _mc_process_gen_persistent_error_raises_after_retries
-)
-
-
-def _mc_runner_failed_items_are_not_written(self, tmp_path: Path) -> None:
-    from llmeval.inference import mc as mc_infer
-
-    class FailLLClient:
-        def __init__(self, **kwargs):
-            pass
-
-        def get_choices_logprobs(self, _prompt, choice_texts):
-            return [float("-inf")] * len(choice_texts)
-
-    inp = tmp_path / "in.jsonl"
-    out = tmp_path / "out.jsonl"
-    _write_input(inp)
-    cfg = MCInferArguments(
-        input_file=str(inp),
-        output_file=str(out),
-        mode="loglikelihood",
-        max_workers=2,
-    )
-    with (
-        patch.object(mc_infer, "MCLoglikelihoodClient", FailLLClient),
-        pytest.raises(RuntimeError, match="failed for 2 sample"),
-    ):
-        MCRunner(cfg).run()
-    assert not out.exists()  # nothing scored
-    failed = tmp_path / "out_failed.jsonl"
-    assert not failed.exists()
-
-
-TestMCRunnerEndToEnd.test_failed_items_are_not_written = (
-    _mc_runner_failed_items_are_not_written
-)
 
 
 def test_few_shot_sampling_is_per_document_and_seeded(tmp_path: Path) -> None:

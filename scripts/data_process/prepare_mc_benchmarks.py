@@ -17,9 +17,9 @@ from typing import Any
 from datasets import get_dataset_config_names, load_dataset
 
 try:
-    from .io_utils import atomic_output_path
+    from .io_utils import atomic_output_path, has_valid_doc_ids
 except ImportError:  # Direct script execution
-    from io_utils import atomic_output_path
+    from io_utils import atomic_output_path, has_valid_doc_ids
 
 # Multiple-choice benchmarks: need special formatting (choices → prompt)
 BENCHMARKS: dict[str, dict] = {
@@ -59,7 +59,7 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
     configs = info["configs"]
     output_file = output_dir / f"{name}.jsonl"
 
-    if output_file.exists() and _has_valid_doc_ids(output_file):
+    if output_file.exists() and has_valid_doc_ids(output_file):
         print(f"[SKIP] {name}: already exists")
         return str(output_file)
     if output_file.exists():
@@ -231,24 +231,6 @@ def _format_mc_row(
         "choice_tokens": letters[: len(choices)],
         "gold": answer_idx,
     }
-
-
-def _has_valid_doc_ids(path: Path) -> bool:
-    """Return whether an existing JSONL file has a unique ID on every row."""
-    ids: set[str] = set()
-    try:
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                item = json.loads(line)
-                document_id = item.get("doc_id") if isinstance(item, dict) else None
-                if not document_id or str(document_id) in ids:
-                    return False
-                ids.add(str(document_id))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return bool(ids)
 
 
 def main() -> None:

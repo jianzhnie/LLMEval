@@ -8,7 +8,6 @@ Supported math benchmarks: gsm8k, math500, hmmt25, gpqa_diamond, aime24, aime25,
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -17,9 +16,9 @@ from typing import Any
 from datasets import load_dataset
 
 try:
-    from .io_utils import atomic_output_path
+    from .io_utils import atomic_output_path, has_valid_doc_ids
 except ImportError:  # Direct script execution
-    from io_utils import atomic_output_path
+    from io_utils import atomic_output_path, has_valid_doc_ids
 
 QWEN_MATH_COT_PROMPT = (
     "Please reason step by step, and put your final answer within \\boxed{}."
@@ -55,24 +54,6 @@ def _make_doc_id(name: str, example: dict[str, Any], index: int) -> str:
     return f"{name}:{source_id}"
 
 
-def _has_valid_doc_ids(path: Path) -> bool:
-    """Return whether an existing JSONL file has a unique ID on every row."""
-    ids: set[str] = set()
-    try:
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                item = json.loads(line)
-                document_id = item.get("doc_id") if isinstance(item, dict) else None
-                if not document_id or str(document_id) in ids:
-                    return False
-                ids.add(str(document_id))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return bool(ids)
-
-
 def format_example(
     example: dict[str, Any],
     index: int,
@@ -100,7 +81,7 @@ def prepare_benchmark(name: str, output_dir: Path) -> str:
     hf_path, hf_config, hf_split, q_col, a_col = BENCHMARKS[name]
     output_file = output_dir / f"{name}.jsonl"
 
-    if output_file.exists() and _has_valid_doc_ids(output_file):
+    if output_file.exists() and has_valid_doc_ids(output_file):
         print(
             f"[SKIP] {name}: {output_file} already exists ({output_file.stat().st_size} bytes)"
         )

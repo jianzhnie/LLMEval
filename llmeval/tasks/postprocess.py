@@ -14,9 +14,6 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
-    "DEFAULT_FILTER_REGISTRY",
-    "FilterRegistry",
-    "TextFilter",
     "TextFilterPipeline",
     "atomic_write_json",
     "normalize_single_generation_samples",
@@ -35,63 +32,23 @@ _THINK_END_RE: re.Pattern[str] = re.compile(r"</think\s*>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
-class RegisteredTextFilter:
-    """A named text transformation."""
-
-    name: str
-    function: TextFilter
-
-    def __call__(self, text: str) -> str:
-        return self.function(text)
-
-
-class FilterRegistry:
-    """Register named filters and build deterministic task pipelines."""
-
-    def __init__(self) -> None:
-        self._filters: dict[str, RegisteredTextFilter] = {}
-
-    def register(self, name: str, function: TextFilter) -> None:
-        if not name:
-            raise ValueError("filter name cannot be empty")
-        if name in self._filters:
-            raise ValueError(f"filter {name!r} is already registered")
-        self._filters[name] = RegisteredTextFilter(name, function)
-
-    def build_pipeline(self, name: str, *filter_names: str) -> TextFilterPipeline:
-        """Build a named pipeline from registered filters."""
-        if not name:
-            raise ValueError("pipeline name cannot be empty")
-        missing = [item for item in filter_names if item not in self._filters]
-        if missing:
-            available = ", ".join(sorted(self._filters)) or "<none>"
-            raise ValueError(
-                f"Unknown text filter(s) {missing!r}; registered filters: {available}"
-            )
-        return TextFilterPipeline(
-            name,
-            tuple(self._filters[item] for item in filter_names),
-        )
-
-
-@dataclass(frozen=True)
 class TextFilterPipeline:
     """An ordered task-level text pipeline with a stable name."""
 
     name: str
-    filters: tuple[RegisteredTextFilter, ...]
+    filters: tuple[tuple[str, TextFilter], ...]
 
     def apply_with_trace(self, value: Any) -> tuple[str, dict[str, Any]]:
         """Apply filters and return compact, JSON-compatible metadata."""
         raw_text = _coerce_text(value)
         text = raw_text
         steps: list[dict[str, str | int | bool]] = []
-        for filter_fn in self.filters:
+        for filter_name, filter_fn in self.filters:
             input_text = text
             text = _coerce_text(filter_fn(text))
             steps.append(
                 {
-                    "name": filter_fn.name,
+                    "name": filter_name,
                     "changed": input_text != text,
                     "input_length": len(input_text),
                     "output_length": len(text),
@@ -133,38 +90,50 @@ def strip_reasoning_wrappers(text: str) -> str:
     return text
 
 
-DEFAULT_FILTER_REGISTRY = FilterRegistry()
-DEFAULT_FILTER_REGISTRY.register("strip_reasoning", strip_reasoning_wrappers)
-
-
-def resolve_single_generation(
-    item: dict[str, Any], response_key: str, *, problem_id: str
-) -> str | None:
-    """Return one generation, using ``None`` only for a missing response."""
-    value = item.get(response_key)
+def resolve_single_generation(item: dict[str, Any], response_key: str) -> str | None:
+    """Return one valid generation, or ``None`` for malformed/missing data."""
+    if response_key not in item:
+        return None
+    value = item[response_key]
     if isinstance(value, list):
-        if len(value) > 1:
-            raise ValueError(
-                f"Invalid {response_key!r} for problem {problem_id!r}: expected "
-                "one generation per row"
-            )
         # An explicit empty list represents one empty model answer.
-        value = value[0] if value else ""
-    if value is not None and not isinstance(value, str):
-        raise ValueError(
-            f"Invalid {response_key!r} for problem {problem_id!r}: expected a "
-            "string or a list containing one string"
-        )
-    return value
+        if not value:
+            return ""
+        if len(value) != 1 or not isinstance(value[0], str):
+            return None
+        return value[0]
+    return value if isinstance(value, str) else None
 
 
-def sample_order_indices(items: list[dict[str, Any]], *, problem_id: str) -> list[int]:
+def sample_order_indices(
+    items: list[dict[str, Any]],
+    *,
+    problem_id: str,
+    n_samples: int | None = None,
+) -> list[int]:
     """Return stable sample positions ordered by validated ``sample_index``.
 
     Legacy rows without an index receive the lowest unused indices in file
     order. Explicit indices must be non-negative integers and unique within
     the problem.
     """
+    if n_samples is not None and (type(n_samples) is not int or n_samples <= 0):
+        raise ValueError(f"n_samples must be a positive integer, got {n_samples!r}")
+    row_sample_counts = [item["n_samples"] for item in items if "n_samples" in item]
+    if any(type(value) is not int or value <= 0 for value in row_sample_counts):
+        raise ValueError(f"Invalid n_samples for problem {problem_id!r}")
+    unique_sample_counts = set(row_sample_counts)
+    if len(unique_sample_counts) > 1:
+        raise ValueError(f"Conflicting n_samples for problem {problem_id!r}")
+    if unique_sample_counts:
+        row_n_samples = next(iter(unique_sample_counts))
+        if n_samples is not None and row_n_samples != n_samples:
+            raise ValueError(
+                f"Problem {problem_id!r} records n_samples={row_n_samples}, "
+                f"but n_samples={n_samples} was requested"
+            )
+        n_samples = row_n_samples
+
     explicit: dict[int, int] = {}
     used: dict[int, int] = {}
     for position, item in enumerate(items):
@@ -194,6 +163,16 @@ def sample_order_indices(items: list[dict[str, Any]], *, problem_id: str) -> lis
             used[sample_index] = position
             next_index += 1
         assigned.append(sample_index)
+    expected = len(items) if n_samples is None else n_samples
+    actual_indices = set(assigned)
+    required_indices = set(range(expected))
+    if actual_indices != required_indices:
+        missing = sorted(required_indices - actual_indices)
+        unexpected = sorted(actual_indices - required_indices)
+        raise ValueError(
+            f"Incomplete samples for problem {problem_id!r}: expected indices "
+            f"0..{expected - 1}, missing={missing}, unexpected={unexpected}"
+        )
     return sorted(range(len(items)), key=assigned.__getitem__)
 
 
@@ -204,6 +183,7 @@ def normalize_single_generation_samples(
     problem_identity: Callable[[dict[str, Any], int], str],
     conflict_keys: tuple[str, ...] = (),
     record_kind: str = "document",
+    n_samples: int | None = None,
 ) -> list[dict[str, Any]]:
     """Validate repeated samples and normalize one generation per input row.
 
@@ -225,9 +205,11 @@ def normalize_single_generation_samples(
                     raise ValueError(
                         f"Conflicting {key!r} for {record_kind} {problem_id!r}"
                     )
-        response = resolve_single_generation(item, response_key, problem_id=problem_id)
+        response = resolve_single_generation(item, response_key)
         record = dict(item)
-        if response is not None:
+        if response is None:
+            record.pop(response_key, None)
+        else:
             record[response_key] = [response]
         positions_by_problem.setdefault(problem_id, []).append(len(normalized))
         normalized.append(record)
@@ -235,7 +217,11 @@ def normalize_single_generation_samples(
     ordered = normalized.copy()
     for problem_id, positions in positions_by_problem.items():
         samples = [normalized[position] for position in positions]
-        sample_order = sample_order_indices(samples, problem_id=problem_id)
+        sample_order = sample_order_indices(
+            samples,
+            problem_id=problem_id,
+            n_samples=n_samples,
+        )
         for destination, source in zip(positions, sample_order, strict=True):
             ordered[destination] = samples[source]
     return ordered

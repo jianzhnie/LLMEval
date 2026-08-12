@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,47 @@ __all__ = [
 ]
 
 logger = init_logger("eval_config")
+
+
+def require_int(
+    name: str, value: Any, *, minimum: int | None = None, maximum: int | None = None
+) -> int:
+    """Return a strict integer value after applying an optional lower bound."""
+    if type(value) is not int:
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got {value}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}, got {value}")
+    return value
+
+
+def require_number(
+    name: str,
+    value: Any,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    minimum_inclusive: bool = True,
+) -> float:
+    """Return a finite non-boolean number within the requested bounds."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    below_minimum = minimum is not None and (
+        number < minimum if minimum_inclusive else number <= minimum
+    )
+    if below_minimum or (maximum is not None and number > maximum):
+        lower = "at least" if minimum_inclusive else "greater than"
+        bounds = []
+        if minimum is not None:
+            bounds.append(f"{lower} {minimum:g}")
+        if maximum is not None:
+            bounds.append(f"at most {maximum:g}")
+        raise ValueError(f"{name} must be {' and '.join(bounds)}, got {value!r}")
+    return number
 
 
 @dataclass
@@ -171,23 +213,11 @@ class GenerationArguments:
 
     def __post_init__(self) -> None:
         """Validate backend-independent generation arguments."""
-        if self.n_samples <= 0:
-            raise ValueError(
-                f"Number of samples must be positive, but got {self.n_samples}."
-            )
-        if not (0.0 <= self.temperature <= 2.0):
-            raise ValueError(
-                f"Temperature must be between 0.0 and 2.0, got: {self.temperature}"
-            )
-        if not 0 <= self.top_p <= 1:
-            raise ValueError(f"Top-p must be between 0 and 1, but got {self.top_p}.")
-        if self.max_completion_tokens <= 0:
-            raise ValueError(
-                "max_completion_tokens must be a positive integer, got: "
-                f"{self.max_completion_tokens}"
-            )
-        if self.seed < 0:
-            raise ValueError(f"seed must be non-negative, got: {self.seed}")
+        require_int("n_samples", self.n_samples, minimum=1)
+        require_number("temperature", self.temperature, minimum=0, maximum=2)
+        require_number("top_p", self.top_p, minimum=0, maximum=1)
+        require_int("max_completion_tokens", self.max_completion_tokens, minimum=1)
+        require_int("seed", self.seed, minimum=0)
 
 
 @dataclass
@@ -208,14 +238,17 @@ class VLLMGenerationArguments:
 
     def __post_init__(self) -> None:
         """Validate local vLLM generation arguments."""
+        require_int("top_k", self.top_k)
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(
                 f"Top-k must be positive or -1 (disabled), got: {self.top_k}"
             )
-        if self.repetition_penalty <= 0:
-            raise ValueError(
-                f"Repetition penalty must be positive, got: {self.repetition_penalty}"
-            )
+        require_number(
+            "repetition_penalty",
+            self.repetition_penalty,
+            minimum=0,
+            minimum_inclusive=False,
+        )
         if not isinstance(self.skip_special_tokens, bool):
             raise ValueError(
                 "skip_special_tokens must be a boolean, got: "
@@ -328,22 +361,16 @@ class VLLMEngineArguments:
             ValueError: If any parameter is outside its valid range or if
                        rope_scaling contains invalid JSON.
         """
-        if not 0 < self.gpu_memory_utilization <= 1:
-            raise ValueError(
-                f"GPU memory utilization must be between 0 and 1, but got {self.gpu_memory_utilization}."
-            )
-        if self.max_model_len <= 0:
-            raise ValueError(
-                f"Max model length must be positive, but got {self.max_model_len}."
-            )
-        if self.tensor_parallel_size < 1:
-            raise ValueError(
-                f"Tensor parallel size must be at least 1, but got {self.tensor_parallel_size}."
-            )
-        if self.pipeline_parallel_size < 1:
-            raise ValueError(
-                f"Pipeline parallel size must be at least 1, but got {self.pipeline_parallel_size}."
-            )
+        require_number(
+            "gpu_memory_utilization",
+            self.gpu_memory_utilization,
+            minimum=0,
+            maximum=1,
+            minimum_inclusive=False,
+        )
+        require_int("max_model_len", self.max_model_len, minimum=1)
+        require_int("tensor_parallel_size", self.tensor_parallel_size, minimum=1)
+        require_int("pipeline_parallel_size", self.pipeline_parallel_size, minimum=1)
 
         # Validate dtype
         valid_dtypes = ["auto", "float16", "float32", "bfloat16"]
@@ -381,14 +408,12 @@ class VLLMEngineArguments:
             logger.info(f"Successfully parsed rope_scaling: {self.rope_scaling_dict}")
 
         # Validate optional engine limits
-        if self.max_num_batched_tokens is not None and self.max_num_batched_tokens < 1:
-            raise ValueError(
-                f"max_num_batched_tokens must be positive, but got {self.max_num_batched_tokens}."
+        if self.max_num_batched_tokens is not None:
+            require_int(
+                "max_num_batched_tokens", self.max_num_batched_tokens, minimum=1
             )
-        if self.max_num_seqs is not None and self.max_num_seqs < 1:
-            raise ValueError(
-                f"max_num_seqs must be positive, but got {self.max_num_seqs}."
-            )
+        if self.max_num_seqs is not None:
+            require_int("max_num_seqs", self.max_num_seqs, minimum=1)
 
 
 @dataclass
@@ -452,18 +477,9 @@ class ServerArguments:
         Raises:
             ValueError: If any parameter is outside its valid range.
         """
-        if self.max_workers <= 0:
-            raise ValueError(
-                f"Maximum number of worker threads must be a positive integer, but got {self.max_workers}."
-            )
-        if self.request_timeout <= 0:
-            raise ValueError(
-                f"Request timeout must be a positive integer, but got {self.request_timeout}."
-            )
-        if self.max_retries < 0:
-            raise ValueError(
-                f"Max retries must be non-negative, but got {self.max_retries}."
-            )
+        require_int("max_workers", self.max_workers, minimum=1)
+        require_int("request_timeout", self.request_timeout, minimum=1)
+        require_int("max_retries", self.max_retries, minimum=0)
         # Validate URL format
         if not self.base_url.startswith(("http://", "https://")):
             raise ValueError(
@@ -543,10 +559,7 @@ class OfflineInferArguments(
         GenerationArguments.__post_init__(self)
         VLLMGenerationArguments.__post_init__(self)
         VLLMEngineArguments.__post_init__(self)
-        if self.batch_size <= 0:
-            raise ValueError(
-                f"Batch size must be a positive integer, but got {self.batch_size}."
-            )
+        require_int("batch_size", self.batch_size, minimum=1)
 
 
 @dataclass
@@ -604,8 +617,7 @@ class MCInferArguments(
                 "loglikelihood_mode must be one of "
                 f"{('first_token', 'continuation')}, got: {self.loglikelihood_mode!r}"
             )
-        if self.n_shot < 0:
-            raise ValueError(f"n_shot must be non-negative, got: {self.n_shot}")
+        require_int("n_shot", self.n_shot, minimum=0)
         if self.n_shot > 0 and not self.few_shot_file:
             raise ValueError(
                 "few_shot_file is required when n_shot is greater than zero; "
@@ -662,6 +674,15 @@ class ShareEvalArguments:
     confidence_level: float = field(
         default=0.95, metadata={"help": "Bootstrap confidence level."}
     )
+    n_samples: int | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Expected successful generations per problem. Set this when "
+                "evaluating legacy output without n_samples metadata."
+            )
+        },
+    )
 
     def __post_init__(self) -> None:
         if not self.input_path:
@@ -683,19 +704,24 @@ class ShareEvalArguments:
             label_key=self.label_key,
             response_key=self.response_key,
         )
-        if self.max_workers <= 0:
-            raise ValueError(f"max_workers must be positive, got {self.max_workers}")
-        if self.timeout <= 0:
-            raise ValueError(f"timeout must be positive, got {self.timeout}")
-        if self.seed < 0:
-            raise ValueError(f"seed must be non-negative, got {self.seed}")
-        if self.bootstrap_samples < 0:
+        require_int("max_workers", self.max_workers, minimum=1)
+        require_int("timeout", self.timeout, minimum=1)
+        require_int("seed", self.seed, minimum=0)
+        require_int("bootstrap_samples", self.bootstrap_samples, minimum=0)
+        require_number(
+            "confidence_level",
+            self.confidence_level,
+            minimum=0,
+            maximum=1,
+            minimum_inclusive=False,
+        )
+        if float(self.confidence_level) == 1.0:
+            raise ValueError("confidence_level must be less than 1")
+        if self.n_samples is not None and (
+            type(self.n_samples) is not int or self.n_samples <= 0
+        ):
             raise ValueError(
-                f"bootstrap_samples must be non-negative, got {self.bootstrap_samples}"
-            )
-        if not 0.0 < self.confidence_level < 1.0:
-            raise ValueError(
-                f"confidence_level must be between 0 and 1, got {self.confidence_level}"
+                f"n_samples must be a positive integer or None, got {self.n_samples!r}"
             )
 
 
@@ -770,5 +796,6 @@ class CodeEvalArguments(ShareEvalArguments):
                 f"code_k_values must contain positive integers, got {self.code_k_values!r}"
             )
         self.code_k_values_tuple = parsed_k
-        if self.exec_timeout <= 0:
-            raise ValueError(f"exec_timeout must be positive, got {self.exec_timeout}")
+        require_number(
+            "exec_timeout", self.exec_timeout, minimum=0, minimum_inclusive=False
+        )

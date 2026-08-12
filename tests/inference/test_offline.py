@@ -244,6 +244,17 @@ class TestOfflineInferenceRunner:
         assert runner._failed_count == 1
         assert not (tmp_path / "output_failed.jsonl").exists()
 
+    def test_process_batches_always_propagates_persistence_failure(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _runner(tmp_path, batch_size=1, fail_fast=False)
+        runner.process_and_write_batch = MagicMock(side_effect=OSError("disk full"))
+
+        with pytest.raises(OSError, match="disk full"):
+            runner._process_batches([{"doc_id": "d1"}])
+
+        assert runner._failed_count == 0
+
     def test_non_fail_fast_isolates_one_bad_inference_sample(
         self, tmp_path: Path
     ) -> None:

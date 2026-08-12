@@ -117,6 +117,22 @@ class TestGenerationArguments:
         with pytest.raises(ValueError, match="seed"):
             GenerationArguments(seed=-1)
 
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("n_samples", True),
+            ("max_completion_tokens", 1.5),
+            ("seed", True),
+            ("temperature", float("nan")),
+            ("top_p", float("inf")),
+        ],
+    )
+    def test_numeric_fields_reject_invalid_types(
+        self, field_name: str, value: object
+    ) -> None:
+        with pytest.raises(ValueError, match=field_name):
+            GenerationArguments(**{field_name: value})
+
 
 class TestInferenceSpecificArguments:
     def test_online_does_not_expose_offline_only_fields(self) -> None:
@@ -146,7 +162,7 @@ class TestInferenceSpecificArguments:
         assert args.skip_special_tokens is True
         assert args.repetition_penalty == 1.0
 
-        with pytest.raises(ValueError, match="positive integer"):
+        with pytest.raises(ValueError, match="batch_size"):
             OfflineInferArguments(input_file=str(input_file), batch_size=0)
 
 
@@ -156,8 +172,16 @@ class TestVLLMEngineArguments:
         assert args.tensor_parallel_size >= 1
 
     def test_invalid_gpu_util_raises(self) -> None:
-        with pytest.raises(ValueError, match="GPU memory"):
+        with pytest.raises(ValueError, match="gpu_memory_utilization"):
             VLLMEngineArguments(gpu_memory_utilization=0.0)
+
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [("max_model_len", True), ("tensor_parallel_size", 1.5)],
+    )
+    def test_integer_fields_are_strict(self, field_name: str, value: object) -> None:
+        with pytest.raises(ValueError, match=field_name):
+            VLLMEngineArguments(**{field_name: value})
 
 
 class TestMCAndEvaluationP0Config:
@@ -190,8 +214,12 @@ class TestVLLMGenerationArguments:
         assert args.repetition_penalty == 1.0
 
     def test_zero_repetition_penalty_raises(self) -> None:
-        with pytest.raises(ValueError, match="positive"):
+        with pytest.raises(ValueError, match="repetition_penalty"):
             VLLMGenerationArguments(repetition_penalty=0.0)
+
+    def test_float_top_k_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="top_k"):
+            VLLMGenerationArguments(top_k=1.5)
 
 
 class TestServerArguments:
@@ -211,8 +239,16 @@ class TestServerArguments:
             ServerArguments(model_name="  ")
 
     def test_zero_max_workers_raises(self) -> None:
-        with pytest.raises(ValueError, match="positive"):
+        with pytest.raises(ValueError, match="max_workers"):
             ServerArguments(max_workers=0)
+
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [("max_workers", True), ("request_timeout", 1.5), ("max_retries", True)],
+    )
+    def test_integer_fields_are_strict(self, field_name: str, value: object) -> None:
+        with pytest.raises(ValueError, match=field_name):
+            ServerArguments(**{field_name: value})
 
     def test_extra_body_defaults_to_empty_object(self) -> None:
         args = ServerArguments()
@@ -340,6 +376,16 @@ class TestEvalArguments:
 
         with pytest.raises(ValueError, match="result_path is required"):
             MathEvalArguments(input_path=str(input_path), result_path="  ")
+
+    @pytest.mark.parametrize("n_samples", [0, 1.5, True])
+    def test_n_samples_is_optional_positive_integer(
+        self, tmp_path: Path, n_samples: object
+    ) -> None:
+        input_path = tmp_path / "data.jsonl"
+        input_path.write_text("{}\n")
+
+        with pytest.raises(ValueError, match="n_samples"):
+            MathEvalArguments(input_path=str(input_path), n_samples=n_samples)
 
     @pytest.mark.parametrize(
         "argument_type", [MathEvalArguments, MCEvalArguments, CodeEvalArguments]

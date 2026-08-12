@@ -183,6 +183,10 @@ def call_with_retry(
         Non-APIError exceptions from *fn* are re-raised without retrying
         (see :func:`should_retry`).
     """
+    if type(max_retries) is not int or max_retries < 0:
+        raise ValueError(
+            f"max_retries must be a non-negative integer, got {max_retries!r}"
+        )
     for attempt in range(max_retries + 1):
         try:
             return fn()
@@ -191,3 +195,4 @@ def call_with_retry(
                 raise
             if should_retry(e, attempt, max_retries) is None:
                 return None  # context-length rejection → empty result
+    raise AssertionError("retry loop exhausted without returning or raising")

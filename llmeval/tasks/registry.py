@@ -231,6 +231,7 @@ class EvaluationContext(PreparationContext):
     bootstrap_samples: int = 1000
     confidence_level: float = 0.95
     code_k_values: tuple[int, ...] = (1, 10, 64)
+    n_samples: int | None = None
 
 
 class EvaluationTask(Protocol):
@@ -314,7 +315,7 @@ class GeneratedTask:
     def prepare_dataset(
         self, data: list[dict[str, Any]], context: PreparationContext
     ) -> list[dict[str, Any]]:
-        required = (context.label_key, context.response_key)
+        required = (context.label_key,)
         prepared: list[dict[str, Any]] = []
         for item in data:
             missing = [key for key in required if key not in item]
@@ -336,13 +337,16 @@ class MathTask(GeneratedTask):
     metric_specs: tuple[MetricSpec, ...] = (MetricSpec("accuracy"),)
 
     def score(self, context: EvaluationContext) -> EvaluationResult:
-        scored = self.scorer(
-            eval_dataset=context.eval_dataset,
-            label_key=context.label_key,
-            response_key=context.response_key,
-            max_workers=context.max_workers,
-            timeout=context.timeout,
-        )
+        kwargs: dict[str, Any] = {
+            "eval_dataset": context.eval_dataset,
+            "label_key": context.label_key,
+            "response_key": context.response_key,
+            "max_workers": context.max_workers,
+            "timeout": context.timeout,
+        }
+        if context.n_samples is not None:
+            kwargs["n_samples"] = context.n_samples
+        scored = self.scorer(**kwargs)
         return _build_evaluation_result(scored, context, self)
 
 
@@ -404,6 +408,8 @@ class MCTask(GeneratedTask):
                 response_key=context.response_key,
                 aggregation=context.mc_aggregation,
             )
+            if context.n_samples is not None:
+                kwargs["n_samples"] = context.n_samples
         scored = scorer(**kwargs)
         return _build_evaluation_result(scored, context, self)
 
@@ -417,16 +423,19 @@ class CodeTask(GeneratedTask):
     metric_specs: tuple[MetricSpec, ...] = (MetricSpec("pass@1"),)
 
     def score(self, context: EvaluationContext) -> EvaluationResult:
-        scored = self.scorer(
-            eval_dataset=context.eval_dataset,
-            label_key=context.label_key,
-            response_key=context.response_key,
-            max_workers=context.max_workers,
-            timeout=context.timeout,
-            exec_timeout=context.exec_timeout,
-            k_values=context.code_k_values,
-            allow_unsafe_code=context.allow_unsafe_code,
-        )
+        kwargs: dict[str, Any] = {
+            "eval_dataset": context.eval_dataset,
+            "label_key": context.label_key,
+            "response_key": context.response_key,
+            "max_workers": context.max_workers,
+            "timeout": context.timeout,
+            "exec_timeout": context.exec_timeout,
+            "k_values": context.code_k_values,
+            "allow_unsafe_code": context.allow_unsafe_code,
+        }
+        if context.n_samples is not None:
+            kwargs["n_samples"] = context.n_samples
+        scored = self.scorer(**kwargs)
         return _build_evaluation_result(scored, context, self)
 
 

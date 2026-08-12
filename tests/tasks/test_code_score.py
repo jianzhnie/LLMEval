@@ -156,11 +156,19 @@ class TestEstimatePassAtK:
         assert estimate_pass_at_k(5, 0, 5) == 0.0
 
     def test_zero_samples(self) -> None:
-        assert estimate_pass_at_k(0, 0, 1) == 0.0
+        with pytest.raises(ValueError, match="num_samples"):
+            estimate_pass_at_k(0, 0, 1)
 
     def test_negative_correct(self) -> None:
-        # clamped to 0 internally
-        assert estimate_pass_at_k(5, -1, 1) == 0.0
+        with pytest.raises(ValueError, match="num_correct"):
+            estimate_pass_at_k(5, -1, 1)
+
+    @pytest.mark.parametrize(
+        "args", [(2, 3, 1), (2, 1, 0), (2, 1, 3), (2.0, 1, 1), (2, 1, True)]
+    )
+    def test_invalid_inputs_raise(self, args: tuple[object, object, object]) -> None:
+        with pytest.raises((TypeError, ValueError)):
+            estimate_pass_at_k(*args)  # type: ignore[arg-type]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -261,6 +269,67 @@ class TestScoreCode:
         assert result.failed_count == 1
         assert result.effective_sample_count == 0
         assert result.observations["pass@1"] == []
+
+    @pytest.mark.parametrize("generation", [None, [None], 123])
+    def test_malformed_generation_is_infrastructure_failure(
+        self, generation: object
+    ) -> None:
+        result = score_code_result(
+            [
+                {
+                    "task_id": "task/0",
+                    "prompt": "def f():\n",
+                    "answer": "\nassert f() == 1\n",
+                    "gen": generation,
+                }
+            ],
+            "answer",
+            "gen",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert result.failed_count == 1
+        assert result.records[0]["evaluation_status"] == "failed"
+
+    def test_infrastructure_failure_does_not_try_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.tasks.code_eval.code_score as code_score
+
+        check = MagicMock(
+            return_value={
+                "task_id": "task/0",
+                "passed": False,
+                "result": "worker failed",
+                "stderr": "",
+                "evaluation_status": "failed",
+            }
+        )
+        monkeypatch.setattr(code_score, "check_correctness", check)
+        monkeypatch.setattr(
+            code_score,
+            "_build_check_programs",
+            MagicMock(return_value=[("first", "a"), ("fallback", "b")]),
+        )
+
+        result = score_code_result(
+            [
+                {
+                    "task_id": "task/0",
+                    "prompt": "def f():\n",
+                    "answer": "assert f() == 1",
+                    "gen": "return 1",
+                }
+            ],
+            "answer",
+            "gen",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert result.failed_count == 1
+        assert check.call_count == 1
 
     def test_incomplete_problem_is_excluded_from_problem_level_pass_at_k(
         self,
@@ -793,10 +862,11 @@ class TestCodeRepeatedRows:
         assert len(records) == 2
         assert acc == pytest.approx(0.5)
 
-    def test_multi_generation_row_is_rejected(self, tmp_path: Path) -> None:
+    def test_multi_generation_row_is_failed(self, tmp_path: Path) -> None:
         items = [self._item([self._WRONG, self._RIGHT])]
-        with pytest.raises(ValueError, match="one generation per row"):
-            self._score(items, tmp_path)
+        _, records = self._score(items, tmp_path)
+
+        assert records[0]["evaluation_status"] == "failed"
 
     def test_multi_sample_row_requires_task_id(self, tmp_path: Path) -> None:
         item = self._item([self._WRONG, self._RIGHT])

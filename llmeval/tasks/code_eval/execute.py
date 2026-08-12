@@ -197,7 +197,7 @@ def _apply_resource_limits(timeout: float) -> None:
 
     fd_count = _current_fd_count()
     nofile_limit = 64 if fd_count is None else max(64, fd_count + 16)
-    limits = (
+    limits: tuple[tuple[int, int], ...] = (
         (resource.RLIMIT_CPU, max(1, math.ceil(timeout) + 1)),
         (resource.RLIMIT_FSIZE, 1 * 1024 * 1024),
         (resource.RLIMIT_NOFILE, nofile_limit),
@@ -625,7 +625,11 @@ def check_correctness(
     # -- segmentation fault -----------------------------------------------------
     if p.exitcode == -signal.SIGSEGV:
         _cleanup_tmp(tmp_path)
-        return _fail(task_id, "failed: SegmentationFault")
+        return _fail(
+            task_id,
+            "failed: SegmentationFault",
+            evaluation_status="completed",
+        )
 
     # -- killed by another signal ------------------------------------------------
     # e.g. SIGKILL/SIGXCPU from RLIMIT_CPU on an infinite loop, or the OOM

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.data_process.io_utils import atomic_output_path
+from scripts.data_process.io_utils import atomic_output_path, has_valid_doc_ids
 from scripts.data_process.post_process import load_and_validate_args
 
 
@@ -32,6 +32,15 @@ def test_atomic_output_preserves_destination_on_failure(tmp_path: Path) -> None:
 
     assert destination.read_text(encoding="utf-8") == "old\n"
     assert list(tmp_path.glob(f".{destination.name}.*")) == []
+
+
+def test_has_valid_doc_ids_requires_non_empty_unique_ids(tmp_path: Path) -> None:
+    path = tmp_path / "data.jsonl"
+    path.write_text('{"doc_id": "a"}\n{"doc_id": "b"}\n', encoding="utf-8")
+    assert has_valid_doc_ids(path) is True
+
+    path.write_text('{"doc_id": "a"}\n{"doc_id": "a"}\n', encoding="utf-8")
+    assert has_valid_doc_ids(path) is False
 
 
 def test_post_process_rejects_output_matched_by_input_glob(

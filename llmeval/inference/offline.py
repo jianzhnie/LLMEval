@@ -120,13 +120,18 @@ class OfflineInferenceRunner:
         params: list[SamplingParams] = []
         for item in items:
             prompt = item.get(self.args.input_key) or item.get("prompt")
+            sample_index = item.get("sample_index")
+            if not isinstance(prompt, str) or type(sample_index) is not int:
+                raise ValueError(
+                    "Sample request is missing a valid prompt or sample_index"
+                )
             params.append(
                 self._build_sampling_params(
                     derive_request_seed(
                         self.args.seed,
                         str(item.get("doc_id", "")),
                         prompt,
-                        item.get("sample_index"),
+                        sample_index,
                     )
                 )
             )
@@ -368,6 +373,10 @@ class OfflineInferenceRunner:
                 processed_before = self._processed_count
                 try:
                     self.process_and_write_batch(batch)
+                except OSError:
+                    # A persistence failure is run-level: continuing could lose
+                    # results or append duplicates on a later retry.
+                    raise
                 except Exception as exc:
                     if self.args.fail_fast:
                         raise

@@ -119,6 +119,24 @@ class TestCheckCorrectness:
         assert result["result"] == "failed: TypeError"  # os._exit is None
         assert result["result"] != "failed: worker did not produce a result"
 
+    def test_segmentation_fault_is_completed_incorrect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        process = MagicMock()
+        process.is_alive.return_value = False
+        process.exitcode = -code_execute.signal.SIGSEGV
+        context = MagicMock()
+        context.Process.return_value = process
+        monkeypatch.setattr(
+            code_execute.multiprocessing, "get_context", lambda _: context
+        )
+
+        result = check_correctness(_add_program(), 3.0, "segv", allow_unsafe_code=True)
+
+        assert result["passed"] is False
+        assert result["result"] == "failed: SegmentationFault"
+        assert result["evaluation_status"] == "completed"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # multiprocessing start-method resolution (P0-2: default fork)

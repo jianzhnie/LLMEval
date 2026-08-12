@@ -321,6 +321,8 @@ class InferenceRunner:
         query = self._extract_query(item)
 
         sample_index = item.get("sample_index")
+        if type(sample_index) is not int:
+            raise ValueError("sample_index must be a non-negative integer")
         response = self.client.get_content(
             query=query,
             system_prompt=self.system_prompt,

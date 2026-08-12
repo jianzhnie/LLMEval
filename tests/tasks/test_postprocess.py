@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from llmeval.tasks.postprocess import (
-    FilterRegistry,
+    TextFilterPipeline,
     normalize_single_generation_samples,
     resolve_max_workers,
     strip_reasoning_wrappers,
@@ -95,10 +95,9 @@ def test_normalize_repeated_samples_orders_and_validates_sample_indices() -> Non
 
 
 def test_registered_pipeline_records_each_filter_step() -> None:
-    registry = FilterRegistry()
-    registry.register("strip", str.strip)
-    registry.register("upper", str.upper)
-    pipeline = registry.build_pipeline("test_pipeline", "strip", "upper")
+    pipeline = TextFilterPipeline(
+        "test_pipeline", (("strip", str.strip), ("upper", str.upper))
+    )
 
     output, trace = pipeline.apply_with_trace(" a ")
 
@@ -126,6 +125,39 @@ def test_resolve_max_workers_respects_cpu_limit(
     assert resolve_max_workers(total=3, requested=12) == 3
 
 
-def test_pipeline_rejects_unknown_filters() -> None:
-    with pytest.raises(ValueError, match="Unknown text filter"):
-        FilterRegistry().build_pipeline("test", "missing")
+def test_normalize_rejects_missing_generation() -> None:
+    normalized = normalize_single_generation_samples(
+        [{"doc_id": "d0"}],
+        "gen",
+        problem_identity=lambda item, _index: str(item["doc_id"]),
+    )
+
+    assert "gen" not in normalized[0]
+
+
+def test_normalize_rejects_non_contiguous_sample_indices() -> None:
+    with pytest.raises(ValueError, match=r"missing=\[1\]"):
+        normalize_single_generation_samples(
+            [
+                {"doc_id": "d0", "gen": ["a"], "sample_index": 0},
+                {"doc_id": "d0", "gen": ["b"], "sample_index": 2},
+            ],
+            "gen",
+            problem_identity=lambda item, _index: str(item["doc_id"]),
+        )
+
+
+def test_normalize_uses_sample_count_metadata() -> None:
+    with pytest.raises(ValueError, match=r"missing=\[1\]"):
+        normalize_single_generation_samples(
+            [
+                {
+                    "doc_id": "d0",
+                    "gen": ["a"],
+                    "sample_index": 0,
+                    "n_samples": 2,
+                }
+            ],
+            "gen",
+            problem_identity=lambda item, _index: str(item["doc_id"]),
+        )

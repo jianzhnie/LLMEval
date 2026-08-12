@@ -20,10 +20,11 @@ from tqdm import tqdm
 
 from llmeval.tasks.math_eval.utils_parser import parse_ground_truth
 from llmeval.tasks.postprocess import (
-    DEFAULT_FILTER_REGISTRY,
     TextFilterPipeline,
     normalize_single_generation_samples,
     resolve_max_workers,
+    resolve_single_generation,
+    strip_reasoning_wrappers,
 )
 from llmeval.tasks.registry import ScorerResult
 from llmeval.utils.log import init_logger
@@ -71,8 +72,8 @@ _verify_func = math_metric(
     precision=6,
 )
 
-MATH_RESPONSE_PIPELINE: TextFilterPipeline = DEFAULT_FILTER_REGISTRY.build_pipeline(
-    "math_response", "strip_reasoning"
+MATH_RESPONSE_PIPELINE = TextFilterPipeline(
+    "math_response", (("strip_reasoning", strip_reasoning_wrappers),)
 )
 
 INVALID_ANSWER = "[invalidanswer]"
@@ -306,14 +307,13 @@ def _process_answers_impl(
     if inference_error:
         return MathAnswerResult(index, 0.0, None, gold_answer_text, failed=True)
 
-    # Get the generated text. Handles cases where response might be missing or empty.
-    generated_text = input_data.get(response_key, [])
-    if not generated_text:
-        logger.warning("No generated text found for job %d", index)
+    raw_generated_text = resolve_single_generation(input_data, response_key)
+    if raw_generated_text is None:
+        logger.warning("Missing or malformed generated text for job %d", index)
+        return MathAnswerResult(index, 0.0, None, gold_answer_text, failed=True)
+    if not raw_generated_text:
+        logger.warning("Empty generated text for job %d", index)
         return MathAnswerResult(index, 0.0, None, gold_answer_text)
-    raw_generated_text = (
-        generated_text[0] if isinstance(generated_text, list) else str(generated_text)
-    )
     generated_text, filter_trace = MATH_RESPONSE_PIPELINE.apply_with_trace(
         raw_generated_text
     )
@@ -508,11 +508,17 @@ def score_math_result(
     response_key: str,
     max_workers: int,
     timeout: int,
+    n_samples: int | None = None,
 ) -> ScorerResult:
     """Score math generations and return the shared structured result."""
     # Each inference row carries one generation; normalize its representation
     # before scoring and problem-level aggregation.
-    scoring_dataset = _normalize_math_samples(eval_dataset, label_key, response_key)
+    scoring_dataset = _normalize_math_samples(
+        eval_dataset,
+        label_key,
+        response_key,
+        n_samples=n_samples,
+    )
     accuracy = _score_math_records(
         eval_dataset=scoring_dataset,
         label_key=label_key,
@@ -561,7 +567,10 @@ def score_math_result(
 
 
 def _normalize_math_samples(
-    eval_dataset: list[dict[str, Any]], label_key: str, response_key: str
+    eval_dataset: list[dict[str, Any]],
+    label_key: str,
+    response_key: str,
+    n_samples: int | None = None,
 ) -> list[dict[str, Any]]:
     """Validate and normalize one math generation per input row.
 
@@ -575,6 +584,7 @@ def _normalize_math_samples(
         problem_identity=_problem_identity,
         conflict_keys=(label_key, "prompt"),
         record_kind="math document",
+        n_samples=n_samples,
     )
 
 

@@ -199,6 +199,7 @@ class ResumeState:
 
     completed_indices: dict[str, set[int]] = field(default_factory=dict)
     prompts: dict[str, str] = field(default_factory=dict)
+    n_samples_by_document: dict[str, int] = field(default_factory=dict)
 
     @property
     def completed_count(self) -> int:
@@ -323,6 +324,21 @@ def load_resume_state(
                 )
             document_key = str(document_id)
             completed = state.completed_indices.setdefault(document_key, set())
+            row_n_samples = item.get("n_samples")
+            if row_n_samples is not None:
+                if type(row_n_samples) is not int or row_n_samples <= 0:
+                    raise ValueError(
+                        f"Resume file {output_path} line {line_num} has invalid "
+                        f"n_samples={row_n_samples!r}"
+                    )
+                previous_n_samples = state.n_samples_by_document.setdefault(
+                    document_key, row_n_samples
+                )
+                if previous_n_samples != row_n_samples:
+                    raise ValueError(
+                        f"Resume file {output_path} line {line_num} has conflicting "
+                        f"n_samples for doc_id={document_key!r}"
+                    )
             sample_index = item.get("sample_index")
             if sample_index is None:
                 # Legacy rows did not persist sample identity. Assign the next
@@ -418,6 +434,12 @@ def prepare_sample_requests(
                 f"{document_key!r}; use a new output file"
             )
         completed = resume_state.completed_indices.get(document_key, set())
+        recorded_n_samples = resume_state.n_samples_by_document.get(document_key)
+        if recorded_n_samples is not None and recorded_n_samples != n_samples:
+            raise ValueError(
+                f"Resume output records n_samples={recorded_n_samples} for "
+                f"doc_id={document_key!r}, but n_samples={n_samples} was requested"
+            )
         invalid_indices = sorted(index for index in completed if index >= n_samples)
         if invalid_indices:
             raise ValueError(
@@ -430,6 +452,7 @@ def prepare_sample_requests(
                 continue
             item = copy.deepcopy(source)
             item["sample_index"] = generation_ordinal
+            item["n_samples"] = n_samples
             expanded.append(item)
     return expanded
 
