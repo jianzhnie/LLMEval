@@ -36,6 +36,7 @@ from llmeval.inference.common import (
     load_resume_state,
     prepare_sample_requests,
     redact_config_for_logging,
+    write_run_manifest,
 )
 from llmeval.utils.config import OfflineInferArguments
 from llmeval.utils.log import init_logger
@@ -219,6 +220,7 @@ class OfflineInferenceRunner:
         # Load raw data
         raw_data: list[dict[str, Any]] = load_jsonl(self.args.input_file)
         logger.info(f"Loaded {len(raw_data)} items from input file")
+        write_run_manifest(self.args.output_file, raw_data, self.args.n_samples)
 
         # Resume tracks completed output row counts per stable document.
         resume_state = load_resume_state(

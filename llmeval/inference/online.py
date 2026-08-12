@@ -8,7 +8,6 @@ inference tasks.
 
 from __future__ import annotations
 
-import concurrent.futures
 import dataclasses
 import json
 import logging
@@ -20,7 +19,6 @@ from typing import Any
 
 import httpx
 import openai
-from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
@@ -33,6 +31,8 @@ from llmeval.inference.common import (
     load_resume_state,
     prepare_sample_requests,
     redact_config_for_logging,
+    run_concurrent_requests,
+    write_run_manifest,
 )
 from llmeval.utils.config import OnlineInferArguments
 from llmeval.utils.log import init_logger
@@ -266,6 +266,7 @@ class InferenceRunner:
         # Load raw data
         raw_data: list[dict[str, Any]] = load_jsonl(self.args.input_file)
         logger.info(f"Loaded {len(raw_data)} items from input file")
+        write_run_manifest(self.args.output_file, raw_data, self.args.n_samples)
 
         # Resume functionality handling
         resume_state = load_resume_state(
@@ -344,33 +345,15 @@ class InferenceRunner:
 
     def _process_concurrently(self, expanded_data: list[dict[str, Any]]) -> None:
         """Process requests and persist successful results in the coordinator."""
-
-        executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.args.max_workers, thread_name_prefix="inference_worker"
+        processed, failed = run_concurrent_requests(
+            expanded_data,
+            self.process_item,
+            self._write_result,
+            max_workers=self.args.max_workers,
+            thread_name_prefix="inference_worker",
         )
-        futures = [executor.submit(self.process_item, item) for item in expanded_data]
-        try:
-            with tqdm(
-                total=len(expanded_data), desc="Processing samples", unit="sample"
-            ) as pbar:
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        result = future.result()
-                    except Exception as e:
-                        logger.warning("Inference sample failed: %s", e)
-                        self._stats["failed"] += 1
-                    else:
-                        # Persistence failures are run-level failures, not model
-                        # inference failures, and must stop the run immediately.
-                        self._write_result(result)
-                        self._stats["processed"] += 1
-                    finally:
-                        pbar.update(1)
-        finally:
-            # Don't wait for in-flight API requests when aborting: their
-            # results would be discarded anyway. cancel_futures stops pending
-            # submissions; running futures finish on their own threads.
-            executor.shutdown(wait=False, cancel_futures=True)
+        self._stats["processed"] += processed
+        self._stats["failed"] += failed
 
     def run(self) -> None:
         """Load, resume, execute, and report online inference."""

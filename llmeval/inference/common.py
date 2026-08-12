@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import copy
 import hashlib
 import json
@@ -9,9 +10,12 @@ import math
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlparse
 
+from tqdm import tqdm
+
+from llmeval.tasks.postprocess import atomic_write_json
 from llmeval.utils.log import init_logger
 from llmeval.utils.prompts import is_chat_template_applied
 
@@ -27,9 +31,14 @@ __all__ = [
     "load_resume_state",
     "prepare_sample_requests",
     "redact_config_for_logging",
+    "run_concurrent_requests",
+    "warn_result_manifest",
+    "write_run_manifest",
 ]
 
 logger = init_logger("inference_common")
+_T = TypeVar("_T")
+_R = TypeVar("_R")
 
 
 def reject_nonfinite_json(value: str) -> None:
@@ -88,6 +97,114 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
                 )
             records.append(record)
     return records
+
+
+def _manifest_path(result_path: str | Path) -> Path:
+    return Path(f"{result_path}.manifest.json")
+
+
+def _load_run_manifest(result_path: str | Path) -> tuple[list[str], int] | None:
+    """Load and validate a result manifest."""
+    path = _manifest_path(result_path)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8"), parse_constant=reject_nonfinite_json
+        )
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Invalid run manifest {path}: {exc}") from exc
+    doc_ids = payload.get("doc_ids") if isinstance(payload, dict) else None
+    n_samples = payload.get("n_samples") if isinstance(payload, dict) else None
+    if (
+        not isinstance(doc_ids, list)
+        or any(not isinstance(value, str) or not value.strip() for value in doc_ids)
+        or len(doc_ids) != len(set(doc_ids))
+        or type(n_samples) is not int
+        or n_samples <= 0
+    ):
+        raise ValueError(f"Run manifest {path} has invalid doc_ids or n_samples")
+    return doc_ids, n_samples
+
+
+def write_run_manifest(
+    result_path: str | Path,
+    raw_data: Sequence[dict[str, Any]],
+    n_samples: int,
+) -> None:
+    """Create or validate the expected-result sidecar for resumable inference."""
+    if type(n_samples) is not int or n_samples <= 0:
+        raise ValueError(f"n_samples must be positive, got {n_samples!r}")
+    doc_ids = [str(item.get("doc_id", "")) for item in raw_data]
+    if any(not document_id.strip() for document_id in doc_ids):
+        raise ValueError("Every input record must have a non-empty doc_id")
+    if len(doc_ids) != len(set(doc_ids)):
+        raise ValueError("Input data contains duplicate doc_id values")
+
+    expected = (doc_ids, n_samples)
+    existing = _load_run_manifest(result_path)
+    if existing is not None:
+        if existing != expected:
+            raise ValueError(
+                f"Run manifest {_manifest_path(result_path)} does not match the "
+                "current input data or n_samples; use a new output file"
+            )
+        return
+
+    output_path = Path(result_path)
+    if output_path.exists() and output_path.stat().st_size:
+        logger.warning(
+            "Existing result %s has no run manifest; preserving legacy resume behavior",
+            output_path,
+        )
+        return
+
+    atomic_write_json(
+        _manifest_path(result_path),
+        {"doc_ids": doc_ids, "n_samples": n_samples},
+        indent=2,
+    )
+
+
+def warn_result_manifest(
+    records: Sequence[dict[str, Any]], result_path: str | Path
+) -> None:
+    """Warn about incomplete inference output without blocking evaluation."""
+    try:
+        manifest = _load_run_manifest(result_path)
+    except ValueError as exc:
+        logger.warning("Result completeness check: %s", exc)
+        return
+    if manifest is None:
+        return
+
+    doc_ids, n_samples = manifest
+    expected = {
+        (document_id, str(sample_index), str(n_samples))
+        for document_id in doc_ids
+        for sample_index in range(n_samples)
+    }
+    actual_rows = [
+        (
+            str(item.get("doc_id", "")),
+            str(item.get("sample_index")),
+            str(item.get("n_samples")),
+        )
+        for item in records
+        if not item.get("error")
+    ]
+    actual = set(actual_rows)
+    missing = expected - actual
+    unexpected = actual - expected
+    duplicates = len(actual_rows) - len(actual)
+    if missing or unexpected or duplicates:
+        logger.warning(
+            "Result completeness check: missing=%d, unexpected=%d, duplicates=%d; "
+            "evaluation will continue",
+            len(missing),
+            len(unexpected),
+            duplicates,
+        )
 
 
 def _iter_resume_records(
@@ -205,6 +322,44 @@ class ResumeState:
     def completed_count(self) -> int:
         """Return the total number of completed samples represented by the state."""
         return sum(len(indices) for indices in self.completed_indices.values())
+
+
+def run_concurrent_requests(
+    items: Sequence[_T],
+    worker: Callable[[_T], _R],
+    on_success: Callable[[_R], None],
+    *,
+    max_workers: int,
+    thread_name_prefix: str,
+    description: str = "Processing samples",
+) -> tuple[int, int]:
+    """Run request workers and persist successes from the coordinator thread.
+
+    Worker exceptions are counted as inference failures. Exceptions raised by
+    ``on_success`` propagate because persistence failures invalidate the run.
+    """
+    processed = 0
+    failed = 0
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix=thread_name_prefix
+    )
+    futures = [executor.submit(worker, item) for item in items]
+    try:
+        with tqdm(total=len(items), desc=description, unit="sample") as progress:
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    logger.warning("Inference sample failed: %s", exc)
+                    failed += 1
+                else:
+                    on_success(result)
+                    processed += 1
+                finally:
+                    progress.update(1)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    return processed, failed
 
 
 def derive_request_seed(

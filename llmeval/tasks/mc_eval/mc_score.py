@@ -1,13 +1,8 @@
-"""Multiple-choice scoring: answer-token loglikelihood and generation-based evaluation.
-
-Aligned with lm-evaluation-harness metric definitions.
+"""Multiple-choice answer-token and generation scoring.
 
 Metrics
 -------
-acc         — accuracy (argmax of raw answer-token logprobs, or letter extraction in generate mode)
-acc_norm    — accuracy with Unicode-character-normalized choice logprobs
-acc_bytes   — accuracy with UTF-8-byte-normalized choice logprobs
-exact_match — alias for acc in the MC context
+acc — argmax accuracy for answer-token logprobs, or extracted answer labels
 
 Entry points
 ------------
@@ -29,7 +24,7 @@ independent of the inference environment (no openai / torch).
 
 Per-item record schemas
 -----------------------
-Loglikelihood:  {"gold": int, "pred": int, "correct": bool, "correct_norm": bool}
+Loglikelihood:  {"gold": int, "pred": int, "correct": bool}
 Generate:       {"gold": str, "pred": str, "correct": bool}
 """
 
@@ -38,7 +33,6 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from collections.abc import Sequence
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -131,41 +125,24 @@ def _mc_problem_identity(item: dict[str, Any], row_index: int) -> str:
 
 @dataclass
 class MCScoreResult:
-    """Aggregate MC evaluation metrics (lm-eval aligned).
+    """Aggregate multiple-choice accuracy.
 
     Attributes
     ----------
     acc:
         Accuracy via argmax of raw answer-token logprobs (loglikelihood), or via answer-letter
         extraction from generated text (generate mode).
-    acc_norm:
-        Accuracy via Unicode-character-length-normalized logprobs. In generate
-        mode this always equals *acc* because no likelihood is available.
-    acc_bytes:
-        Accuracy via UTF-8-byte-length-normalized logprobs. In generate mode
-        this always equals *acc*.
-    exact_match:
-        Convenience alias for *acc* in the multiple-choice context.
     total:
         Number of items scored.
     correct:
         Number of items answered correctly under *acc*.
-    correct_norm:
-        Number of items answered correctly under *acc_norm*.
-    correct_bytes:
-        Number of items answered correctly under *acc_bytes*.
     records:
         Internal scoring records used to build aggregate metrics.
     """
 
     acc: float = 0.0
-    acc_norm: float = 0.0
-    acc_bytes: float = 0.0
-    exact_match: float = 0.0
     total: int = 0
     correct: int = 0
-    correct_norm: int = 0
-    correct_bytes: int = 0
     records: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -184,25 +161,13 @@ def score_loglikelihood_result(
     Parameters
     ----------
     eval_dataset:
-        Items with ``gold`` / ``logprobs`` / ``choices`` fields (output of the
-        MC inference loglikelihood mode). Newer inference outputs also include
-        ``choice_tokens`` to record the actual answer tokens scored.
+        Items with ``gold`` and answer-token ``logprobs`` fields.
     max_workers:
         Maximum process-pool workers (capped by dataset size and CPU count).
     timeout:
         Per-item scoring timeout in seconds.
 
     """
-    if any(
-        not (
-            item.get("choice_tokens") or item.get("choices") or item.get("choice_texts")
-        )
-        for item in eval_dataset
-    ):
-        logger.warning(
-            "Some items have no 'choice_tokens'/'choices' field — acc_norm will fall back to acc."
-        )
-
     records = score_items(
         eval_dataset,
         mode="loglikelihood",
@@ -463,8 +428,6 @@ def _error_record(
         "gold": gold,
         "pred": pred,
         "correct": False,
-        "correct_norm": False,
-        "correct_bytes": False,
         "evaluation_status": "failed",
         "aggregation": aggregation,
         "scoring_mode": item.get(
@@ -544,11 +507,7 @@ def _sample_weight(record: dict[str, Any]) -> int:
 
 
 def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
-    """Aggregate per-item records into :class:`MCScoreResult`.
-
-    ``correct_norm`` is only present in loglikelihood records; generate-mode
-    records fall back to ``correct`` so that ``acc_norm == acc``.
-    """
+    """Aggregate per-item records into :class:`MCScoreResult`."""
     per_sample = bool(records) and all(
         r.get("aggregation") == "per_sample" for r in records
     )
@@ -561,42 +520,23 @@ def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
     if per_sample:
         total = sum(int(r.get("sample_total", 0)) for r in records)
         n_correct = sum(int(r.get("sample_correct_count", 0)) for r in eligible_records)
-        n_correct_norm = sum(
-            int(r.get("sample_correct_norm_count", 0)) for r in eligible_records
-        )
-        n_correct_bytes = sum(
-            int(r.get("sample_correct_bytes_count", 0)) for r in eligible_records
-        )
     else:
         total = len(records)
         n_correct = sum(1 for r in eligible_records if r["correct"])
-        n_correct_norm = sum(
-            1 for r in eligible_records if r.get("correct_norm", r["correct"])
-        )
-        n_correct_bytes = sum(
-            1 for r in eligible_records if r.get("correct_bytes", r["correct"])
-        )
 
     effective_total = sum(_sample_weight(record) for record in eligible_records)
     safe_total = max(effective_total, 1)
     return MCScoreResult(
         acc=n_correct / safe_total,
-        acc_norm=n_correct_norm / safe_total,
-        acc_bytes=n_correct_bytes / safe_total,
-        exact_match=n_correct / safe_total,
         total=total,
         correct=n_correct,
-        correct_norm=n_correct_norm,
-        correct_bytes=n_correct_bytes,
         records=records,
     )
 
 
 def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
     """Convert MC task output to the registry's scorer contract."""
-    observations: dict[str, list[float]] = {
-        name: [] for name in ("acc", "acc_norm", "acc_bytes", "exact_match")
-    }
+    observations: dict[str, list[float]] = {"acc": []}
 
     for record in result.records:
         if record.get("evaluation_status", "completed") != "completed":
@@ -604,17 +544,11 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         if record.get("aggregation") == "per_sample" and isinstance(
             record.get("sample_correct"), list
         ):
-            samples = [float(bool(value)) for value in record["sample_correct"]]
-            for values in observations.values():
-                values.extend(samples)
+            observations["acc"].extend(
+                float(bool(value)) for value in record["sample_correct"]
+            )
             continue
-        for name, key in (
-            ("acc", "correct"),
-            ("acc_norm", "correct_norm"),
-            ("acc_bytes", "correct_bytes"),
-            ("exact_match", "correct"),
-        ):
-            observations[name].append(float(bool(record.get(key, False))))
+        observations["acc"].append(float(bool(record.get("correct", False))))
 
     sample_count = sum(_sample_weight(record) for record in result.records)
     failed_count = sum(
@@ -623,12 +557,7 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         if record.get("evaluation_status") == "failed"
     )
     return ScorerResult(
-        metrics={
-            "acc": result.acc,
-            "acc_norm": result.acc_norm,
-            "acc_bytes": result.acc_bytes,
-            "exact_match": result.exact_match,
-        },
+        metrics={"acc": result.acc},
         observations=observations,
         records=result.records,
         sample_count=sample_count,
@@ -708,8 +637,6 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
             "gold": gold,
             "pred": -1,
             "correct": False,
-            "correct_norm": False,
-            "correct_bytes": False,
             "evaluation_status": "failed",
         }
 
@@ -717,36 +644,11 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     pred = max(range(len(logprobs)), key=logprobs.__getitem__)
     is_correct = pred == gold
 
-    # lm-eval uses Unicode character length for acc_norm and UTF-8 byte length
-    # for acc_bytes. Token counts are useful diagnostics but are not the
-    # denominator of either harness metric.
-    if choices and len(choices) == len(logprobs):
-        choice_lens = [max(len(str(choice)), 1) for choice in choices]
-        is_correct_norm = argmax_normalized(logprobs, choice_lens) == gold
-    else:
-        is_correct_norm = is_correct
-
-    if choices and len(choices) == len(logprobs):
-        choice_bytes = [max(len(str(choice).encode("utf-8")), 1) for choice in choices]
-        is_correct_bytes = argmax_normalized(logprobs, choice_bytes) == gold
-    else:
-        is_correct_bytes = is_correct
-
     return {
         "gold": gold,
         "pred": pred,
         "correct": is_correct,
-        "correct_norm": is_correct_norm,
-        "correct_bytes": is_correct_bytes,
     }
-
-
-def argmax_normalized(logprobs: Sequence[float], lengths: Sequence[int | float]) -> int:
-    """Return the first argmax after dividing scores by positive lengths."""
-    normalized = [
-        score / float(length) for score, length in zip(logprobs, lengths, strict=True)
-    ]
-    return max(range(len(normalized)), key=normalized.__getitem__)
 
 
 def score_generate_item(
@@ -833,8 +735,6 @@ def score_generate_item(
         "gold": gold,
         "pred": pred,
         "correct": is_correct,
-        "correct_norm": is_correct,
-        "correct_bytes": is_correct,
         "aggregation": aggregation,
         "predictions": predictions,
         "raw_gen": generation_texts,
@@ -845,8 +745,6 @@ def score_generate_item(
         if status == "failed"
         else len(predictions),
         "sample_correct_count": sum(sample_correct),
-        "sample_correct_norm_count": sum(sample_correct),
-        "sample_correct_bytes_count": sum(sample_correct),
     }
 
 

@@ -93,6 +93,18 @@ class TestPromptArguments:
         with pytest.raises(ValueError, match=key):
             PromptArguments(**{key: "  "})
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"input_key": "text", "label_key": "text"},
+            {"input_key": "text", "response_key": "text"},
+            {"label_key": "answer", "response_key": "answer"},
+        ],
+    )
+    def test_record_keys_must_be_distinct(self, kwargs: dict[str, str]) -> None:
+        with pytest.raises(ValueError, match="must be distinct"):
+            PromptArguments(**kwargs)
+
 
 class TestGenerationArguments:
     def test_defaults_valid(self) -> None:
@@ -376,6 +388,17 @@ class TestEvalArguments:
 
         with pytest.raises(ValueError, match="result_path is required"):
             MathEvalArguments(input_path=str(input_path), result_path="  ")
+
+    def test_label_and_response_keys_must_be_distinct(self, tmp_path: Path) -> None:
+        input_path = tmp_path / "data.jsonl"
+        input_path.write_text("{}\n")
+
+        with pytest.raises(ValueError, match="must be distinct"):
+            MathEvalArguments(
+                input_path=str(input_path),
+                label_key="answer",
+                response_key="answer",
+            )
 
     @pytest.mark.parametrize("n_samples", [0, 1.5, True])
     def test_n_samples_is_optional_positive_integer(

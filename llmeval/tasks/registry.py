@@ -301,12 +301,7 @@ def _build_evaluation_result(
 
 def persist_evaluation_result(result: EvaluationResult, result_path: Path) -> None:
     """Persist only the aggregate result summary."""
-    summary = result.to_dict()
-    metric_values = {name: metric.value for name, metric in result.metrics.items()}
-    summary["metric_values"] = metric_values
-    for name, value in metric_values.items():
-        summary.setdefault(name, value)
-    atomic_write_json(result_path, summary, indent=2)
+    atomic_write_json(result_path, result.to_dict(), indent=2)
 
 
 class GeneratedTask:
@@ -357,12 +352,7 @@ class MCTask(GeneratedTask):
     generate_scorer: StructuredScorer
     loglikelihood_scorer: StructuredScorer
     family: str = "mc_opensource"
-    metric_specs: tuple[MetricSpec, ...] = (
-        MetricSpec("acc"),
-        MetricSpec("acc_norm"),
-        MetricSpec("acc_bytes"),
-        MetricSpec("exact_match"),
-    )
+    metric_specs: tuple[MetricSpec, ...] = (MetricSpec("acc"),)
 
     @staticmethod
     def _mc_schema(data: Sequence[dict[str, Any]]) -> bool:

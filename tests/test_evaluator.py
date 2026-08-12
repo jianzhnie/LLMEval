@@ -55,6 +55,7 @@ from llmeval.evaluator import (
     evaluate_task_result,
     select_eval_arguments,
 )
+from llmeval.inference.common import write_run_manifest
 from llmeval.tasks.registry import ScorerResult
 from llmeval.utils.config import CodeEvalArguments, MathEvalArguments, MCEvalArguments
 
@@ -132,6 +133,29 @@ class TestEvaluateTask:
         }
         with pytest.raises(ValueError, match=message):
             evaluate_task_result(**arguments)  # type: ignore[arg-type]
+
+    def test_cli_evaluates_incomplete_manifest_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.evaluator as ev
+
+        input_path = tmp_path / "output.jsonl"
+        write_run_manifest(
+            input_path,
+            [{"doc_id": "q1"}, {"doc_id": "q2"}],
+            1,
+        )
+        input_path.write_text(
+            '{"doc_id":"q1","sample_index":0,"n_samples":1,"answer":"1","gen":"1"}\n'
+        )
+        args = MathEvalArguments(
+            input_path=str(input_path),
+            result_path=str(tmp_path / "score.json"),
+        )
+        monkeypatch.setattr(ev, "_parse_eval_arguments", lambda: args)
+
+        assert ev.main() == 0
+        assert (tmp_path / "score.json").exists()
 
     def test_mc_loglikelihood_dispatch(self, tmp_path: Path) -> None:
         """Items with logprobs route to structured loglikelihood scoring."""

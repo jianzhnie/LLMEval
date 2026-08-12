@@ -693,15 +693,17 @@ def _score_code_task_result(
         ``False`` and should only enable this in a trusted or isolated runtime.
 
     """
-    if not eval_dataset:
-        logger.warning("Empty dataset — returning 0.0")
-        return CodeScoreResult(), {}
-    if not allow_unsafe_code:
-        raise PermissionError(
-            "Code evaluation executes generated code. Pass "
-            "allow_unsafe_code=True (or the CLI --allow_unsafe_code flag) "
-            "only when the execution environment is trusted."
-        )
+    if type(max_workers) is not int or max_workers <= 0:
+        raise ValueError(f"max_workers must be positive, got {max_workers!r}")
+    if type(timeout) is not int or timeout <= 0:
+        raise ValueError(f"timeout must be positive, got {timeout!r}")
+    if (
+        not isinstance(exec_timeout, int | float)
+        or isinstance(exec_timeout, bool)
+        or not math.isfinite(exec_timeout)
+        or exec_timeout <= 0
+    ):
+        raise ValueError(f"exec_timeout must be positive, got {exec_timeout!r}")
     # ``k_values`` is a scorer-level option rather than an inference config
     # field, so validate it at the public scoring boundary.
     if (
@@ -711,6 +713,15 @@ def _score_code_task_result(
     ):
         raise ValueError(
             f"k_values must contain only positive integers, got {k_values}"
+        )
+    if not eval_dataset:
+        logger.warning("Empty dataset — returning 0.0")
+        return CodeScoreResult(), {}
+    if not allow_unsafe_code:
+        raise PermissionError(
+            "Code evaluation executes generated code. Pass "
+            "allow_unsafe_code=True (or the CLI --allow_unsafe_code flag) "
+            "only when the execution environment is trusted."
         )
     expanded_dataset = _normalize_code_samples(
         eval_dataset,

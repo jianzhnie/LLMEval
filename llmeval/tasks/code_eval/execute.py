@@ -611,16 +611,18 @@ def check_correctness(
     p.join(timeout + PROCESS_JOIN_MARGIN_SECONDS)
 
     # -- timeout -----------------------------------------------------------------
-    # The worker did not finish even after the inner signal-based timeout
-    # plus the startup margin — it is hung (deadlock, uninterruptible
-    # syscall), not merely running slow candidate code.  Keep this distinct
-    # from a candidate-level "timed out" (reported via the result file):
-    # only the latter counts as an incorrect model observation.
+    # The candidate kept its worker alive beyond the outer budget (for example
+    # by cancelling SIGALRM or blocking in a syscall). This remains a completed
+    # model observation and therefore counts as incorrect.
     if p.is_alive():
         p.kill()
         p.join(PROCESS_KILL_MARGIN)
         _cleanup_tmp(tmp_path)
-        return _fail(task_id, "timed out: worker killed")
+        return _fail(
+            task_id,
+            "timed out: worker killed",
+            evaluation_status="completed",
+        )
 
     # -- segmentation fault -----------------------------------------------------
     if p.exitcode == -signal.SIGSEGV:

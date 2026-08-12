@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import llmeval.inference.common as common
 from llmeval.inference.common import (
     ResumeState,
     append_jsonl,
@@ -15,6 +16,8 @@ from llmeval.inference.common import (
     load_resume_state,
     prepare_sample_requests,
     redact_config_for_logging,
+    warn_result_manifest,
+    write_run_manifest,
 )
 
 
@@ -56,6 +59,76 @@ class TestLoadJsonl:
         path.write_text('{"score": NaN}\n')
         with pytest.raises(ValueError, match="non-standard JSON"):
             load_jsonl(path)
+
+
+class TestRunManifest:
+    def test_round_trip_and_complete_result(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        source = [
+            {"doc_id": "q1", "prompt": "one"},
+            {"doc_id": "q2", "prompt": "two"},
+        ]
+        write_run_manifest(output, source, 2)
+
+        assert json.loads(
+            output.with_name("output.jsonl.manifest.json").read_text()
+        ) == {
+            "doc_ids": ["q1", "q2"],
+            "n_samples": 2,
+        }
+        warn_result_manifest(
+            [
+                {
+                    "doc_id": document_id,
+                    "sample_index": sample_index,
+                    "n_samples": 2,
+                }
+                for document_id in ("q1", "q2")
+                for sample_index in range(2)
+            ],
+            output,
+        )
+
+    def test_missing_document_only_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = tmp_path / "output.jsonl"
+        write_run_manifest(
+            output,
+            [{"doc_id": "q1"}, {"doc_id": "q2"}],
+            1,
+        )
+
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            common.logger,
+            "warning",
+            lambda message, *args: warnings.append(message % args),
+        )
+        warn_result_manifest(
+            [{"doc_id": "q1", "sample_index": 0, "n_samples": 1}],
+            output,
+        )
+
+        assert warnings == [
+            "Result completeness check: missing=1, unexpected=0, duplicates=0; "
+            "evaluation will continue"
+        ]
+
+    def test_existing_manifest_must_match(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        write_run_manifest(output, [{"doc_id": "q1"}], 1)
+
+        with pytest.raises(ValueError, match="does not match"):
+            write_run_manifest(output, [{"doc_id": "q1"}], 2)
+
+    def test_legacy_output_does_not_gain_manifest(self, tmp_path: Path) -> None:
+        output = tmp_path / "output.jsonl"
+        output.write_text('{"doc_id": "q1"}\n')
+
+        write_run_manifest(output, [{"doc_id": "q1"}], 1)
+
+        assert not output.with_name("output.jsonl.manifest.json").exists()
 
 
 class TestResumeState:

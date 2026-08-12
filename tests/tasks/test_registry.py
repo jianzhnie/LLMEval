@@ -37,7 +37,8 @@ def test_evaluation_result_summary_excludes_records(tmp_path: Path) -> None:
     summary = json.loads((tmp_path / "score.json").read_text())
     assert "records" not in summary
     assert not any("version" in key for key in summary)
-    assert summary["acc"] == 1.0
+    assert summary["metrics"]["acc"]["value"] == 1.0
+    assert "metric_values" not in summary
 
 
 def test_bootstrap_is_deterministic() -> None:
@@ -98,18 +99,8 @@ def test_mc_registry_uses_one_observation_for_item_aggregation(
     def scorer(**kwargs: object) -> ScorerResult:
         del kwargs
         return ScorerResult(
-            metrics={
-                "acc": 1.0,
-                "acc_norm": 1.0,
-                "acc_bytes": 1.0,
-                "exact_match": 1.0,
-            },
-            observations={
-                "acc": [1.0],
-                "acc_norm": [1.0],
-                "acc_bytes": [1.0],
-                "exact_match": [1.0],
-            },
+            metrics={"acc": 1.0},
+            observations={"acc": [1.0]},
             records=[{"correct": True, "aggregation": aggregation}],
             sample_count=1,
             effective_sample_count=1,

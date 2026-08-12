@@ -16,7 +16,6 @@ logprobs, and per-mode worker methods.
 
 from __future__ import annotations
 
-import concurrent.futures
 import dataclasses
 import hashlib
 import json
@@ -25,13 +24,12 @@ import os
 import random
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 import httpx
 import openai
-from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from llmeval.inference.common import (
@@ -44,6 +42,8 @@ from llmeval.inference.common import (
     load_resume_state,
     prepare_sample_requests,
     redact_config_for_logging,
+    run_concurrent_requests,
+    write_run_manifest,
 )
 from llmeval.utils.config import MCInferArguments
 from llmeval.utils.log import init_logger
@@ -535,6 +535,9 @@ class MCRunner:
         raw_data = load_jsonl(self.config.input_file)
         logger.info(f"Loaded {len(raw_data)} items from input file")
 
+        target_samples = self.config.n_samples if self.config.mode == "generate" else 1
+        write_run_manifest(self.config.output_file, raw_data, target_samples)
+
         resume_state = load_resume_state(
             self.config.output_file,
             self.config.input_key,
@@ -546,7 +549,6 @@ class MCRunner:
                 else "generate"
             ),
         )
-        target_samples = self.config.n_samples if self.config.mode == "generate" else 1
         remaining = prepare_sample_requests(
             raw_data,
             resume_state,
@@ -589,42 +591,26 @@ class MCRunner:
     # ------------------------------------------------------------------
 
     def _process_concurrently(
-        self, remaining: list[dict[str, Any]], worker: Any
+        self,
+        remaining: list[dict[str, Any]],
+        worker: Callable[[dict[str, Any]], dict[str, Any]],
     ) -> None:
-        """Process items concurrently using a thread pool with progress tracking.
+        """Process requests and persist successful results in the coordinator."""
 
-        Writes successful results and counts unsuccessful requests.
+        def persist(result: dict[str, Any]) -> None:
+            self._write_result(result)
+            if result.get("correct"):
+                self._stats["correct"] += 1
 
-        Args:
-            remaining: Data items to process
-            worker: Per-item callable (process_loglikelihood_item or a
-                process_generate_item binding); returns a result dict,
-                or raises on failure
-        """
-        executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.config.max_workers, thread_name_prefix="mc_worker"
+        processed, failed = run_concurrent_requests(
+            remaining,
+            worker,
+            persist,
+            max_workers=self.config.max_workers,
+            thread_name_prefix="mc_worker",
         )
-        futures = [executor.submit(worker, item) for item in remaining]
-        try:
-            with tqdm(
-                total=len(remaining), desc="Processing samples", unit="sample"
-            ) as pbar:
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        result = future.result()
-                    except Exception as e:
-                        logger.warning(f"Item failed: {e}")
-                        self._stats["failed"] += 1
-                    else:
-                        self._write_result(result)
-                        self._stats["processed"] += 1
-                        if result.get("correct"):
-                            self._stats["correct"] += 1
-                    pbar.update(1)
-        finally:
-            # Don't wait for in-flight API requests when aborting (persistence
-            # failure): their results would be discarded anyway.
-            executor.shutdown(wait=False, cancel_futures=True)
+        self._stats["processed"] += processed
+        self._stats["failed"] += failed
 
     def _write_result(self, result: dict[str, Any]) -> None:
         """Append one result from the coordinator thread."""

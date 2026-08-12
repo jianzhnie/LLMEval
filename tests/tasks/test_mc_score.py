@@ -21,11 +21,7 @@ ConfigurableTask = task_module.ConfigurableTask
 class _HarnessMultipleChoiceTask:
     OUTPUT_TYPE = "multiple_choice"
     config = SimpleNamespace(process_results=None)
-    _metric_fn_list: ClassVar[dict[str, None]] = {
-        "acc": None,
-        "acc_norm": None,
-        "acc_bytes": None,
-    }
+    _metric_fn_list: ClassVar[dict[str, None]] = {"acc": None}
     multiple_input = False
     multiple_target = False
 
@@ -69,8 +65,6 @@ def test_mc_metrics_match_local_harness(
     )
 
     assert float(llmeval["correct"]) == harness["acc"]
-    assert float(llmeval["correct_norm"]) == harness["acc_norm"]
-    assert float(llmeval["correct_bytes"]) == harness["acc_bytes"]
 
 
 # ===========================================================================
@@ -102,7 +96,7 @@ class TestMCExtractAnswer:
 
 
 class TestScoreLoglikelihood:
-    """Test loglikelihood scoring with acc + acc_norm."""
+    """Test answer-token loglikelihood accuracy."""
 
     def test_all_correct(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
@@ -112,12 +106,7 @@ class TestScoreLoglikelihood:
             {"gold": 0, "logprobs": [-0.1, -1.0, -3.0], "choices": ["x", "y", "z"]},
         ]
         result = score_loglikelihood_result(items)
-        assert result.metrics == {
-            "acc": 1.0,
-            "acc_norm": 1.0,
-            "acc_bytes": 1.0,
-            "exact_match": 1.0,
-        }
+        assert result.metrics == {"acc": 1.0}
 
     def test_half_correct(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
@@ -127,36 +116,6 @@ class TestScoreLoglikelihood:
             {"gold": 0, "logprobs": [-0.5, -0.1, -3.0]},  # wrong: index 1 wins, gold 0
         ]
         assert score_loglikelihood_result(items).metrics["acc"] == 0.5
-
-    def test_acc_norm_length_penalized(self) -> None:
-        """acc_norm should prefer shorter choices with same logprob."""
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
-
-        # Choice A: short, Choice B: very long. Same raw logprob.
-        items = [
-            {
-                "gold": 0,
-                "logprobs": [-10.0, -10.0],
-                "choices": ["A", "BBBBBBBBBB"],
-            },
-        ]
-        result = score_loglikelihood_result(items)
-        assert result.metrics["acc"] == 1.0
-        assert result.metrics["acc_norm"] == 0.0
-
-    def test_acc_bytes_uses_utf8_length(self) -> None:
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
-
-        items = [
-            {
-                "gold": 0,
-                "logprobs": [-10.0, -10.0],
-                "choices": ["é", "aa"],
-            }
-        ]
-        result = score_loglikelihood_result(items)
-        assert result.metrics["acc_norm"] == 0.0
-        assert result.metrics["acc_bytes"] == 1.0
 
     def test_empty_dataset(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
@@ -713,31 +672,6 @@ class TestMCScoreEdgeCases:
         assert result.metrics["acc"] == 1.0
         assert result.effective_sample_count == 1
         assert result.failed_count == 1
-
-    def test_acc_norm_uses_choices_when_present(self) -> None:
-        """Length normalization flips the argmax when choices differ in length."""
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
-
-        # raw argmax → index 1; normalized: -2.0/4=-0.5 vs -1.0/1=-1.0 → index 0
-        items = [{"gold": 0, "logprobs": [-2.0, -1.0], "choices": ["aaaa", "b"]}]
-        result = score_loglikelihood_result(items)
-        assert result.metrics["acc"] == 0.0
-        assert result.metrics["acc_norm"] == 1.0
-
-    def test_acc_norm_prefers_choice_tokens_when_present(self) -> None:
-        """Answer-token scoring should not normalize by full option text length."""
-        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_result
-
-        items = [
-            {
-                "gold": 0,
-                "logprobs": [-2.0, -1.0],
-                "choice_tokens": ["A", "B"],
-                "choices": ["aaaa", "b"],
-            }
-        ]
-        result = score_loglikelihood_result(items)
-        assert result.metrics["acc_norm"] == 0.0
 
     def test_extract_lowercase_letter(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import extract_answer

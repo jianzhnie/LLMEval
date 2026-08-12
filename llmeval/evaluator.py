@@ -35,7 +35,11 @@ from typing import Any
 
 from transformers import HfArgumentParser
 
-from llmeval.inference.common import load_jsonl, redact_config_for_logging
+from llmeval.inference.common import (
+    load_jsonl,
+    redact_config_for_logging,
+    warn_result_manifest,
+)
 from llmeval.tasks.code_eval.code_score import score_code_result
 from llmeval.tasks.math_eval.math_score import score_math_result
 from llmeval.tasks.mc_eval.mc_score import (
@@ -334,6 +338,7 @@ def main() -> int:
         if not data:
             logger.error("❌ Input file is empty")
             return 1
+        warn_result_manifest(data, args.input_path)
 
         # Run evaluation and retain the complete metric result.
         evaluate_task_result(

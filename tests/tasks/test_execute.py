@@ -95,6 +95,23 @@ class TestCheckCorrectness:
         assert result["result"] == "timed out"
         assert result["evaluation_status"] == "completed"
 
+    def test_outer_worker_timeout_is_completed_incorrect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        process = MagicMock()
+        process.is_alive.return_value = True
+        context = MagicMock()
+        context.Process.return_value = process
+        monkeypatch.setattr(
+            code_execute.multiprocessing, "get_context", lambda _: context
+        )
+
+        result = check_correctness(_add_program(), 1.0, "hung", allow_unsafe_code=True)
+
+        assert result["passed"] is False
+        assert result["result"] == "timed out: worker killed"
+        assert result["evaluation_status"] == "completed"
+
     def test_long_timeout_still_fires(self) -> None:
         """A long timeout still works correctly for normal code."""
         result = check_correctness(_add_program(), 30.0, "t6", allow_unsafe_code=True)

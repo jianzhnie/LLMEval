@@ -460,7 +460,7 @@ class TestScoreCode:
                 "answer",
                 "gen",
                 tmp_path / "blocked.jsonl",
-                max_workers=0,
+                max_workers=1,
             )
 
     def test_all_pass(self) -> None:
@@ -482,7 +482,7 @@ class TestScoreCode:
             items,
             "answer",
             "gen",
-            max_workers=0,
+            max_workers=1,
             exec_timeout=3.0,
             allow_unsafe_code=True,
         )
@@ -507,7 +507,7 @@ class TestScoreCode:
             items,
             "answer",
             "gen",
-            max_workers=0,
+            max_workers=1,
             exec_timeout=3.0,
             allow_unsafe_code=True,
         )
@@ -549,8 +549,26 @@ class TestScoreCode:
         assert acc == 1.0
 
     def test_empty_dataset(self) -> None:
-        acc = _score_code_value([], "answer", "gen", max_workers=0)
+        acc = _score_code_value([], "answer", "gen", max_workers=1)
         assert acc == 0.0
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"max_workers": 0}, "max_workers"),
+            ({"max_workers": True}, "max_workers"),
+            ({"timeout": 0}, "timeout"),
+            ({"timeout": 1.5}, "timeout"),
+            ({"exec_timeout": float("nan")}, "exec_timeout"),
+            ({"exec_timeout": float("inf")}, "exec_timeout"),
+            ({"exec_timeout": True}, "exec_timeout"),
+        ],
+    )
+    def test_public_scorer_validates_execution_limits(
+        self, kwargs: dict[str, object], message: str
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            score_code_result([], "answer", "gen", **kwargs)  # type: ignore[arg-type]
 
     def test_empty_generation_marked_failed(self) -> None:
         items = [
@@ -565,7 +583,7 @@ class TestScoreCode:
             items,
             "answer",
             "gen",
-            max_workers=0,
+            max_workers=1,
             allow_unsafe_code=True,
         )
         assert acc == 0.0
@@ -589,7 +607,7 @@ class TestScoreCode:
             items,
             "answer",
             "gen",
-            max_workers=0,
+            max_workers=1,
             exec_timeout=3.0,
             k_values=(1, 2),
             allow_unsafe_code=True,
@@ -619,7 +637,7 @@ class TestScoreCode:
             items,
             "answer",
             "gen",
-            max_workers=0,
+            max_workers=1,
             exec_timeout=3.0,
             k_values=(2,),
             allow_unsafe_code=True,
@@ -664,7 +682,7 @@ class TestScoreCode:
             items,
             "answer",
             "gen",
-            max_workers=0,
+            max_workers=1,
             exec_timeout=3.0,
             allow_unsafe_code=True,
         )
@@ -742,7 +760,7 @@ class TestScoreCodeThinkTags:
             "answer",
             "gen",
             tmp_path / "cache.jsonl",
-            max_workers=0,
+            max_workers=1,
             allow_unsafe_code=True,
         )
         assert acc == 1.0
@@ -770,7 +788,7 @@ class TestScoreCodePromptModes:
             "answer",
             "gen",
             tmp_path / "mbpp.jsonl",
-            max_workers=0,
+            max_workers=1,
             allow_unsafe_code=True,
         )
 
@@ -793,7 +811,7 @@ class TestScoreCodePromptModes:
             "answer",
             "gen",
             tmp_path / "humaneval.jsonl",
-            max_workers=0,
+            max_workers=1,
             allow_unsafe_code=True,
         )
 
@@ -813,7 +831,7 @@ class TestScoreCodePromptModes:
             "answer",
             "gen",
             tmp_path / "cache.jsonl",
-            max_workers=0,
+            max_workers=1,
             allow_unsafe_code=True,
         )
         assert acc == 1.0
@@ -846,7 +864,7 @@ class TestCodeRepeatedRows:
             items,
             "answer",
             "gen",
-            max_workers=0,
+            max_workers=1,
             exec_timeout=3.0,
             k_values=(1, 2),
             allow_unsafe_code=True,
@@ -942,7 +960,7 @@ class TestTimeoutClassification:
             items,
             "answer",
             "gen",
-            max_workers=0,
+            max_workers=1,
             exec_timeout=1.0,
             allow_unsafe_code=True,
         )
