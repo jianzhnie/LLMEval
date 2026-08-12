@@ -70,16 +70,19 @@ PARALLEL="${PARALLEL:-1}"
 declare -a TASK_NAMES=()
 declare -a TASK_PIDS=()
 declare -A TASK_STATUS=()
+task_failed=0
 
 for task in $BENCHMARKS; do
     input_file="${BENCHMARK_INPUT[$task]:-}"
     if [[ -z "$input_file" ]]; then
         echo "[ERROR] 未知 benchmark: $task (可用: ${!BENCHMARK_INPUT[*]})" >&2
+        task_failed=1
         continue
     fi
     if [[ ! -f "$input_file" ]]; then
         echo "[ERROR] 数据文件不存在: $input_file" >&2
         echo "[INFO] 下载: python scripts/data_process/prepare_mc_benchmarks.py --benchmarks $task --output_dir ./data"
+        task_failed=1
         continue
     fi
 
@@ -109,7 +112,7 @@ for task in $BENCHMARKS; do
         } >> "$log_file" &
         TASK_PIDS+=($!)
     else
-        python -m llmeval.inference.mc \
+        if python -m llmeval.inference.mc \
             --input_file "$input_file" \
             --output_file "$output_file" \
             --base_url "$BASE_URL" \
@@ -123,16 +126,21 @@ for task in $BENCHMARKS; do
             --temperature "$TEMPERATURE" \
             --system_prompt_type "$SYSTEM_PROMPT_TYPE" \
             --n_shot "$N_SHOT" \
-            --few_shot_file "$FEW_SHOT_FILE"
-        rc=$?
-        if [[ $rc -eq 0 ]]; then echo "[OK] $task"; else echo "[FAIL] $task"; fi
+            --few_shot_file "$FEW_SHOT_FILE"; then
+            TASK_STATUS[$task]="OK"
+            echo "[OK] $task"
+        else
+            TASK_STATUS[$task]="FAIL"
+            task_failed=1
+            echo "[FAIL] $task" >&2
+        fi
     fi
 done
 
 if [[ "$PARALLEL" == "1" && ${#TASK_PIDS[@]} -gt 0 ]]; then
     for i in "${!TASK_PIDS[@]}"; do
         if wait "${TASK_PIDS[$i]}"; then TASK_STATUS[${TASK_NAMES[$i]}]="OK"
-        else TASK_STATUS[${TASK_NAMES[$i]}]="FAIL"; fi
+        else TASK_STATUS[${TASK_NAMES[$i]}]="FAIL"; task_failed=1; fi
     done
 fi
 
@@ -140,4 +148,9 @@ echo ""
 for task in "${TASK_NAMES[@]}"; do
     echo "[${TASK_STATUS[$task]:-UNKNOWN}] $task"
 done
-echo "🎉 MC 推理完成!"
+if [[ $task_failed -eq 0 ]]; then
+    echo "🎉 MC 推理完成!"
+else
+    echo "[ERROR] MC 推理存在失败任务" >&2
+fi
+exit "$task_failed"

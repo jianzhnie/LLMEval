@@ -70,7 +70,7 @@ Three entry points, each a standalone script with its own `main()`:
 
 - **`tasks/math_eval/utils_parser.py`** — Ground truth parsing utilities (gsm8k `####` format, olympiadbench, generic).
 
-- **`tasks/mc_eval/mc_score.py`** — MC scoring aligned with lm-evaluation-harness: `acc` / `acc_norm` (length-normalized) / `exact_match`. Loglikelihood mode argmaxes per-choice logprobs; generate mode extracts answer letters (`Answer: X` marker or last standalone A–J).
+- **`tasks/mc_eval/mc_score.py`** — MC accuracy scoring. Loglikelihood mode argmaxes per-choice answer-token or continuation logprobs; generate mode extracts answer letters (`Answer: X` marker or last standalone A–J).
 
 - **`tasks/code_eval/code_score.py` + `execute.py`** — Code scoring with pass@1: extracts code from generations, then executes candidate + test harness in a guarded subprocess. This guard is not a security sandbox; code evaluation must run in an externally isolated container or sandbox.
 

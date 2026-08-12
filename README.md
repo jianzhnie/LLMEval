@@ -16,7 +16,7 @@ LLMEval is a comprehensive evaluation system for assessing Large Language Models
 - **Flexible Evaluation Modes**: Online (API), offline (local), and MC (loglikelihood/generate)
 - **Rich Benchmark Coverage**: 14 benchmarks — AIME 2024/2025/2026, MATH-500, GSM8K, GPQA-Diamond, HMMT-25, HumanEval, MBPP, MMLU, MMLU-Pro, C-Eval
 - **Code Evaluation**: HumanEval / MBPP with sandbox execution and pass@k scoring
-- **MC Scoring**: Answer-token loglikelihood with acc/acc_norm/exact_match, few-shot dedup
+- **MC Scoring**: Answer-token or full-continuation loglikelihood accuracy, few-shot dedup
 - **One-Click Pipeline**: Shell scripts for end-to-end inference → scoring
 - **Resume Capability**: Automatically resume interrupted evaluations
 - **Verification Support**: Built-in answer extraction and correctness verification
@@ -193,7 +193,7 @@ BENCHMARKS=QUICK bash examples/longcat-flash/run_all.sh
 BENCHMARKS=HARD bash examples/longcat-flash/run_all.sh
 ```
 
-**Multiple-choice benchmarks** — answer-token loglikelihood comparison with acc/acc_norm:
+**Multiple-choice benchmarks** — answer-token loglikelihood accuracy:
 
 ```bash
 # 5-shot MMLU / C-Eval
@@ -294,6 +294,8 @@ Python, cURL, structured-output, tool-calling, and streaming examples.
 
 Offline mode specific:
 
+See the [offline inference guide](docs/offline_infer.md) for a complete vLLM example.
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--model_name_or_path` | Required | Local model path or HuggingFace ID |
@@ -324,6 +326,9 @@ If inference is interrupted, simply re-run the same command. The script automati
 1. Reads existing output file
 2. Counts completed samples per problem
 3. Continues from where it left off
+
+New runs also write `<output>.manifest.json`. The evaluator uses this sidecar to
+reject incomplete output before scoring while keeping failed samples out of JSONL.
 
 ### Context Length Extension (YaRN)
 

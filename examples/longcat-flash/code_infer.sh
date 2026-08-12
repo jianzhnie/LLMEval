@@ -151,16 +151,20 @@ run_infer() {
 PARALLEL="${PARALLEL:-1}"
 declare -a TASK_NAMES=()
 declare -a TASK_PIDS=()
+declare -A TASK_STATUS=()
+task_failed=0
 
 for task in $BENCHMARKS; do
     input_file="${BENCHMARK_INPUT[$task]:-}"
     if [[ -z "$input_file" ]]; then
         echo "[ERROR] 未知 benchmark: $task (可用: ${!BENCHMARK_INPUT[*]})" >&2
+        task_failed=1
         continue
     fi
     if [[ ! -f "$input_file" ]]; then
         echo "[ERROR] 数据文件不存在: $input_file" >&2
         echo "[HINT]  运行数据准备: python scripts/data_process/prepare_code_benchmarks.py --benchmarks $task --output_dir ./data" >&2
+        task_failed=1
         continue
     fi
 
@@ -176,7 +180,12 @@ for task in $BENCHMARKS; do
         } &
         TASK_PIDS+=($!)
     else
-        run_infer "$task" "$input_file" "$output_file" "$n_samples" "$TEMPERATURE" || true
+        if run_infer "$task" "$input_file" "$output_file" "$n_samples" "$TEMPERATURE"; then
+            TASK_STATUS[$task]="OK"
+        else
+            TASK_STATUS[$task]="FAIL"
+            task_failed=1
+        fi
     fi
 done
 
@@ -184,13 +193,23 @@ done
 if [[ "$PARALLEL" == "1" && ${#TASK_PIDS[@]} -gt 0 ]]; then
     echo ""
     echo "[INFO] 等待 ${#TASK_PIDS[@]} 个并行任务完成..."
-    for pid in "${TASK_PIDS[@]}"; do
-        wait "$pid" || true
+    for i in "${!TASK_PIDS[@]}"; do
+        if wait "${TASK_PIDS[$i]}"; then
+            TASK_STATUS[${TASK_NAMES[$i]}]="OK"
+        else
+            TASK_STATUS[${TASK_NAMES[$i]}]="FAIL"
+            task_failed=1
+        fi
     done
 fi
 
 echo ""
 echo "============================================"
-echo "[INFO] Code inference 完成!"
+if [[ $task_failed -eq 0 ]]; then
+    echo "[INFO] Code inference 完成!"
+else
+    echo "[ERROR] Code inference 存在失败任务" >&2
+fi
 echo "[INFO] 输出目录: $OUTPUT_DIR"
 echo "============================================"
+exit "$task_failed"

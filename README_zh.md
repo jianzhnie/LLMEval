@@ -16,7 +16,7 @@ LLMEval 是一个用于评测大型语言模型（LLM）的综合评估系统，
 - **三种评测模式**：在线生成、离线本地推理、MC loglikelihood 对比
 - **14 个 Benchmark**：AIME 2024/2025/2026、MATH-500、GSM8K、GPQA-Diamond、HMMT-25、MMLU、MMLU-Pro、C-Eval、HumanEval、MBPP
 - **代码评估**: HumanEval / MBPP 沙箱执行 + pass@k 评分
-- **MC 评分**：答案 token loglikelihood + acc/acc_norm/exact_match、few-shot 去重
+- **MC 评分**：答案 token 或完整 continuation 的 loglikelihood 准确率、few-shot 去重
 - **一键评测**：Shell 脚本端到端推理 → 评分
 - **断点续评**：自动恢复中断的评测任务
 
@@ -146,7 +146,7 @@ BENCHMARKS=QUICK bash examples/longcat-flash/run_all.sh   # 快速验证
 BENCHMARKS=HARD bash examples/longcat-flash/run_all.sh    # 高难度
 ```
 
-**MC benchmark** — 答案 token loglikelihood 对比 + acc/acc_norm 评分：
+**MC benchmark** — 答案 token loglikelihood 准确率：
 
 ```bash
 N_SHOT=5 bash examples/longcat-flash/mc_infer.sh   # 5-shot 推理
@@ -190,7 +190,7 @@ python -m llmeval.inference.online \
     --max_workers 8
 ```
 
-离线模式（无需启动服务器）：
+离线模式（无需启动服务器，完整示例见[离线推理指南](docs/offline_infer.md)）：
 ```bash
 python -m llmeval.inference.offline \
     --input_file "./data/aime24.jsonl" \
@@ -276,6 +276,9 @@ python -m llmeval.evaluator \
 1. 读取已有输出文件
 2. 统计每道题已完成采样数
 3. 从断点继续评测
+
+新任务还会写入 `<output>.manifest.json`。评分前会用该清单校验结果完整性，推理失败
+样本仍不会写入 JSONL。
 
 ### 上下文长度扩展（YaRN）
 

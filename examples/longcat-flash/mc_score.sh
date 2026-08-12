@@ -41,7 +41,7 @@ task_failed=0
 for task in $BENCHMARKS; do
     task_name="${TASK_NAME[$task]:-}"
     if [[ -z "$task_name" ]]; then
-        echo "[ERROR] 未知: $task" >&2; continue
+        echo "[ERROR] 未知: $task" >&2; task_failed=1; continue
     fi
 
     input_file="${INPUT_DIR}/${task}_bz1.jsonl"
@@ -49,7 +49,7 @@ for task in $BENCHMARKS; do
     log_file="${EVAL_DIR}/${task}_bz1_score.txt"
 
     if [[ ! -f "$input_file" ]]; then
-        echo "[ERROR] 输入文件不存在: $input_file" >&2; continue
+        echo "[ERROR] 输入文件不存在: $input_file" >&2; task_failed=1; continue
     fi
 
     TASK_NAMES+=("$task")
@@ -66,12 +66,17 @@ for task in $BENCHMARKS; do
         } &
         TASK_PIDS+=($!)
     else
-        python -m llmeval.evaluator \
+        if python -m llmeval.evaluator \
             --input_path "$input_file" \
             --result_path "$result_file" \
             --task_name "$task_name" \
             --max_workers "$MAX_WORKERS" \
-            --timeout "$TIMEOUT" > "$log_file" 2>&1 || true
+            --timeout "$TIMEOUT" > "$log_file" 2>&1; then
+            echo "[OK] $task"
+        else
+            echo "[FAIL] $task" >&2
+            task_failed=1
+        fi
     fi
 done
 
@@ -96,5 +101,9 @@ for task in "${TASK_NAMES[@]}"; do
         printf "  %-12s  %s\n" "$task" "$score"
     fi
 done
-echo "🎯 MC 评分完成!"
+if [[ $task_failed -eq 0 ]]; then
+    echo "🎯 MC 评分完成!"
+else
+    echo "[ERROR] MC 评分存在失败任务" >&2
+fi
 exit "$task_failed"

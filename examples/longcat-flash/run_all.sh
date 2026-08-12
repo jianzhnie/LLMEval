@@ -67,9 +67,15 @@ if [[ "$STAGE" == "all" || "$STAGE" == "prepare" ]]; then
     echo "[STEP 1/3] 准备数据..."
     echo "----------------------------------------"
 
-    # 展开预设组获取实际 benchmark 列表
+    case "$BENCHMARKS" in
+        ALL) PREPARE_BENCHMARKS="gsm8k math500 hmmt25 gpqa_diamond aime24 aime25 aime26" ;;
+        HARD) PREPARE_BENCHMARKS="aime24 aime25 aime26 hmmt25 gpqa_diamond" ;;
+        QUICK) PREPARE_BENCHMARKS="gsm8k math500" ;;
+        *) PREPARE_BENCHMARKS="$BENCHMARKS" ;;
+    esac
+
     MISSING=()
-    for task in $BENCHMARKS; do
+    for task in $PREPARE_BENCHMARKS; do
         case "$task" in gsm8k|math500|hmmt25|gpqa_diamond|aime24|aime25|aime26) ;; *) continue ;; esac
         if [[ ! -f "./data/${task}.jsonl" ]]; then
             MISSING+=("$task")

@@ -125,11 +125,13 @@ echo "============================================"
 declare -a TASK_NAMES=()
 declare -a TASK_PIDS=()
 declare -A TASK_STATUS=()
+task_failed=0
 
 for task in $BENCHMARKS; do
     task_name="${TASK_NAME[$task]:-}"
     if [[ -z "$task_name" ]]; then
         echo "[ERROR] 未知 benchmark: $task (可用: ${!TASK_NAME[*]})" >&2
+        task_failed=1
         continue
     fi
 
@@ -141,6 +143,7 @@ for task in $BENCHMARKS; do
     if [[ ! -f "$input_file" ]]; then
         echo "[ERROR] 输入文件不存在: $input_file" >&2
         echo "[HINT]  请先运行 code_infer.sh 生成推理结果" >&2
+        task_failed=1
         continue
     fi
 
@@ -150,7 +153,12 @@ for task in $BENCHMARKS; do
         run_eval "$task" "$input_file" "$result_file" "$log_file" "$task_name" &
         TASK_PIDS+=($!)
     else
-        run_eval "$task" "$input_file" "$result_file" "$log_file" "$task_name" || true
+        if run_eval "$task" "$input_file" "$result_file" "$log_file" "$task_name"; then
+            TASK_STATUS[$task]="OK"
+        else
+            TASK_STATUS[$task]="FAIL"
+            task_failed=1
+        fi
     fi
 done
 
@@ -165,6 +173,7 @@ if [[ "$PARALLEL" == "1" && ${#TASK_PIDS[@]} -gt 0 ]]; then
             TASK_STATUS[$task]="OK"
         else
             TASK_STATUS[$task]="FAIL"
+            task_failed=1
         fi
     done
 fi
@@ -190,10 +199,11 @@ for task in "${TASK_NAMES[@]}"; do
     fi
 done
 
-if [[ ${#FAILED[@]} -eq 0 ]]; then
+if [[ $task_failed -eq 0 ]]; then
     echo "🎯 全部评分完成!"
 else
     echo "⚠️  失败: ${FAILED[*]}"
 fi
 echo "评分结果: $EVAL_DIR/"
 echo "============================================"
+exit "$task_failed"
