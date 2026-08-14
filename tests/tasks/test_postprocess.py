@@ -135,12 +135,30 @@ def test_normalize_rejects_missing_generation() -> None:
     assert "gen" not in normalized[0]
 
 
-def test_normalize_rejects_non_contiguous_sample_indices() -> None:
-    with pytest.raises(ValueError, match=r"missing=\[1\]"):
+def test_normalize_non_contiguous_indices_are_incomplete() -> None:
+    normalized = normalize_single_generation_samples(
+        [
+            {"doc_id": "d0", "gen": ["a"], "sample_index": 0},
+            {"doc_id": "d0", "gen": ["b"], "sample_index": 2},
+        ],
+        "gen",
+        problem_identity=lambda item, _index: str(item["doc_id"]),
+    )
+
+    assert all(row["sample_group_complete"] is False for row in normalized)
+    assert all(row["n_samples"] == 3 for row in normalized)
+
+
+def test_normalize_rejects_out_of_range_sample_indices() -> None:
+    with pytest.raises(ValueError, match=r"exceed n_samples=2"):
         normalize_single_generation_samples(
             [
-                {"doc_id": "d0", "gen": ["a"], "sample_index": 0},
-                {"doc_id": "d0", "gen": ["b"], "sample_index": 2},
+                {
+                    "doc_id": "d0",
+                    "gen": ["a"],
+                    "sample_index": 2,
+                    "n_samples": 2,
+                }
             ],
             "gen",
             problem_identity=lambda item, _index: str(item["doc_id"]),
@@ -148,16 +166,18 @@ def test_normalize_rejects_non_contiguous_sample_indices() -> None:
 
 
 def test_normalize_uses_sample_count_metadata() -> None:
-    with pytest.raises(ValueError, match=r"missing=\[1\]"):
-        normalize_single_generation_samples(
-            [
-                {
-                    "doc_id": "d0",
-                    "gen": ["a"],
-                    "sample_index": 0,
-                    "n_samples": 2,
-                }
-            ],
-            "gen",
-            problem_identity=lambda item, _index: str(item["doc_id"]),
-        )
+    normalized = normalize_single_generation_samples(
+        [
+            {
+                "doc_id": "d0",
+                "gen": ["a"],
+                "sample_index": 0,
+                "n_samples": 2,
+            }
+        ],
+        "gen",
+        problem_identity=lambda item, _index: str(item["doc_id"]),
+    )
+
+    assert normalized[0]["sample_group_complete"] is False
+    assert normalized[0]["n_samples"] == 2

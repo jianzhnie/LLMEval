@@ -372,7 +372,7 @@ def _process_answers_impl(
             logger.debug("Fallback normalization matched job %d after %s", index, e)
             return result(1.0, generated_text, gold_answer_text, fallback_matched=True)
         logger.warning("Math verification failed for job %d: %s", index, e)
-        return result(0.0, None, gold_answer_text, failed=True)
+        return result(0.0, None, gold_answer_text)
 
 
 def process_answers(
@@ -649,14 +649,19 @@ def _build_problem_level_metrics(
             float(item.get("accuracy", 0.0)) == 1.0 for item in completed
         )
         majority_prediction, majority_correct = _majority_cluster(completed)
-        sample_count = len(items)
+        sample_count = int(items[0].get("n_samples", len(items)))
+        available_sample_count = len(items)
         observed_samples = len(completed)
-        complete = observed_samples == sample_count
+        complete = (
+            all(item.get("sample_group_complete", True) for item in items)
+            and observed_samples == available_sample_count
+        )
         problems.append(
             {
                 "doc_id": problem_id,
                 "correct_samples": correct_samples,
                 "sample_count": sample_count,
+                "available_sample_count": available_sample_count,
                 "observed_samples": observed_samples,
                 "complete": complete,
                 "correct_fraction": correct_samples / sample_count

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from llmeval.inference.common import (
     load_resume_state,
     prepare_sample_requests,
     redact_config_for_logging,
+    run_concurrent_requests,
     warn_result_manifest,
     write_run_manifest,
 )
@@ -62,6 +64,13 @@ class TestLoadJsonl:
 
 
 class TestRunManifest:
+    @pytest.mark.parametrize("doc_id", [1, True, [], {}])
+    def test_manifest_requires_string_document_ids(
+        self, tmp_path: Path, doc_id: object
+    ) -> None:
+        with pytest.raises(ValueError, match="non-empty doc_id"):
+            write_run_manifest(tmp_path / "output.jsonl", [{"doc_id": doc_id}], 1)
+
     def test_round_trip_and_complete_result(self, tmp_path: Path) -> None:
         output = tmp_path / "output.jsonl"
         source = [
@@ -115,6 +124,84 @@ class TestRunManifest:
             "evaluation will continue"
         ]
 
+    def test_manifest_metadata_comparison_preserves_types(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = tmp_path / "output.jsonl"
+        write_run_manifest(output, [{"doc_id": "q1"}], 1)
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            common.logger,
+            "warning",
+            lambda message, *args: warnings.append(message % args),
+        )
+
+        warn_result_manifest(
+            [{"doc_id": "q1", "sample_index": "0", "n_samples": "1"}],
+            output,
+        )
+
+        assert "missing=1, unexpected=1" in warnings[0]
+
+    @pytest.mark.parametrize(
+        "invalid_metadata",
+        [
+            {"doc_id": ["q1"], "sample_index": 0, "n_samples": 1},
+            {"doc_id": "q1", "sample_index": {"value": 0}, "n_samples": 1},
+            {"doc_id": "q1", "sample_index": 0, "n_samples": [1]},
+        ],
+    )
+    def test_malformed_metadata_only_warns(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        invalid_metadata: dict[str, object],
+    ) -> None:
+        output = tmp_path / "output.jsonl"
+        write_run_manifest(output, [{"doc_id": "q1"}], 1)
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            common.logger,
+            "warning",
+            lambda message, *args: warnings.append(message % args),
+        )
+
+        warn_result_manifest([invalid_metadata], output)
+
+        assert warnings == [
+            "Result completeness check: missing=1, unexpected=1, duplicates=0; "
+            "evaluation will continue"
+        ]
+
+    def test_manifest_counts_missing_unexpected_and_duplicate_rows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = tmp_path / "output.jsonl"
+        write_run_manifest(output, [{"doc_id": "q1"}, {"doc_id": "q2"}], 2)
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            common.logger,
+            "warning",
+            lambda message, *args: warnings.append(message % args),
+        )
+        valid = {"doc_id": "q1", "sample_index": 0, "n_samples": 2}
+
+        warn_result_manifest(
+            [
+                valid,
+                valid.copy(),
+                {"doc_id": "q1", "sample_index": 2, "n_samples": 2},
+                {"doc_id": "unknown", "sample_index": 0, "n_samples": 2},
+                {"doc_id": "q2", "sample_index": 1, "n_samples": 3},
+            ],
+            output,
+        )
+
+        assert warnings == [
+            "Result completeness check: missing=3, unexpected=3, duplicates=1; "
+            "evaluation will continue"
+        ]
+
     def test_existing_manifest_must_match(self, tmp_path: Path) -> None:
         output = tmp_path / "output.jsonl"
         write_run_manifest(output, [{"doc_id": "q1"}], 1)
@@ -129,6 +216,89 @@ class TestRunManifest:
         write_run_manifest(output, [{"doc_id": "q1"}], 1)
 
         assert not output.with_name("output.jsonl.manifest.json").exists()
+
+
+class TestConcurrentRequests:
+    def test_submission_window_is_bounded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pending_sizes: list[int] = []
+        real_wait = common.concurrent.futures.wait
+
+        def tracking_wait(futures: set[object], **kwargs: object):
+            pending_sizes.append(len(futures))
+            return real_wait(futures, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(common.concurrent.futures, "wait", tracking_wait)
+
+        processed, failed = run_concurrent_requests(
+            list(range(20)),
+            lambda value: value,
+            lambda _value: None,
+            max_workers=3,
+            thread_name_prefix="test",
+        )
+
+        assert (processed, failed) == (20, 0)
+        assert max(pending_sizes) <= 3
+
+    def test_persistence_failure_stops_new_submissions(self) -> None:
+        started: list[int] = []
+        release = threading.Event()
+
+        def worker(value: int) -> int:
+            started.append(value)
+            release.wait(timeout=1)
+            return value
+
+        def persist(_value: int) -> None:
+            raise OSError("disk full")
+
+        release.set()
+        with pytest.raises(OSError, match="disk full"):
+            run_concurrent_requests(
+                list(range(20)),
+                worker,
+                persist,
+                max_workers=2,
+                thread_name_prefix="test",
+            )
+
+        assert len(started) <= 2
+
+    def test_persistence_failure_waits_for_running_requests(self) -> None:
+        second_started = threading.Event()
+        release_second = threading.Event()
+        second_finished = threading.Event()
+
+        def worker(value: int) -> int:
+            if value == 0:
+                second_started.wait(timeout=1)
+                return value
+            second_started.set()
+            release_second.wait(timeout=1)
+            second_finished.set()
+            return value
+
+        def persist(_value: int) -> None:
+            raise OSError("disk full")
+
+        release_timer = threading.Timer(0.1, release_second.set)
+        release_timer.start()
+        try:
+            with pytest.raises(OSError, match="disk full"):
+                run_concurrent_requests(
+                    [0, 1, 2],
+                    worker,
+                    persist,
+                    max_workers=2,
+                    thread_name_prefix="test",
+                )
+
+            assert second_finished.is_set()
+        finally:
+            release_second.set()
+            release_timer.join()
 
 
 class TestResumeState:
@@ -178,7 +348,16 @@ class TestResumeState:
     def test_logprobs_row_is_completed(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
         path.write_text(
-            json.dumps({"doc_id": "q1", "prompt": "p", "logprobs": [0.0]}) + "\n"
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "p",
+                    "choices": ["A"],
+                    "gold": 0,
+                    "logprobs": [0.0],
+                }
+            )
+            + "\n"
         )
         assert load_resume_state(path, "prompt", "gen").completed_indices == {"q1": {0}}
 
@@ -187,7 +366,16 @@ class TestResumeState:
     ) -> None:
         path = tmp_path / "out.jsonl"
         path.write_text(
-            json.dumps({"doc_id": "q1", "prompt": "p", "logprobs": [None, -0.5]}) + "\n"
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "p",
+                    "choices": ["A", "B"],
+                    "gold": 1,
+                    "logprobs": [None, -0.5],
+                }
+            )
+            + "\n"
         )
         assert load_resume_state(path, "prompt", "gen").completed_indices == {"q1": {0}}
 
@@ -198,6 +386,8 @@ class TestResumeState:
                 {
                     "doc_id": "q1",
                     "prompt": "p",
+                    "choices": ["A", "B"],
+                    "gold": 0,
                     "logprobs": [-0.5, -1.0],
                     "scoring_mode": "first_token",
                 }
@@ -221,6 +411,89 @@ class TestResumeState:
                 expected_scoring_mode="continuation",
             )
 
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"choices": ["A", "B"], "gold": 0, "logprobs": [-0.5]},
+            {"choices": ["A"], "gold": 1, "logprobs": [-0.5]},
+            {"choices": ["A"], "gold": "0", "logprobs": [-0.5]},
+            {"choices": ["A"], "gold": 0.0, "logprobs": [-0.5]},
+            {"choices": ["A"], "gold": True, "logprobs": [-0.5]},
+            {
+                "choices": ["A", "B"],
+                "choice_tokens": [],
+                "gold": 0,
+                "logprobs": [-0.5, -1.0],
+            },
+        ],
+    )
+    def test_invalid_loglikelihood_row_remains_retryable(
+        self, tmp_path: Path, row: dict[str, object]
+    ) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "p",
+                    "scoring_mode": "first_token",
+                    **row,
+                }
+            )
+            + "\n"
+        )
+
+        state = load_resume_state(
+            path, "prompt", "gen", expected_scoring_mode="first_token"
+        )
+
+        assert state.completed_count == 0
+
+    def test_legacy_loglikelihood_row_without_choices_is_completed(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "p",
+                    "scoring_mode": "first_token",
+                    "gold": 0,
+                    "logprobs": [-0.5],
+                }
+            )
+            + "\n"
+        )
+
+        state = load_resume_state(
+            path, "prompt", "gen", expected_scoring_mode="first_token"
+        )
+
+        assert state.completed_indices == {"q1": {0}}
+
+    def test_huge_integer_logprob_remains_retryable(self, tmp_path: Path) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "p",
+                    "scoring_mode": "first_token",
+                    "choices": ["A"],
+                    "gold": 0,
+                    "logprobs": [10**1000],
+                }
+            )
+            + "\n"
+        )
+
+        state = load_resume_state(
+            path, "prompt", "gen", expected_scoring_mode="first_token"
+        )
+
+        assert state.completed_count == 0
+
     def test_expected_scoring_mode_error_suggests_migration(
         self, tmp_path: Path
     ) -> None:
@@ -230,6 +503,30 @@ class TestResumeState:
 
         with pytest.raises(ValueError, match="scoring_mode='generate'"):
             load_resume_state(path, "prompt", "gen", expected_scoring_mode="generate")
+
+    def test_generate_resume_requires_generation_even_with_logprobs(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "doc_id": "q1",
+                    "prompt": "p",
+                    "choices": ["A"],
+                    "gold": 0,
+                    "logprobs": [-0.5],
+                    "scoring_mode": "generate",
+                }
+            )
+            + "\n"
+        )
+
+        state = load_resume_state(
+            path, "prompt", "gen", expected_scoring_mode="generate"
+        )
+
+        assert state.completed_count == 0
 
     @pytest.mark.parametrize(
         "logprobs",
@@ -387,6 +684,17 @@ class TestResumeState:
         with pytest.raises(ValueError, match="missing required 'doc_id'"):
             load_resume_state(path, "prompt", "gen")
 
+    @pytest.mark.parametrize("doc_id", [1, True, [], {}])
+    def test_completed_row_requires_string_document_id(
+        self, tmp_path: Path, doc_id: object
+    ) -> None:
+        path = tmp_path / "out.jsonl"
+        path.write_text(
+            json.dumps({"doc_id": doc_id, "prompt": "p", "gen": "a"}) + "\n"
+        )
+        with pytest.raises(ValueError, match="missing required 'doc_id'"):
+            load_resume_state(path, "prompt", "gen")
+
     def test_grouped_generation_row_is_rejected(self, tmp_path: Path) -> None:
         path = tmp_path / "out.jsonl"
         path.write_text(
@@ -451,6 +759,13 @@ class TestExpansion:
             )
             == 3
         )
+
+    @pytest.mark.parametrize("doc_id", [1, True, [], {}])
+    def test_input_requires_string_document_id(self, doc_id: object) -> None:
+        with pytest.raises(ValueError, match="missing required 'doc_id'"):
+            prepare_sample_requests(
+                [{"doc_id": doc_id, "prompt": "p"}], _resume(), "prompt", 1
+            )
 
     def test_resume_uses_exact_completed_indices(self) -> None:
         raw = [{"doc_id": "q1", "prompt": "p"}]

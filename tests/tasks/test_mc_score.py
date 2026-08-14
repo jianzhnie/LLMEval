@@ -183,6 +183,88 @@ class TestScoreGenerate:
         assert result.metrics["acc"] == 0.5
         assert result.sample_count == 2
 
+    def test_incomplete_samples_are_scored_and_reported(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        result = score_generate_result(
+            [
+                {
+                    "doc_id": "q0",
+                    "sample_index": 0,
+                    "n_samples": 2,
+                    "answer": "B",
+                    "gen": "Answer: B",
+                }
+            ],
+            "answer",
+            "gen",
+            aggregation="majority_vote",
+        )
+
+        assert result.metrics["acc"] == 0.0
+        assert result.observations["acc"] == []
+        assert result.failed_count == 0
+        assert result.details["incomplete_problem_count"] == 1
+        assert result.details["incomplete_problem_doc_ids"] == ["q0"]
+
+    def test_incomplete_problem_does_not_change_question_metric(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        result = score_generate_result(
+            [
+                {
+                    "doc_id": "complete",
+                    "sample_index": 0,
+                    "n_samples": 1,
+                    "answer": "B",
+                    "gen": "Answer: B",
+                },
+                {
+                    "doc_id": "incomplete",
+                    "sample_index": 0,
+                    "n_samples": 2,
+                    "answer": "B",
+                    "gen": "Answer: A",
+                },
+            ],
+            "answer",
+            "gen",
+            aggregation="majority_vote",
+        )
+
+        assert result.metrics["acc"] == 1.0
+        assert result.observations["acc"] == [1.0]
+
+    @pytest.mark.parametrize(
+        ("sample_index", "expected_acc", "observations"),
+        [(0, 1.0, [1.0]), (1, 0.0, [])],
+    )
+    def test_first_requires_sample_zero(
+        self,
+        sample_index: int,
+        expected_acc: float,
+        observations: list[float],
+    ) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_generate_result
+
+        result = score_generate_result(
+            [
+                {
+                    "doc_id": "q0",
+                    "sample_index": sample_index,
+                    "n_samples": 2,
+                    "answer": "B",
+                    "gen": "Answer: B",
+                }
+            ],
+            "answer",
+            "gen",
+            aggregation="first",
+        )
+
+        assert result.metrics["acc"] == expected_acc
+        assert result.observations["acc"] == observations
+
     def test_explicit_inference_error_is_excluded_per_sample(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
@@ -343,16 +425,44 @@ class TestScoreLoglikelihoodItem:
         assert rec["pred"] == 1
         assert rec["correct"] is True
 
-    def test_string_gold_coerced(self) -> None:
+    @pytest.mark.parametrize("gold", ["1", 1.0, True])
+    def test_non_integer_gold_is_failed(self, gold: object) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
 
-        rec = score_loglikelihood_item({"gold": "1", "logprobs": [-1.0, -0.5]})
+        rec = score_loglikelihood_item({"gold": gold, "logprobs": [-1.0, -0.5]})
+        assert rec["gold"] == -1
+        assert rec["correct"] is False
+        assert rec["evaluation_status"] == "failed"
+
+    def test_integer_gold_is_scored(self) -> None:
+        from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
+
+        rec = score_loglikelihood_item({"gold": 1, "logprobs": [-1.0, -0.5]})
         assert rec["gold"] == 1
         assert rec["correct"] is True
 
 
 class TestMCScoreEdgeCases:
     """Regression tests for scorer fixes."""
+
+    @pytest.mark.parametrize(
+        "choice_fields",
+        [
+            {"choices": "AB"},
+            {"choices": []},
+            {"choice_tokens": []},
+            {"choices": ["A", "B"], "choice_tokens": ["A"]},
+        ],
+    )
+    def test_explicit_malformed_choices_are_failed(
+        self, choice_fields: dict[str, object]
+    ) -> None:
+        record = score_loglikelihood_item(
+            {"gold": 0, "logprobs": [-0.1, -0.2], **choice_fields}
+        )
+
+        assert record["pred"] == -1
+        assert record["evaluation_status"] == "failed"
 
     def test_null_logprob_restores_missing_candidate(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_loglikelihood_item
@@ -370,6 +480,14 @@ class TestMCScoreEdgeCases:
 
         record = score_loglikelihood_item(
             {"gold": 0, "choices": ["A", "B"], "logprobs": [invalid, -1.0]}
+        )
+
+        assert record["pred"] == -1
+        assert record["evaluation_status"] == "failed"
+
+    def test_huge_integer_logprob_is_failed(self) -> None:
+        record = score_loglikelihood_item(
+            {"gold": 0, "choices": ["A"], "logprobs": [10**1000]}
         )
 
         assert record["pred"] == -1

@@ -159,7 +159,9 @@ def main() -> int:
             temporary.open("w", encoding="utf-8") as handle,
         ):
             for record in records:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                handle.write(
+                    json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
+                )
 
         print(f"[OK]   {name}: {len(records)} items -> {out_path}")
 

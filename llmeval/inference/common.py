@@ -46,6 +46,16 @@ def reject_nonfinite_json(value: str) -> None:
     raise ValueError(f"non-standard JSON numeric constant: {value}")
 
 
+def _is_finite_number(value: object) -> bool:
+    """Return whether a JSON numeric value has a finite float representation."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # JSONL persistence
 # ---------------------------------------------------------------------------
@@ -135,8 +145,11 @@ def write_run_manifest(
     """Create or validate the expected-result sidecar for resumable inference."""
     if type(n_samples) is not int or n_samples <= 0:
         raise ValueError(f"n_samples must be positive, got {n_samples!r}")
-    doc_ids = [str(item.get("doc_id", "")) for item in raw_data]
-    if any(not document_id.strip() for document_id in doc_ids):
+    doc_ids = [item.get("doc_id") for item in raw_data]
+    if any(
+        not isinstance(document_id, str) or not document_id.strip()
+        for document_id in doc_ids
+    ):
         raise ValueError("Every input record must have a non-empty doc_id")
     if len(doc_ids) != len(set(doc_ids)):
         raise ValueError("Input data contains duplicate doc_id values")
@@ -179,30 +192,42 @@ def warn_result_manifest(
         return
 
     doc_ids, n_samples = manifest
-    expected = {
-        (document_id, str(sample_index), str(n_samples))
-        for document_id in doc_ids
-        for sample_index in range(n_samples)
-    }
-    actual_rows = [
-        (
-            str(item.get("doc_id", "")),
-            str(item.get("sample_index")),
-            str(item.get("n_samples")),
-        )
-        for item in records
-        if not item.get("error")
-    ]
+    expected_doc_ids = set(doc_ids)
+    actual_rows: list[tuple[str, int, int]] = []
+    invalid_rows = 0
+    for item in records:
+        if item.get("error"):
+            continue
+        document_id = item.get("doc_id")
+        sample_index = item.get("sample_index")
+        row_n_samples = item.get("n_samples")
+        if (
+            not isinstance(document_id, str)
+            or not document_id.strip()
+            or type(sample_index) is not int
+            or sample_index < 0
+            or type(row_n_samples) is not int
+            or row_n_samples <= 0
+        ):
+            invalid_rows += 1
+            continue
+        actual_rows.append((document_id, sample_index, row_n_samples))
     actual = set(actual_rows)
-    missing = expected - actual
-    unexpected = actual - expected
+    matched_count = sum(
+        document_id in expected_doc_ids
+        and sample_n_samples == n_samples
+        and sample_index < n_samples
+        for document_id, sample_index, sample_n_samples in actual
+    )
+    missing_count = len(doc_ids) * n_samples - matched_count
+    unexpected_count = len(actual) - matched_count + invalid_rows
     duplicates = len(actual_rows) - len(actual)
-    if missing or unexpected or duplicates:
+    if missing_count or unexpected_count or duplicates:
         logger.warning(
             "Result completeness check: missing=%d, unexpected=%d, duplicates=%d; "
             "evaluation will continue",
-            len(missing),
-            len(unexpected),
+            missing_count,
+            unexpected_count,
             duplicates,
         )
 
@@ -337,28 +362,56 @@ def run_concurrent_requests(
 
     Worker exceptions are counted as inference failures. Exceptions raised by
     ``on_success`` propagate because persistence failures invalidate the run.
+    At most ``max_workers`` requests are submitted at once, so a persistence
+    failure stops further API work without retaining one future per input row.
     """
+    if type(max_workers) is not int or max_workers <= 0:
+        raise ValueError(f"max_workers must be positive, got {max_workers!r}")
     processed = 0
     failed = 0
     executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=max_workers, thread_name_prefix=thread_name_prefix
     )
-    futures = [executor.submit(worker, item) for item in items]
+    item_iterator = iter(items)
+    pending: set[concurrent.futures.Future[_R]] = set()
+
+    def submit_next() -> bool:
+        try:
+            item = next(item_iterator)
+        except StopIteration:
+            return False
+        pending.add(executor.submit(worker, item))
+        return True
+
+    for _ in range(min(max_workers, len(items))):
+        submit_next()
     try:
         with tqdm(total=len(items), desc=description, unit="sample") as progress:
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    logger.warning("Inference sample failed: %s", exc)
-                    failed += 1
-                else:
-                    on_success(result)
-                    processed += 1
-                finally:
-                    progress.update(1)
+            while pending:
+                done, _ = concurrent.futures.wait(
+                    pending,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    pending.remove(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        logger.warning("Inference sample failed: %s", exc)
+                        failed += 1
+                    else:
+                        on_success(result)
+                        processed += 1
+                    finally:
+                        progress.update(1)
+                for _ in range(len(done)):
+                    submit_next()
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        for future in pending:
+            future.cancel()
+        # Running requests cannot be cancelled. Wait for them to finish so no
+        # background API work survives a persistence failure.
+        executor.shutdown(wait=True, cancel_futures=True)
     return processed, failed
 
 
@@ -425,26 +478,33 @@ def load_resume_state(
                 )
 
             logprobs = item.get("logprobs")
+            choice_fields = [
+                item[name]
+                for name in ("choice_tokens", "choices", "choice_texts")
+                if name in item
+            ]
+            gold = item.get("gold")
             has_valid_logprobs = (
                 isinstance(logprobs, list)
                 and bool(logprobs)
-                and any(
-                    isinstance(value, int | float)
-                    and not isinstance(value, bool)
-                    and math.isfinite(float(value))
-                    for value in logprobs
-                )
-                and all(
-                    value is None
-                    or (
-                        isinstance(value, int | float)
-                        and not isinstance(value, bool)
-                        and math.isfinite(float(value))
+                and (
+                    not choice_fields
+                    or all(
+                        isinstance(choices, list)
+                        and bool(choices)
+                        and len(choices) == len(logprobs)
+                        for choices in choice_fields
                     )
-                    for value in logprobs
                 )
+                and type(gold) is int
+                and 0 <= gold < len(logprobs)
+                and any(_is_finite_number(value) for value in logprobs)
+                and all(value is None or _is_finite_number(value) for value in logprobs)
             )
-            if not has_valid_logprobs:
+            if expected_scoring_mode in {"first_token", "continuation"}:
+                if not has_valid_logprobs:
+                    continue
+            elif expected_scoring_mode == "generate" or not has_valid_logprobs:
                 response = item.get(response_key)
                 if response is None and response_key != "gen":
                     response = item.get("gen")
@@ -472,12 +532,12 @@ def load_resume_state(
                     )
 
             document_id = item.get("doc_id")
-            if document_id is None or not str(document_id).strip():
+            if not isinstance(document_id, str) or not document_id.strip():
                 raise ValueError(
                     f"Resume file {output_path} line {line_num} is missing required "
                     "'doc_id'; migrate legacy resume output before continuing"
                 )
-            document_key = str(document_id)
+            document_key = document_id
             completed = state.completed_indices.setdefault(document_key, set())
             row_n_samples = item.get("n_samples")
             if row_n_samples is not None:
@@ -554,12 +614,12 @@ def prepare_sample_requests(
                 f"got {type(source).__name__}"
             )
         document_id = source.get("doc_id")
-        if document_id is None or not str(document_id).strip():
+        if not isinstance(document_id, str) or not document_id.strip():
             raise ValueError(
                 f"Input record at index {index} is missing required 'doc_id'. "
                 "Regenerate the evaluation dataset with the data preparation script."
             )
-        document_key = str(document_id)
+        document_key = document_id
         previous_index = first_indices.setdefault(document_key, index)
         if previous_index != index:
             raise ValueError(

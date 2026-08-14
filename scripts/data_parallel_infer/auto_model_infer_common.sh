@@ -241,6 +241,9 @@ readonly TASK_LOG_PREFIX="task_"
 # 服务等待最大时长（秒）
 readonly MAX_WAIT_TIME=${MAX_WAIT_TIME:-900}
 
+# 部分服务未就绪时默认继续运行；设为 1 时任务完成后返回非零状态。
+readonly FAIL_ON_DEGRADED="${FAIL_ON_DEGRADED:-0}"
+
 # 健康检查设置
 readonly HEALTH_PATH="${HEALTH_PATH:-/health}"        # OpenAI 兼容服务通常暴露 /health
 readonly HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-3}          # 单次健康检查超时（秒）
@@ -302,6 +305,7 @@ usage() {
   N_SAMPLES              每个样本采样次数（默认：8）
   SERVED_MODEL_NAME      服务模型名称（默认：PCL-Reasoner）
   MAX_WAIT_TIME          服务启动最大等待时间（默认：900秒）
+  FAIL_ON_DEGRADED       部分服务不可用时是否最终返回失败（0/1，默认：0）
   DATASET_GLOB           数据集文件匹配模式
   SYSTEM_PROMPT_TYPE     系统提示类型（默认：amthinking）
   MAX_WORKERS            推理客户端内部并发（默认：128）
@@ -635,6 +639,9 @@ validate_config() {
         'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value >= 0.1 && value <= 1.0) }'; then
         handle_error 1 "显存利用率需在 0.1-1.0 之间，当前值: ${MEMORY_UTILIZATION}"
     fi
+    if [[ "$FAIL_ON_DEGRADED" != "0" && "$FAIL_ON_DEGRADED" != "1" ]]; then
+        handle_error 1 "FAIL_ON_DEGRADED 必须为 0 或 1，当前值: ${FAIL_ON_DEGRADED}"
+    fi
 
     log_info "✅ 配置参数验证通过"
 }
@@ -958,7 +965,10 @@ deploy_model_service() {
 
     # 4. 在后台启动服务
     log_info "🔄 执行部署命令到节点 ${node}, 实例 ${instance_id}, 端口 ${port}"
-    ssh_run "$node" "$vllm_cmd" &
+    if ! ssh_run "$node" "$vllm_cmd"; then
+        log_error "节点 ${node} 实例 ${instance_id} (端口: ${port}) 部署命令发送失败"
+        return 1
+    fi
     log_info "✅ 节点 ${node} vllm 模型部署启动命令发送成功"
 }
 
@@ -1032,8 +1042,9 @@ wait_for_services() {
     local status_dir="${LOG_DIR}/status"
 
     # 确保状态目录干净
-    rm -rf "${status_dir}" || true
-    mkdir -p "${status_dir}"
+    if ! rm -rf "${status_dir}" || ! mkdir -p "${status_dir}"; then
+        handle_error 1 "❌ 无法重建服务状态目录: ${status_dir}"
+    fi
 
     while [[ $total_wait_time -lt $MAX_WAIT_TIME ]]; do
         local running_pids=()
@@ -1411,6 +1422,8 @@ main() {
 
     # 步骤4: 并行部署模型服务
     log_info "正在并行部署所有模型服务..."
+    local -a deployment_pids=()
+    local -a deployment_labels=()
     for ((i = 0; i < ${#NODES[@]}; i++)); do
         local node="${NODES[i]}"
         for ((instance_idx = 0; instance_idx < INSTANCES_PER_NODE; instance_idx++)); do
@@ -1418,11 +1431,20 @@ main() {
             local port="${PORTS[port_idx]}"
             # 在本地后台部署，加速并发
             deploy_model_service "$node" "$port" "$instance_idx" &
+            deployment_pids+=("$!")
+            deployment_labels+=("${node}/port${port}/instance-${instance_idx}")
         done
     done
 
-    # 等待所有部署命令发送完成 (即使失败，deploy_model_service 也会返回)
-    wait || true
+    local deployment_command_failures=0
+    for i in "${!deployment_pids[@]}"; do
+        if wait "${deployment_pids[$i]}"; then
+            log_info "部署命令已发送: ${deployment_labels[$i]}"
+        else
+            log_warn "部署命令失败: ${deployment_labels[$i]}"
+            deployment_command_failures=$((deployment_command_failures + 1))
+        fi
+    done
 
     # 步骤5: 等待服务就绪并获取可用节点（HTTP 健康检查 + 日志回退）
     wait_for_services
@@ -1490,6 +1512,14 @@ main() {
         handle_error 1 "❌ 没有任何节点成功启动服务，无法继续执行推理任务"
     fi
 
+    local run_status="SUCCESS"
+    if [[ $ready_instance_count -lt $total_services_expected || $deployment_command_failures -gt 0 ]]; then
+        run_status="DEGRADED"
+        log_warn "运行状态: ${run_status}，将使用已就绪实例继续推理"
+    else
+        log_info "运行状态: ${run_status}"
+    fi
+
     local actual_total_instances=${#READY_INSTANCE_PORTS[@]}
     log_info "将使用 ${actual_total_instances} 个可用实例 (覆盖 ${ready_node_count} 个节点) 进行推理"
 
@@ -1497,13 +1527,24 @@ main() {
     distribute_and_launch_jobs
 
     # 步骤7: 优雅关闭服务（由 EXIT 陷阱调用 stop_services）
-    log_info "✅ 分布式推理部署和任务执行完成，正在退出并清理资源..."
+    if [[ "$run_status" == "DEGRADED" ]]; then
+        log_warn "分布式推理任务已完成，但服务部署处于 DEGRADED 状态"
+    else
+        log_info "✅ 分布式推理部署和任务执行完成，正在退出并清理资源..."
+    fi
 
     log_info "📊 部署统计:"
+    log_info "   - 运行状态: ${run_status}"
     log_info "   - 成功实例: ${ready_instance_count}/${total_services_expected}"
+    log_info "   - 部署命令失败: ${deployment_command_failures}"
     log_info "   - 覆盖节点: ${ready_node_count}/${configured_node_count}"
     log_info "   - 数据文件: ${#FILES[@]}"
     log_info "   - 输出目录: ${OUTPUT_DIR}"
     log_info "   - 日志目录: ${LOG_DIR}"
     echo "================================================"
+
+    if [[ "$FAIL_ON_DEGRADED" == "1" && "$run_status" == "DEGRADED" ]]; then
+        log_error "FAIL_ON_DEGRADED=1，因部分服务未就绪返回失败"
+        return 1
+    fi
 }

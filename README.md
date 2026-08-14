@@ -261,9 +261,9 @@ read-only host filesystem, a non-privileged user, and external resource limits.
 
 Multi-sample math summaries include `accuracy`, `problem_pass@k`,
 `problem_majority@k`, and per-problem `correct_samples`, `observed_samples`, and
-`sample_count`. The number of rows sharing a `doc_id` determines `k`; a problem
-with failed or timed-out rows is marked incomplete and excluded from problem-level
-metrics.
+`sample_count`. A problem with missing, failed, or timed-out samples is marked
+incomplete and excluded from problem-level metrics, while its available samples
+still contribute to sample-level accuracy.
 
 ## Detailed Usage
 
@@ -327,8 +327,9 @@ If inference is interrupted, simply re-run the same command. The script automati
 2. Counts completed samples per problem
 3. Continues from where it left off
 
-New runs also write `<output>.manifest.json`. The evaluator uses this sidecar to
-reject incomplete output before scoring while keeping failed samples out of JSONL.
+New runs also write `<output>.manifest.json`. Before scoring, the evaluator uses
+this sidecar to warn about missing or unexpected result rows. Evaluation continues
+with the available samples, and failed inference samples remain absent from JSONL.
 
 ### Context Length Extension (YaRN)
 

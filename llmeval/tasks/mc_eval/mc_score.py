@@ -201,7 +201,6 @@ def merge_generate_records(
         item = source.copy()
         document_id = item.get("doc_id")
         identity = _mc_problem_identity(item, row_index)
-        problem_id = str(document_id) if identity.startswith("doc:") else identity
         position = positions.get(identity)
         if position is None:
             position = len(merged)
@@ -236,6 +235,9 @@ def merge_generate_records(
             n_samples=n_samples,
         )
         ordered_samples = [samples[index] for index in sample_order]
+        item["sample_group_complete"] = ordered_samples[0][0]["sample_group_complete"]
+        item["n_samples"] = ordered_samples[0][0]["n_samples"]
+        item["sample_index"] = ordered_samples[0][0]["sample_index"]
         sample_errors = [
             bool(sample.get("error"))
             or resolve_single_generation(sample, response_key) is None
@@ -282,12 +284,6 @@ def score_generate_result(
         Multiple-generation aggregation strategy.
 
     """
-    if aggregation not in _MC_AGGREGATIONS:
-        raise ValueError(
-            f"Unsupported MC aggregation {aggregation!r}; "
-            f"expected one of {sorted(_MC_AGGREGATIONS)}"
-        )
-
     if aggregation == "per_sample":
         merged_dataset = normalize_single_generation_samples(
             eval_dataset,
@@ -422,7 +418,12 @@ def _error_record(
     record = {
         **{
             key: item[key]
-            for key in ("doc_id",)
+            for key in (
+                "doc_id",
+                "sample_index",
+                "sample_group_complete",
+                "n_samples",
+            )
             if key in item and item[key] is not None
         },
         "gold": gold,
@@ -482,7 +483,9 @@ def _attach_item_metadata(
 ) -> dict[str, Any]:
     """Carry stable identity and scoring mode into the persisted score row."""
     metadata = {
-        key: item[key] for key in ("doc_id",) if key in item and item[key] is not None
+        key: item[key]
+        for key in ("doc_id", "sample_index", "sample_group_complete", "n_samples")
+        if key in item and item[key] is not None
     }
     metadata["scoring_mode"] = item.get(
         "scoring_mode",
@@ -516,6 +519,7 @@ def build_result(records: list[dict[str, Any]]) -> MCScoreResult:
         record
         for record in records
         if record.get("evaluation_status", "completed") == "completed"
+        and _record_is_metric_eligible(record)
     ]
     if per_sample:
         total = sum(int(r.get("sample_total", 0)) for r in records)
@@ -541,6 +545,8 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
     for record in result.records:
         if record.get("evaluation_status", "completed") != "completed":
             continue
+        if not _record_is_metric_eligible(record):
+            continue
         if record.get("aggregation") == "per_sample" and isinstance(
             record.get("sample_correct"), list
         ):
@@ -556,13 +562,40 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         for record in result.records
         if record.get("evaluation_status") == "failed"
     )
+    problem_completeness: dict[str, bool] = {}
+    for index, record in enumerate(result.records):
+        problem_id = str(record.get("doc_id", f"row:{index}"))
+        problem_completeness[problem_id] = problem_completeness.get(
+            problem_id, True
+        ) and bool(record.get("sample_group_complete", True))
+    incomplete_problem_ids = [
+        problem_id
+        for problem_id, complete in problem_completeness.items()
+        if not complete
+    ]
     return ScorerResult(
         metrics={"acc": result.acc},
         observations=observations,
         records=result.records,
+        details={
+            "complete_problem_count": len(problem_completeness)
+            - len(incomplete_problem_ids),
+            "incomplete_problem_count": len(incomplete_problem_ids),
+            "incomplete_problem_doc_ids": incomplete_problem_ids,
+        },
         sample_count=sample_count,
         effective_sample_count=sample_count - failed_count,
         failed_count=failed_count,
+    )
+
+
+def _record_is_metric_eligible(record: dict[str, Any]) -> bool:
+    """Exclude incomplete groups only from aggregations that require all samples."""
+    aggregation = record.get("aggregation")
+    if aggregation == "first":
+        return record.get("sample_index", 0) == 0
+    return aggregation not in {"majority_vote", "any_correct"} or bool(
+        record.get("sample_group_complete", True)
     )
 
 
@@ -579,13 +612,9 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
     Invalid data and inference failures are represented uniformly as failed.
     """
     raw_gold = item.get("gold", -1)
-    try:
-        if isinstance(raw_gold, bool):
-            raise TypeError("boolean gold index")
-        if isinstance(raw_gold, float) and not raw_gold.is_integer():
-            raise ValueError("non-integral gold index")
-        gold = int(raw_gold)
-    except (TypeError, ValueError):
+    if type(raw_gold) is int:
+        gold = raw_gold
+    else:
         logger.warning(
             f"Invalid gold index {item.get('gold')!r} — treating as -1 (always wrong)."
         )
@@ -605,28 +634,23 @@ def score_loglikelihood_item(item: dict[str, Any]) -> dict[str, Any]:
                     logprobs.append(score)
                 else:
                     raise TypeError("non-numeric logprob")
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             logger.warning("Invalid aggregate logprobs; marking item failed")
             logprobs = []
             valid_logprobs = False
-    choices = (
-        item.get("choice_tokens") or item.get("choices") or item.get("choice_texts", [])
+    choice_fields = [
+        item[name]
+        for name in ("choice_tokens", "choices", "choice_texts")
+        if name in item
+    ]
+    valid_choice_fields = not choice_fields or all(
+        isinstance(choices, list) and bool(choices) and len(choices) == len(logprobs)
+        for choices in choice_fields
     )
-    expected_choices = len(choices) if isinstance(choices, list) and choices else None
     # Invalid gold, malformed scores, and missing inference output cannot be
     # scored and therefore share the same failed status.
-    invalid_shape = (
-        valid_logprobs
-        and bool(logprobs)
-        and expected_choices is not None
-        and expected_choices != len(logprobs)
-    )
-    invalid_gold = gold < 0 or (
-        expected_choices is not None and gold >= expected_choices
-    )
-    invalid_gold = invalid_gold or (
-        expected_choices is None and bool(logprobs) and gold >= len(logprobs)
-    )
+    invalid_shape = valid_logprobs and bool(logprobs) and not valid_choice_fields
+    invalid_gold = gold < 0 or (bool(logprobs) and gold >= len(logprobs))
     if (
         not logprobs
         or invalid_shape

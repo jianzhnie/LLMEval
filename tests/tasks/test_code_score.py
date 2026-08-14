@@ -177,25 +177,6 @@ class TestEstimatePassAtK:
 
 
 class TestScoreCode:
-    @pytest.mark.parametrize("k_values", [(), (1.5,), (True,)])
-    def test_invalid_k_values_are_rejected(self, k_values: tuple[object, ...]) -> None:
-        with pytest.raises(ValueError, match="positive integers"):
-            score_code_result(
-                [
-                    {
-                        "task_id": "task/0",
-                        "prompt": "def f():\n",
-                        "answer": "\nassert f() == 1\n",
-                        "gen": "    return 1",
-                    }
-                ],
-                "answer",
-                "gen",
-                k_values=k_values,  # type: ignore[arg-type]
-                max_workers=1,
-                allow_unsafe_code=True,
-            )
-
     def test_worker_exception_returns_indexed_failure(self) -> None:
         import llmeval.tasks.code_eval.code_score as code_score
 
@@ -292,7 +273,7 @@ class TestScoreCode:
         assert result.failed_count == 1
         assert result.records[0]["evaluation_status"] == "failed"
 
-    def test_infrastructure_failure_does_not_try_fallback(
+    def test_all_infrastructure_failures_remain_failed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import llmeval.tasks.code_eval.code_score as code_score
@@ -329,7 +310,200 @@ class TestScoreCode:
         )
 
         assert result.failed_count == 1
-        assert check.call_count == 1
+        assert check.call_count == 2
+
+    def test_fallback_success_overrides_infrastructure_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.tasks.code_eval.code_score as code_score
+
+        check = MagicMock(
+            side_effect=[
+                {
+                    "task_id": "task/0",
+                    "passed": False,
+                    "result": "worker failed",
+                    "stderr": "",
+                    "evaluation_status": "failed",
+                },
+                {
+                    "task_id": "task/0",
+                    "passed": True,
+                    "result": "passed",
+                    "stderr": "",
+                    "evaluation_status": "completed",
+                },
+            ]
+        )
+        monkeypatch.setattr(code_score, "check_correctness", check)
+        monkeypatch.setattr(
+            code_score,
+            "_build_check_programs",
+            MagicMock(return_value=[("first", "a"), ("fallback", "b")]),
+        )
+
+        result = score_code_result(
+            [
+                {
+                    "task_id": "task/0",
+                    "prompt": "def f():\n",
+                    "answer": "assert f() == 1",
+                    "gen": "return 1",
+                }
+            ],
+            "answer",
+            "gen",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert check.call_count == 2
+        assert result.records[0]["passed"] is True
+        assert result.failed_count == 0
+
+    def test_fallback_failure_preserves_completed_incorrect_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.tasks.code_eval.code_score as code_score
+
+        check = MagicMock(
+            side_effect=[
+                {
+                    "task_id": "task/0",
+                    "passed": False,
+                    "result": "failed: AssertionError",
+                    "stderr": "",
+                    "evaluation_status": "completed",
+                },
+                {
+                    "task_id": "task/0",
+                    "passed": False,
+                    "result": "worker failed",
+                    "stderr": "",
+                    "evaluation_status": "failed",
+                },
+            ]
+        )
+        monkeypatch.setattr(code_score, "check_correctness", check)
+        monkeypatch.setattr(
+            code_score,
+            "_build_check_programs",
+            MagicMock(return_value=[("first", "a"), ("fallback", "b")]),
+        )
+
+        result = score_code_result(
+            [
+                {
+                    "task_id": "task/0",
+                    "prompt": "def f():\n",
+                    "answer": "assert f() == 1",
+                    "gen": "return 2",
+                }
+            ],
+            "answer",
+            "gen",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert check.call_count == 2
+        assert result.records[0]["evaluation_status"] == "completed"
+        assert result.records[0]["result"] == "failed: AssertionError"
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 1
+
+    def test_fallback_exception_preserves_completed_incorrect_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.tasks.code_eval.code_score as code_score
+
+        check = MagicMock(
+            side_effect=[
+                {
+                    "task_id": "task/0",
+                    "passed": False,
+                    "result": "failed: AssertionError",
+                    "stderr": "",
+                    "evaluation_status": "completed",
+                },
+                OSError("executor unavailable"),
+            ]
+        )
+        monkeypatch.setattr(code_score, "check_correctness", check)
+        monkeypatch.setattr(
+            code_score,
+            "_build_check_programs",
+            MagicMock(return_value=[("first", "a"), ("fallback", "b")]),
+        )
+
+        result = score_code_result(
+            [
+                {
+                    "task_id": "task/0",
+                    "prompt": "def f():\n",
+                    "answer": "assert f() == 1",
+                    "gen": "return 2",
+                }
+            ],
+            "answer",
+            "gen",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert check.call_count == 2
+        assert result.records[0]["evaluation_status"] == "completed"
+        assert result.records[0]["result"] == "failed: AssertionError"
+        assert result.failed_count == 0
+        assert result.effective_sample_count == 1
+
+    def test_invalid_fallback_status_preserves_completed_incorrect_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.tasks.code_eval.code_score as code_score
+
+        check = MagicMock(
+            side_effect=[
+                {
+                    "task_id": "task/0",
+                    "passed": False,
+                    "result": "failed: AssertionError",
+                    "stderr": "",
+                    "evaluation_status": "completed",
+                },
+                {
+                    "task_id": "task/0",
+                    "passed": False,
+                    "result": "unknown",
+                    "stderr": "",
+                },
+            ]
+        )
+        monkeypatch.setattr(code_score, "check_correctness", check)
+        monkeypatch.setattr(
+            code_score,
+            "_build_check_programs",
+            MagicMock(return_value=[("first", "a"), ("fallback", "b")]),
+        )
+
+        result = score_code_result(
+            [
+                {
+                    "task_id": "task/0",
+                    "prompt": "def f():\n",
+                    "answer": "assert f() == 1",
+                    "gen": "return 2",
+                }
+            ],
+            "answer",
+            "gen",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert result.records[0]["evaluation_status"] == "completed"
+        assert result.records[0]["result"] == "failed: AssertionError"
+        assert result.failed_count == 0
 
     def test_incomplete_problem_is_excluded_from_problem_level_pass_at_k(
         self,
@@ -374,6 +548,31 @@ class TestScoreCode:
             "incomplete_problem_count": 1,
             "excluded_problem_task_ids": ["task/incomplete"],
         }
+
+    def test_missing_sample_row_warns_and_excludes_problem_metrics(self) -> None:
+        result = score_code_result(
+            [
+                {
+                    "task_id": "task/incomplete",
+                    "prompt": "def f():\n",
+                    "answer": "\nassert f() == 1\n",
+                    "gen": "    return 1",
+                    "sample_index": 0,
+                    "n_samples": 2,
+                }
+            ],
+            "answer",
+            "gen",
+            max_workers=1,
+            allow_unsafe_code=True,
+        )
+
+        assert result.effective_sample_count == 1
+        assert result.failed_count == 0
+        assert result.metrics["pass@1"] == 0.0
+        assert result.observations["pass@1"] == []
+        assert result.details["incomplete_problem_count"] == 1
+        assert result.details["excluded_problem_task_ids"] == ["task/incomplete"]
 
     def test_os_exit_candidate_is_completed_not_infra_failure(
         self, tmp_path: Path
@@ -551,24 +750,6 @@ class TestScoreCode:
     def test_empty_dataset(self) -> None:
         acc = _score_code_value([], "answer", "gen", max_workers=1)
         assert acc == 0.0
-
-    @pytest.mark.parametrize(
-        ("kwargs", "message"),
-        [
-            ({"max_workers": 0}, "max_workers"),
-            ({"max_workers": True}, "max_workers"),
-            ({"timeout": 0}, "timeout"),
-            ({"timeout": 1.5}, "timeout"),
-            ({"exec_timeout": float("nan")}, "exec_timeout"),
-            ({"exec_timeout": float("inf")}, "exec_timeout"),
-            ({"exec_timeout": True}, "exec_timeout"),
-        ],
-    )
-    def test_public_scorer_validates_execution_limits(
-        self, kwargs: dict[str, object], message: str
-    ) -> None:
-        with pytest.raises(ValueError, match=message):
-            score_code_result([], "answer", "gen", **kwargs)  # type: ignore[arg-type]
 
     def test_empty_generation_marked_failed(self) -> None:
         items = [

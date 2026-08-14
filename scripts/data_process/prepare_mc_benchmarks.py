@@ -103,7 +103,7 @@ def prepare_mc_benchmark(name: str, output_dir: Path) -> str:
         temporary.open("w", encoding="utf-8") as handle,
     ):
         for row in all_rows:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
     print(f"[DONE] {name}: {len(all_rows)} examples → {output_file}")
     return str(output_file)
 

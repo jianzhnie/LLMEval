@@ -151,7 +151,6 @@ run_infer() {
 PARALLEL="${PARALLEL:-1}"
 declare -a TASK_NAMES=()
 declare -a TASK_PIDS=()
-declare -A TASK_STATUS=()
 task_failed=0
 
 for task in $BENCHMARKS; do
@@ -180,10 +179,7 @@ for task in $BENCHMARKS; do
         } &
         TASK_PIDS+=($!)
     else
-        if run_infer "$task" "$input_file" "$output_file" "$n_samples" "$TEMPERATURE"; then
-            TASK_STATUS[$task]="OK"
-        else
-            TASK_STATUS[$task]="FAIL"
+        if ! run_infer "$task" "$input_file" "$output_file" "$n_samples" "$TEMPERATURE"; then
             task_failed=1
         fi
     fi
@@ -194,10 +190,8 @@ if [[ "$PARALLEL" == "1" && ${#TASK_PIDS[@]} -gt 0 ]]; then
     echo ""
     echo "[INFO] 等待 ${#TASK_PIDS[@]} 个并行任务完成..."
     for i in "${!TASK_PIDS[@]}"; do
-        if wait "${TASK_PIDS[$i]}"; then
-            TASK_STATUS[${TASK_NAMES[$i]}]="OK"
-        else
-            TASK_STATUS[${TASK_NAMES[$i]}]="FAIL"
+        if ! wait "${TASK_PIDS[$i]}"; then
+            echo "[ERROR] ${TASK_NAMES[$i]} 推理失败" >&2
             task_failed=1
         fi
     done

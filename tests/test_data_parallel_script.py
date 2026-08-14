@@ -75,3 +75,27 @@ def test_wait_for_pids_handles_success_and_failure() -> None:
         wait_for_pids "$first_pid" "$second_pid"
     """
     subprocess.run(["bash", "-c", command], check=True, timeout=5)
+
+
+def test_partial_service_startup_is_reported_as_degraded() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'readonly FAIL_ON_DEGRADED="${FAIL_ON_DEGRADED:-0}"' in source
+    assert 'run_status="DEGRADED"' in source
+    assert 'log_warn "运行状态: ${run_status}' in source
+    assert (
+        'if [[ "$FAIL_ON_DEGRADED" == "1" && "$run_status" == "DEGRADED" ]]' in source
+    )
+
+
+def test_deployment_command_statuses_are_collected() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'deployment_pids+=("$!")' in source
+    assert 'if wait "${deployment_pids[$i]}"' in source
+    assert 'ssh_run "$node" "$vllm_cmd" &' not in source
+
+
+def test_service_status_directory_cleanup_is_required() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'rm -rf "${status_dir}" || true' not in source
+    assert 'if ! rm -rf "${status_dir}" || ! mkdir -p "${status_dir}"; then' in source
+    assert 'handle_error 1 "❌ 无法重建服务状态目录: ${status_dir}"' in source

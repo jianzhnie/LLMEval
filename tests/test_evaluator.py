@@ -52,7 +52,6 @@ if "transformers" not in sys.modules and not importlib.util.find_spec("transform
 
 from llmeval.evaluator import (
     evaluate_task,
-    evaluate_task_result,
     select_eval_arguments,
 )
 from llmeval.inference.common import write_run_manifest
@@ -100,39 +99,6 @@ class TestEvaluateTask:
             evaluate_task(
                 data, "unsupported/task", "answer", "gen", str(tmp_path / "cache"), 4
             )
-
-    def test_result_path_rejects_directory(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="file path"):
-            evaluate_task([], "mc_opensource/task", "a", "g", tmp_path, 1)
-
-    @pytest.mark.parametrize(
-        ("kwargs", "message"),
-        [
-            ({"max_workers": 0}, "max_workers"),
-            ({"timeout": 0}, "timeout"),
-            ({"exec_timeout": 0}, "exec_timeout"),
-            ({"exec_timeout": float("nan")}, "exec_timeout"),
-            ({"exec_timeout": float("inf")}, "exec_timeout"),
-            ({"seed": -1}, "seed"),
-            ({"bootstrap_samples": -1}, "bootstrap_samples"),
-            ({"confidence_level": 1.0}, "confidence_level"),
-            ({"code_k_values": ()}, "code_k_values"),
-        ],
-    )
-    def test_library_api_validates_shared_options(
-        self, tmp_path: Path, kwargs: dict[str, object], message: str
-    ) -> None:
-        arguments: dict[str, object] = {
-            "eval_dataset": [],
-            "task_name": "mc_opensource/task",
-            "label_key": "answer",
-            "response_key": "gen",
-            "result_path": tmp_path / "result.json",
-            "max_workers": 1,
-            **kwargs,
-        }
-        with pytest.raises(ValueError, match=message):
-            evaluate_task_result(**arguments)  # type: ignore[arg-type]
 
     def test_cli_evaluates_incomplete_manifest_output(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

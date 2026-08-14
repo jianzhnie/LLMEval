@@ -13,6 +13,8 @@ from io import TextIOBase
 from pathlib import Path
 from typing import Any
 
+from llmeval.utils.log import init_logger
+
 __all__ = [
     "TextFilterPipeline",
     "atomic_write_json",
@@ -22,6 +24,8 @@ __all__ = [
     "sample_order_indices",
     "strip_reasoning_wrappers",
 ]
+
+logger = init_logger("task_postprocess")
 
 TextFilter = Callable[[str], str]
 
@@ -163,16 +167,27 @@ def sample_order_indices(
             used[sample_index] = position
             next_index += 1
         assigned.append(sample_index)
-    expected = len(items) if n_samples is None else n_samples
+    expected = max(assigned, default=-1) + 1 if n_samples is None else n_samples
     actual_indices = set(assigned)
     required_indices = set(range(expected))
-    if actual_indices != required_indices:
-        missing = sorted(required_indices - actual_indices)
-        unexpected = sorted(actual_indices - required_indices)
+    unexpected = sorted(actual_indices - required_indices)
+    if unexpected:
         raise ValueError(
-            f"Incomplete samples for problem {problem_id!r}: expected indices "
-            f"0..{expected - 1}, missing={missing}, unexpected={unexpected}"
+            f"Sample indices {unexpected} for problem {problem_id!r} exceed "
+            f"n_samples={expected}"
         )
+    missing = sorted(required_indices - actual_indices)
+    if missing:
+        logger.warning(
+            "Incomplete samples for problem %r: missing=%s; scoring available samples",
+            problem_id,
+            missing,
+        )
+    complete = not missing
+    for item, sample_index in zip(items, assigned, strict=True):
+        item.setdefault("sample_index", sample_index)
+        item["sample_group_complete"] = complete
+        item.setdefault("n_samples", expected)
     return sorted(range(len(items)), key=assigned.__getitem__)
 
 

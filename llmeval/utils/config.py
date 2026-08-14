@@ -109,16 +109,16 @@ class DataArguments:
             raise ValueError("input_file and output_file must be different paths")
 
 
-def _validate_field_names(**field_names: str) -> None:
+def validate_field_names(**field_names: str) -> None:
     """Require non-empty string keys before records are read or written."""
     for name, value in field_names.items():
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
 
 
-def _validate_distinct_field_names(**field_names: str) -> None:
+def validate_distinct_field_names(**field_names: str) -> None:
     """Require record fields to use distinct keys."""
-    _validate_field_names(**field_names)
+    validate_field_names(**field_names)
     values = list(field_names.values())
     if len(values) != len(set(values)):
         rendered = ", ".join(f"{name}={value!r}" for name, value in field_names.items())
@@ -174,7 +174,7 @@ class PromptArguments:
             ValueError: If input_key or label_key is empty, or if system_prompt_type
                        is not found in SYSTEM_PROMPT_FACTORY.
         """
-        _validate_distinct_field_names(
+        validate_distinct_field_names(
             input_key=self.input_key,
             label_key=self.label_key,
             response_key=self.response_key,
@@ -708,11 +708,11 @@ class ShareEvalArguments:
             raise ValueError("result_path must be a file path, not a directory")
         if input_path.resolve() == result_path.resolve():
             raise ValueError("input_path and result_path must be different paths")
-        _validate_distinct_field_names(
+        validate_distinct_field_names(
             label_key=self.label_key,
             response_key=self.response_key,
         )
-        _validate_field_names(task_name=self.task_name)
+        validate_field_names(task_name=self.task_name)
         require_int("max_workers", self.max_workers, minimum=1)
         require_int("timeout", self.timeout, minimum=1)
         require_int("seed", self.seed, minimum=0)

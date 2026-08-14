@@ -326,26 +326,7 @@ def _resolve_prompt_mode(item: dict[str, Any]) -> str:
 def _process_code_item_impl(
     args: tuple[int, dict[str, Any], str, str, float, bool],
 ) -> tuple[int, dict[str, Any]]:
-    """Score a single code-generation item.
-
-    Parameters
-    ----------
-    args : tuple
-        ``(index, item_dict, label_key, response_key, exec_timeout, allow_unsafe_code)``.
-
-        * **index** — position in the original dataset (for result ordering).
-        * **item_dict** — must contain ``"prompt"``, *label_key*, and
-          *response_key*.
-        * **label_key** — key for the ground-truth test harness.
-        * **response_key** — key for the model output (``str`` or ``list[str]``).
-        * **exec_timeout** — per-item execution timeout in seconds.
-
-    Returns
-    -------
-    tuple[int, dict[str, Any]]
-        ``(index, record)`` where *record* has keys ``task_id``, ``passed``,
-        ``result``, ``stderr``.
-    """
+    """Score one code sample and preserve its input index."""
     idx, item, label_key, response_key, exec_timeout, allow_unsafe_code = args
 
     # -- resolve identifiers ----------------------------------------------------
@@ -409,26 +390,55 @@ def _process_code_item_impl(
     # extract_code() preserves leading indentation (uses .rstrip()), so bare
     # HumanEval-style function bodies (``"    return a + b"``) remain valid.
     exec_result: dict[str, Any] | None = None
+    completed_result: dict[str, Any] | None = None
     for _, check_program in _build_check_programs(
         prompt, code, test_code, prompt_mode=prompt_mode
     ):
-        exec_result = check_correctness(
-            check_program,
-            exec_timeout,
-            task_id,
-            allow_unsafe_code=allow_unsafe_code,
-        )
-        if exec_result.get("passed"):
+        try:
+            candidate_result = check_correctness(
+                check_program,
+                exec_timeout,
+                task_id,
+                allow_unsafe_code=allow_unsafe_code,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Code execution candidate failed for task %s: %s", task_id, exc
+            )
+            candidate_result = _failure_record(
+                task_id,
+                f"failed: code execution error: {exc}",
+                evaluation_status="failed",
+            )
+        status = candidate_result.get("evaluation_status")
+        if status not in {"completed", "failed"}:
+            logger.warning(
+                "Code execution candidate returned invalid status for task %s: %r",
+                task_id,
+                status,
+            )
+            candidate_result = _failure_record(
+                task_id,
+                "failed: invalid code execution status",
+                evaluation_status="failed",
+            )
+            status = "failed"
+        if candidate_result.get("passed"):
+            exec_result = {**candidate_result, "evaluation_status": "completed"}
             break
-        if exec_result.get("evaluation_status") == "failed":
-            break
+        if status == "completed":
+            completed_result = candidate_result
+            exec_result = candidate_result
+            continue
+        if completed_result is not None:
+            exec_result = completed_result
+        else:
+            exec_result = candidate_result
     if exec_result is None:
         record = _failure_record(task_id, "failed: no executable candidate")
         record.update(filter_artifacts)
         return idx, record
     exec_result.setdefault("task_id", task_id)
-    if exec_result.get("evaluation_status") not in {"completed", "failed"}:
-        raise ValueError("code execution result is missing a valid evaluation_status")
     exec_result.update(filter_artifacts)
     return idx, exec_result
 
@@ -459,31 +469,7 @@ def _score_items(
     timeout: int,
     allow_unsafe_code: bool,
 ) -> list[dict[str, Any]]:
-    """Score every item, preserving input order.
-
-    Parameters
-    ----------
-    eval_dataset : list[dict]
-        Items to score.  Each must contain *label_key* and *response_key*.
-    label_key : str
-        Dict key for the ground-truth test code.
-    response_key : str
-        Dict key for the model output (``str`` or ``list[str]``).
-    exec_timeout : float
-        Per-item code execution timeout in seconds.
-    max_workers : int
-        Maximum Pebble ``ProcessPool`` workers.  ≤ 1 forces serial execution.
-    timeout : int
-        Pebble pool-level timeout per worker task in seconds.
-
-    Returns
-    -------
-    list[dict[str, Any]]
-        One scored record per input item, in the same order.  Items whose
-        worker raised are represented by :func:`_failure_code_record`; items
-        whose result never arrived are represented by
-        :func:`_failure_code_record`.
-    """
+    """Score every item in order, replacing lost workers with failed records."""
     total = len(eval_dataset)
     if total == 0:
         return []
@@ -642,7 +628,8 @@ def _completed_code_groups(
     return {
         task_id: problem_records
         for task_id, problem_records in grouped.items()
-        if all(
+        if all(record.get("sample_group_complete", True) for record in problem_records)
+        and all(
             record.get("evaluation_status", "completed") == "completed"
             for record in problem_records
         )
@@ -693,27 +680,6 @@ def _score_code_task_result(
         ``False`` and should only enable this in a trusted or isolated runtime.
 
     """
-    if type(max_workers) is not int or max_workers <= 0:
-        raise ValueError(f"max_workers must be positive, got {max_workers!r}")
-    if type(timeout) is not int or timeout <= 0:
-        raise ValueError(f"timeout must be positive, got {timeout!r}")
-    if (
-        not isinstance(exec_timeout, int | float)
-        or isinstance(exec_timeout, bool)
-        or not math.isfinite(exec_timeout)
-        or exec_timeout <= 0
-    ):
-        raise ValueError(f"exec_timeout must be positive, got {exec_timeout!r}")
-    # ``k_values`` is a scorer-level option rather than an inference config
-    # field, so validate it at the public scoring boundary.
-    if (
-        not isinstance(k_values, tuple)
-        or not k_values
-        or any(type(k) is not int or k <= 0 for k in k_values)
-    ):
-        raise ValueError(
-            f"k_values must contain only positive integers, got {k_values}"
-        )
     if not eval_dataset:
         logger.warning("Empty dataset — returning 0.0")
         return CodeScoreResult(), {}
@@ -748,6 +714,9 @@ def _score_code_task_result(
         timeout,
         allow_unsafe_code,
     )
+    for record, source in zip(records, expanded_dataset, strict=True):
+        record["sample_group_complete"] = source.get("sample_group_complete", True)
+        record["n_samples"] = source.get("n_samples", 1)
 
     correct = sum(1 for r in records if r.get("passed"))
     completed_groups = _completed_code_groups(records)

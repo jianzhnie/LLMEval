@@ -74,6 +74,23 @@ class TestProcessAnswers:
         assert result.fallback_matched is True
         assert not [record for record in caplog.records if record.levelname == "ERROR"]
 
+    def test_model_parse_error_is_completed_incorrect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import llmeval.tasks.math_eval.math_score as math_mod
+
+        monkeypatch.setattr(
+            math_mod, "_verify_func", MagicMock(side_effect=ValueError("symbolic"))
+        )
+        monkeypatch.setattr(math_mod, "_math_text_equiv", lambda *_: False)
+
+        result = math_mod.process_answers(
+            (0, _math_item("5", ["malformed expression"]), "answer", "gen")
+        )
+
+        assert result.grade == 0.0
+        assert result.failed is False
+
     def test_correct_answer(self) -> None:
         from llmeval.tasks.math_eval.math_score import process_answers
 
@@ -535,6 +552,26 @@ class TestRepeatedMathRows:
         ]
         result = self._score(data, tmp_path)
         assert result.metrics["accuracy"] == pytest.approx(0.5)
+
+    def test_incomplete_samples_warn_and_exclude_problem_metrics(
+        self, tmp_path: Path
+    ) -> None:
+        data = [
+            {
+                **_math_item("5", ["$\\boxed{5}$"]),
+                "doc_id": "aime24:0",
+                "sample_index": 0,
+                "n_samples": 2,
+            }
+        ]
+
+        result = self._score(data, tmp_path)
+
+        assert result.metrics["accuracy"] == 1.0
+        assert result.metrics["problem_pass@2"] == 0.0
+        assert result.observations["problem_pass@2"] == []
+        assert result.details["incomplete_problem_count"] == 1
+        assert result.details["problem_level"][0]["available_sample_count"] == 1
 
 
 # ===========================================================================

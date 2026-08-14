@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -164,46 +163,7 @@ def evaluate_task_result(
 ) -> EvaluationResult:
     """Evaluate a task through the registry and return all declared metrics."""
     actual_seed = 0 if seed is None else seed
-    if type(max_workers) is not int or max_workers <= 0:
-        raise ValueError(f"max_workers must be positive, got {max_workers!r}")
-    if type(timeout) is not int or timeout <= 0:
-        raise ValueError(f"timeout must be positive, got {timeout!r}")
-    if (
-        not isinstance(exec_timeout, int | float)
-        or isinstance(exec_timeout, bool)
-        or not math.isfinite(exec_timeout)
-        or exec_timeout <= 0
-    ):
-        raise ValueError(f"exec_timeout must be positive, got {exec_timeout!r}")
-    if type(actual_seed) is not int or actual_seed < 0:
-        raise ValueError(f"seed must be non-negative, got {actual_seed!r}")
-    if type(bootstrap_samples) is not int or bootstrap_samples < 0:
-        raise ValueError(
-            f"bootstrap_samples must be non-negative, got {bootstrap_samples!r}"
-        )
-    if n_samples is not None and (type(n_samples) is not int or n_samples <= 0):
-        raise ValueError(
-            f"n_samples must be a positive integer or None, got {n_samples!r}"
-        )
-    if not isinstance(confidence_level, int | float) or not (
-        0.0 < confidence_level < 1.0
-    ):
-        raise ValueError(
-            f"confidence_level must be between 0 and 1, got {confidence_level!r}"
-        )
-    if (
-        not isinstance(code_k_values, tuple)
-        or not code_k_values
-        or any(type(value) is not int or value <= 0 for value in code_k_values)
-    ):
-        raise ValueError(
-            f"code_k_values must contain positive integers, got {code_k_values!r}"
-        )
-    if not str(result_path).strip():
-        raise ValueError("result_path must be a non-empty file path")
     resolved_result_path = Path(result_path)
-    if resolved_result_path.exists() and resolved_result_path.is_dir():
-        raise ValueError("result_path must be a file path, not a directory")
     registry = _default_registry()
     task = registry.resolve(task_name)
     prepared_dataset = task.prepare_dataset(

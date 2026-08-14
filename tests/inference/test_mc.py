@@ -145,7 +145,6 @@ def _make_mc_runner(
     runner._stats = {
         "processed": 0,
         "failed": 0,
-        "correct": 0,
     }
     return runner
 
@@ -391,7 +390,8 @@ class TestProcessLoglikelihoodItem:
             }
         )
         assert result["choice_tokens"] == ["A", "B"]
-        assert result["correct"] is True
+        assert result["gold"] == 0
+        assert result["logprobs"] == [-1.0, -5.0]
 
     def test_no_choices_raises(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
@@ -408,7 +408,17 @@ class TestProcessLoglikelihoodItem:
                 {"prompt": "q", "choices": ["a", "b"], "gold": 1}
             )
 
-    def test_normal_pred_and_correct(self, tmp_path: Path) -> None:
+    def test_mismatched_logprob_count_raises(self, tmp_path: Path) -> None:
+        runner = _make_mc_runner(tmp_path)
+        runner.client = MagicMock()
+        runner.client.get_choices_logprobs.return_value = [-1.0]
+
+        with pytest.raises(RuntimeError, match="number of choices"):
+            runner.process_loglikelihood_item(
+                {"prompt": "q", "choices": ["a", "b"], "gold": 1}
+            )
+
+    def test_compact_loglikelihood_output(self, tmp_path: Path) -> None:
         runner = _make_mc_runner(tmp_path)
         runner.client = MagicMock()
         runner.client.get_choices_logprobs.return_value = [-5.0, -1.0]
@@ -422,8 +432,6 @@ class TestProcessLoglikelihoodItem:
             }
         )
 
-        assert result["pred"] == 1
-        assert result["correct"] is True
         assert result["choice_tokens"] == ["A", "B"]
         assert set(result) == {
             "prompt",
@@ -435,8 +443,6 @@ class TestProcessLoglikelihoodItem:
             "gold",
             "logprobs",
             "scoring_mode",
-            "pred",
-            "correct",
         }
 
     def test_continuation_pred_and_compact_output(self, tmp_path: Path) -> None:
@@ -464,8 +470,6 @@ class TestProcessLoglikelihoodItem:
             "gold": 1,
             "logprobs": [-5.0, -1.0],
             "scoring_mode": "continuation",
-            "pred": 1,
-            "correct": True,
         }
         runner.client.score_continuations.assert_called_once_with(
             "Answer:", [" A", " B"]

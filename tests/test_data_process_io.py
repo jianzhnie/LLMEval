@@ -10,6 +10,8 @@ import pytest
 from scripts.data_process.io_utils import atomic_output_path, has_valid_doc_ids
 from scripts.data_process.post_process import load_and_validate_args
 
+ROOT = Path(__file__).parents[1]
+
 
 def test_atomic_output_replaces_destination(tmp_path: Path) -> None:
     destination = tmp_path / "data.jsonl"
@@ -64,3 +66,14 @@ def test_post_process_rejects_output_matched_by_input_glob(
 
     with pytest.raises(SystemExit):
         load_and_validate_args()
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    ["prepare_mc_benchmarks.py", "prepare_code_benchmarks.py"],
+)
+def test_benchmark_writers_reject_nonfinite_json(script_name: str) -> None:
+    source = (ROOT / "scripts" / "data_process" / script_name).read_text(
+        encoding="utf-8"
+    )
+    assert "allow_nan=False" in source

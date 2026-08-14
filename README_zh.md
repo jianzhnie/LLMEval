@@ -277,8 +277,8 @@ python -m llmeval.evaluator \
 2. 统计每道题已完成采样数
 3. 从断点继续评测
 
-新任务还会写入 `<output>.manifest.json`。评分前会用该清单校验结果完整性，推理失败
-样本仍不会写入 JSONL。
+新任务还会写入 `<output>.manifest.json`。评分前会用该清单检查缺失或异常结果行并给出
+告警，但不会阻止评测；评测会继续使用现有样本，推理失败样本仍不会写入 JSONL。
 
 ### 上下文长度扩展（YaRN）
 

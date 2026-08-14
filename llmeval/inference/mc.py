@@ -512,7 +512,6 @@ class MCRunner:
         self._stats: dict[str, int] = {
             "processed": 0,
             "failed": 0,
-            "correct": 0,
         }
 
     # ------------------------------------------------------------------
@@ -597,15 +596,10 @@ class MCRunner:
     ) -> None:
         """Process requests and persist successful results in the coordinator."""
 
-        def persist(result: dict[str, Any]) -> None:
-            self._write_result(result)
-            if result.get("correct"):
-                self._stats["correct"] += 1
-
         processed, failed = run_concurrent_requests(
             remaining,
             worker,
-            persist,
+            self._write_result,
             max_workers=self.config.max_workers,
             thread_name_prefix="mc_worker",
         )
@@ -638,8 +632,7 @@ class MCRunner:
             item: MC item with prompt, choices, and gold index
 
         Returns:
-            Result dict with choices, per-choice logprobs, prediction, and
-            correctness.
+            Result dict with choices, gold index, and per-choice logprobs.
 
         Raises:
             RuntimeError: When every choice scored -inf, i.e. the batched
@@ -676,11 +669,21 @@ class MCRunner:
             raise RuntimeError(f"Unsupported loglikelihood mode: {scoring_mode!r}")
         if logprobs is None:
             raise RuntimeError("Logprob inference produced no result")
-        if all(lp == float("-inf") for lp in logprobs):
+        if len(logprobs) != len(choices):
+            raise RuntimeError(
+                "Logprob response length does not match the number of choices"
+            )
+        if any(
+            not isinstance(score, int | float)
+            or isinstance(score, bool)
+            or math.isnan(float(score))
+            or float(score) == float("inf")
+            for score in logprobs
+        ):
+            raise RuntimeError("Logprob response contains an invalid score")
+        if all(float(score) == float("-inf") for score in logprobs):
             raise RuntimeError("Logprob request failed for all choices")
 
-        pred = max(range(len(logprobs)), key=logprobs.__getitem__) if logprobs else -1
-        is_correct = pred == gold
         return {
             self.config.input_key: prompt,
             "doc_id": item["doc_id"],
@@ -695,8 +698,6 @@ class MCRunner:
                 None if score == float("-inf") else score for score in logprobs
             ],
             "scoring_mode": scoring_mode,
-            "pred": pred,
-            "correct": is_correct,
         }
 
     @staticmethod
@@ -846,25 +847,11 @@ class MCRunner:
     # ------------------------------------------------------------------
 
     def log_stats(self) -> None:
-        """Log runtime statistics (and accuracy for loglikelihood mode)."""
+        """Log runtime inference statistics."""
         logger.info(
             f"Stats: {self._stats['processed']} processed, "
             f"{self._stats['failed']} failed"
         )
-        # Quick accuracy summary for loglikelihood mode
-        if self.config.mode == "loglikelihood":
-            self.print_loglikelihood_summary()
-
-    def print_loglikelihood_summary(self) -> None:
-        """Print quick accuracy from in-memory stats."""
-        processed = self._stats["processed"]
-        correct = self._stats.get("correct", 0)
-        failed = self._stats["failed"]
-        if processed:
-            logger.info(
-                f"Accuracy (loglikelihood): {correct}/{processed} = {correct / processed:.2%} "
-                f"(failed={failed})"
-            )
 
     def run(self) -> None:
         """Execute the complete MC inference pipeline with monitoring.
