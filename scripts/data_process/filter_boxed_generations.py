@@ -1,11 +1,18 @@
+"""Filter boxed generations by their actual chat-template token length."""
+
+from __future__ import annotations
+
 import argparse
 import glob
 import logging
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 from datasets import Dataset, load_dataset
 from transformers import AutoTokenizer
+
+from llmeval.inference.common import build_chat_messages
+from llmeval.utils.prompts import SYSTEM_PROMPT_FACTORY
 
 try:
     from .io_utils import atomic_output_path
@@ -17,41 +24,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Defaults (used only if CLI values are not provided)
-AMTHINKING_SYSTEM_PROMPT: Final[str] = (
-    "You are a helpful assistant. To answer the user's question, you first think "
-    "about the reasoning process and then provide the user with the answer. "
-    "The reasoning process and answer are enclosed within <think> </think> and "
-    "<answer> </answer> tags, respectively, i.e., "
-    "<think> reasoning process here </think> <answer> answer here </answer>."
-)
 
-
-def safe_get_text(field: Any) -> str:
-    """Safely extract text from various field types."""
+def extract_single_text(field: Any, field_name: str) -> str:
+    """Return one text value while rejecting ambiguous or malformed fields."""
     if isinstance(field, str):
         return field
-    elif isinstance(field, list) and len(field) > 0:
-        return str(field[0])
-    return ""
+    if field is None:
+        return ""
+    if isinstance(field, list):
+        if not field:
+            return ""
+        if len(field) > 1:
+            raise ValueError(
+                f"{field_name!r} contains {len(field)} generations; expected exactly one"
+            )
+        if isinstance(field[0], str):
+            return field[0]
+    raise ValueError(f"{field_name!r} must be a string or a list containing one string")
 
 
 def compute_token_lengths(
-    example: dict[str, Any], tokenizer: AutoTokenizer, system_prompt: str
+    example: dict[str, Any], tokenizer: AutoTokenizer, system_prompt: str | None
 ) -> dict[str, Any]:
-    """Compute token lengths for prompt and generation text."""
-    prompt_text = safe_get_text(example.get("prompt", ""))
-    prompt_with_system = system_prompt + prompt_text
-    gen_text = safe_get_text(example.get("gen", ""))
+    """Compute lengths matching the tokens used for chat inference."""
+    prompt_text = extract_single_text(example.get("prompt"), "prompt")
+    gen_text = extract_single_text(example.get("gen"), "gen")
+    messages = build_chat_messages(prompt_text, system_prompt)
+    prompt_token_ids = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+    gen_tokens = tokenizer(
+        gen_text,
+        add_special_tokens=False,
+        truncation=False,
+        padding=False,
+    )
 
-    # Tokenize once and cache results
-    prompt_tokens = tokenizer(prompt_with_system, truncation=False, padding=False)
-    gen_tokens = tokenizer(gen_text, truncation=False, padding=False)
-
-    prompt_length = len(prompt_tokens["input_ids"])
+    prompt_length = len(prompt_token_ids)
     gen_length = len(gen_tokens["input_ids"])
 
-    # Check for boxed{} in the last 1000 characters
     tail_text = gen_text[-1000:]
     has_boxed = "boxed{" in tail_text
 
@@ -65,7 +78,6 @@ def compute_token_lengths(
 
 def should_keep_example(example: dict[str, Any], max_token_length: int) -> bool:
     """Determine if example should be kept based on filtering criteria."""
-    # Keep examples that have boxed{} and are within token limit
     exceeded = example["total_token_length"] > max_token_length
     return example["has_boxed"] and not exceeded
 
@@ -104,6 +116,12 @@ def load_and_validate_args() -> argparse.Namespace:
     parser.add_argument(
         "--num_proc", type=int, default=16, help="Number of processes for filtering"
     )
+    parser.add_argument(
+        "--system_prompt_type",
+        choices=sorted(SYSTEM_PROMPT_FACTORY),
+        default="amthinking",
+        help="System prompt used by inference when applying the chat template",
+    )
 
     args = parser.parse_args()
     if args.max_token_length <= 0:
@@ -121,14 +139,17 @@ def load_and_validate_args() -> argparse.Namespace:
 
 
 def process_dataset(
-    dataset: Dataset, tokenizer: AutoTokenizer, max_token_length: int, num_proc: int
+    dataset: Dataset,
+    tokenizer: AutoTokenizer,
+    max_token_length: int,
+    num_proc: int,
+    system_prompt: str | None,
 ) -> Dataset:
     """Process dataset with token length computation and filtering."""
     logger.info("Computing token lengths...")
 
-    # Add token length information
     dataset = dataset.map(
-        lambda x: compute_token_lengths(x, tokenizer, AMTHINKING_SYSTEM_PROMPT),
+        lambda x: compute_token_lengths(x, tokenizer, system_prompt),
         num_proc=num_proc,
         desc="Computing token lengths",
     )
@@ -136,7 +157,6 @@ def process_dataset(
     initial_count = len(dataset)
     logger.info(f"Initial dataset size: {initial_count}")
 
-    # Apply filtering
     dataset = dataset.filter(
         lambda x: should_keep_example(x, max_token_length),
         num_proc=num_proc,
@@ -152,7 +172,6 @@ def process_dataset(
         f"Removed {initial_count - filtered_count} examples ({removal_rate:.1f}%)"
     )
 
-    # Remove 'gen' field if exists
     if "gen" in dataset.column_names:
         dataset = dataset.remove_columns(["gen"])
         logger.info("Removed 'gen' field")
@@ -160,49 +179,47 @@ def process_dataset(
     return dataset
 
 
-def main():
+def main() -> None:
     """Main processing function."""
     try:
-        # Load and validate arguments
         args = load_and_validate_args()
 
-        # Setup output directory
         output_file = Path(args.output_file)
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Load tokenizer
-        logger.info(f"Loading tokenizer from: {args.tokenizer_name_or_path}")
+        logger.info("Loading tokenizer from: %s", args.tokenizer_name_or_path)
         try:
             tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name_or_path)
-        except Exception as e:
-            logger.error(f"Failed to load tokenizer: {e}")
+        except Exception as exc:
+            logger.error("Failed to load tokenizer: %s", exc)
             raise
 
-        # Load dataset
-        logger.info(f"Loading dataset from: {args.input_path}")
+        logger.info("Loading dataset from: %s", args.input_path)
         try:
             dataset = load_dataset(
                 "json", data_files=str(args.input_path), split="train"
             )
-        except Exception as e:
-            logger.error(f"Failed to load dataset: {e}")
+        except Exception as exc:
+            logger.error("Failed to load dataset: %s", exc)
             raise
 
-        logger.info(f"Loaded {len(dataset)} examples")
+        logger.info("Loaded %d examples", len(dataset))
 
-        # Process dataset
         processed_dataset = process_dataset(
-            dataset, tokenizer, args.max_token_length, args.num_proc
+            dataset,
+            tokenizer,
+            args.max_token_length,
+            args.num_proc,
+            SYSTEM_PROMPT_FACTORY[args.system_prompt_type],
         )
 
-        # Save results
-        logger.info(f"Saving filtered dataset to: {output_file}")
+        logger.info("Saving filtered dataset to: %s", output_file)
         with atomic_output_path(output_file) as temporary:
             processed_dataset.to_json(str(temporary), lines=True, force_ascii=False)
         logger.info("Processing completed successfully")
 
-    except Exception as e:
-        logger.error(f"Processing failed: {e}")
+    except Exception as exc:
+        logger.error("Processing failed: %s", exc)
         raise
 
 

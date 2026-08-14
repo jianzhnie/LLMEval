@@ -419,7 +419,7 @@ class MCTask(GeneratedTask):
 
 @dataclass
 class CodeTask(GeneratedTask):
-    """Adapter for sandboxed code scoring."""
+    """Adapter for guarded-subprocess code scoring."""
 
     scorer: StructuredScorer
     family: str = "code_opensource"

@@ -6,19 +6,19 @@
 #
 # Usage:
 #   # 默认 (aime24 + aime25, 各 64 样本)
-#   bash scripts/longcat-flash/online_infer.sh
+#   bash examples/longcat-flash/math_infer.sh
 #
 #   # 自定义服务地址和模型
-#   BASE_URL=http://10.42.11.130:8200/v1 MODEL_NAME=longcat-flash bash scripts/longcat-flash/online_infer.sh
+#   BASE_URL=http://10.42.11.130:8200/v1 MODEL_NAME=longcat-flash bash examples/longcat-flash/math_infer.sh
 #
 #   # 只跑单个 benchmark
-#   BENCHMARKS=aime24 bash scripts/longcat-flash/online_infer.sh
+#   BENCHMARKS=aime24 bash examples/longcat-flash/math_infer.sh
 #
 #   # 自定义采样数和并发
-#   N_SAMPLES=128 MAX_WORKERS=128 bash scripts/longcat-flash/online_infer.sh
+#   N_SAMPLES=128 MAX_WORKERS=128 bash examples/longcat-flash/math_infer.sh
 #
 #   # 续跑 (断点续传): 直接重跑同一条命令, 已完成的 prompt 会自动跳过
-#   bash scripts/longcat-flash/online_infer.sh
+#   bash examples/longcat-flash/math_infer.sh
 #
 # =============================================================================
 set -euo pipefail
@@ -62,7 +62,7 @@ mkdir -p "$OUTPUT_DIR"
 #   ALL     = 全部 7 个数据集
 #   HARD    = aime24 aime25 aime26 hmmt25 gpqa_diamond (高难度)
 #   QUICK   = gsm8k math500 (快速验证, 样本少)
-# 自定义: BENCHMARKS="gsm8k gpqa_diamond" bash scripts/longcat-flash/online_infer.sh
+# 自定义: BENCHMARKS="gsm8k gpqa_diamond" bash examples/longcat-flash/math_infer.sh
 # =============================================================================
 BENCHMARKS="${BENCHMARKS:-ALL}"
 

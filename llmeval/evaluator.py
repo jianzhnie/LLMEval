@@ -7,7 +7,7 @@ specified task type. Supported task families:
 
     - ``math_opensource``  — math answer verification via math-verify
     - ``mc_opensource``    — multiple-choice, loglikelihood or generation based
-    - ``code_opensource``  — code generation, sandboxed pass@1 execution
+    - ``code_opensource``  — code generation, guarded-subprocess pass@k execution
 
 Features:
     - JSONL input file processing

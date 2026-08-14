@@ -15,7 +15,7 @@ LLMEval 是一个用于评测大型语言模型（LLM）的综合评估系统，
 - **多推理后端**：vLLM (GPU/NPU)、SGLang、OpenAI API
 - **三种评测模式**：在线生成、离线本地推理、MC loglikelihood 对比
 - **14 个 Benchmark**：AIME 2024/2025/2026、MATH-500、GSM8K、GPQA-Diamond、HMMT-25、MMLU、MMLU-Pro、C-Eval、HumanEval、MBPP
-- **代码评估**: HumanEval / MBPP 沙箱执行 + pass@k 评分
+- **代码评估**: HumanEval / MBPP 受保护子进程执行 + pass@k 评分
 - **MC 评分**：答案 token 或完整 continuation 的 loglikelihood 准确率、few-shot 去重
 - **一键评测**：Shell 脚本端到端推理 → 评分
 - **断点续评**：自动恢复中断的评测任务
@@ -161,7 +161,7 @@ bash examples/longcat-flash/mc_infer.sh
 切换 loglikelihood 评分方式时应使用不同的输出目录。算法原理和后端要求见
 [MC Loglikelihood 评分机制](docs/mc_scoring.md)。
 
-**代码 benchmark** — 代码生成 + 沙箱执行 pass@k summary：
+**代码 benchmark** — 代码生成 + 受保护子进程执行 pass@k summary：
 
 ```bash
 bash examples/longcat-flash/code_infer.sh            # HumanEval + MBPP 推理
@@ -173,8 +173,8 @@ N_SAMPLES=64 TEMPERATURE=0.2 bash examples/longcat-flash/code_infer.sh
 
 或分步执行：
 ```bash
-bash examples/longcat-flash/online_infer.sh   # 数学推理
-bash examples/longcat-flash/get_score.sh      # 数学评分
+bash examples/longcat-flash/math_infer.sh   # 数学推理
+bash examples/longcat-flash/math_score.sh   # 数学评分
 ```
 
 ### 3. 手动推理（CLI 模式）
@@ -219,6 +219,10 @@ python -m llmeval.evaluator \
     --exec_timeout 5.0 \
     --allow_unsafe_code
 ```
+
+`--allow_unsafe_code` 会执行模型生成的 Python。内置 guard 只限制执行时间和部分
+常见危险操作，不是安全沙箱。代码评测必须运行在外部隔离的容器或虚拟机中，并禁用
+网络、使用非特权用户、限制主机文件系统访问和计算资源。
 
 ## 详细使用说明
 
@@ -265,7 +269,7 @@ python -m llmeval.evaluator \
 |------|--------|----------|
 | 数学 | `math_opensource/aime24` `aime25` `aime26` `gsm8k` `math500` `math` `hmmt25` | math-verify |
 | 科学 | `math_opensource/gpqa_diamond` `hle_full` | math-verify |
-| 代码 | `code_opensource/humaneval` `mbpp` `humaneval_plus` `mbpp_plus` | pass@k 沙箱执行 |
+| 代码 | `code_opensource/humaneval` `mbpp` `humaneval_plus` `mbpp_plus` | pass@k 受保护子进程执行 |
 | MC | `mc_opensource/mmlu` `mmlu_pro` `ceval` | 答案 token loglikelihood |
 
 详见 [docs/benchmark.md](docs/benchmark.md)。
@@ -309,14 +313,14 @@ LLMEval/
 │   ├── inference/         # 推理引擎 (online / offline / mc)
 │   ├── tasks/
 │   │   ├── math_eval/     # 数学评分 (math-verify)
-│   │   ├── code_eval/     # 代码评分 (沙箱执行 pass@k)
+│   │   ├── code_eval/     # 代码评分 (受保护子进程执行 pass@k)
 │   │   └── mc_eval/       # MC 评分 (loglikelihood/generate)
 │   └── utils/             # 工具函数
 ├── examples/
 │   ├── longcat-flash/     # 一键评测脚本
 │   │   ├── run_all.sh     #   数学全流程
-│   │   ├── online_infer.sh #  数学推理
-│   │   ├── get_score.sh   #  数学评分
+│   │   ├── math_infer.sh  #  数学推理
+│   │   ├── math_score.sh  #  数学评分
 │   │   ├── code_infer.sh  #  代码推理
 │   │   ├── code_score.sh  #  代码评分
 │   │   ├── mc_infer.sh    #  MC 推理

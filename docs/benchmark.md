@@ -105,7 +105,8 @@ MMLU 增强版，10 选项，去除了简单题。
 
 ## 代码生成任务
 
-代码生成评估使用沙箱执行 + pass@k 评分。模型生成代码后，在隔离子进程中执行测试用例。
+代码生成评估使用受保护子进程执行 + pass@k 评分。模型生成代码后，在独立子进程中执行测试用例。
+内置 guard 不是安全沙箱；代码评测必须运行在外部隔离环境中，并禁用网络、限制主机文件系统访问和计算资源。
 
 ### HumanEval
 OpenAI 发布的 164 道 Python 函数生成题。
@@ -115,7 +116,7 @@ OpenAI 发布的 164 道 Python 函数生成题。
 | HF 数据集 | [openai/openai_humaneval](https://huggingface.co/datasets/openai/openai_humaneval) |
 | 样本数 | 164 (test) |
 | 答案格式 | assert + check() |
-| 评分方式 | pass@1 沙箱执行 |
+| 评分方式 | pass@1 受保护子进程执行 |
 
 ### HumanEval+
 HumanEval 增强版，每个题目增加更多测试用例。
@@ -125,7 +126,7 @@ HumanEval 增强版，每个题目增加更多测试用例。
 | HF 数据集 | [evalplus/humanevalplus](https://huggingface.co/datasets/evalplus/humanevalplus) |
 | 样本数 | 164 (test) |
 | 答案格式 | assert + check() |
-| 评分方式 | pass@1 沙箱执行 |
+| 评分方式 | pass@1 受保护子进程执行 |
 
 ### MBPP
 Google 发布的 500 道 Python 编程题（test split）。
@@ -135,7 +136,7 @@ Google 发布的 500 道 Python 编程题（test split）。
 | HF 数据集 | [google-research-datasets/mbpp](https://huggingface.co/datasets/google-research-datasets/mbpp) (full) |
 | 样本数 | 500 (test) |
 | 答案格式 | assert 语句 |
-| 评分方式 | pass@1 沙箱执行 |
+| 评分方式 | pass@1 受保护子进程执行 |
 
 ### MBPP+
 MBPP 增强版。
@@ -144,8 +145,8 @@ MBPP 增强版。
 |------|-----|
 | HF 数据集 | [evalplus/mbppplus](https://huggingface.co/datasets/evalplus/mbppplus) |
 | 样本数 | 500 (test) |
-| 答案格式 | assert 语句 |
-| 评分方式 | pass@1 沙箱执行 |
+| 答案格式 | EvalPlus 完整增强 test harness |
+| 评分方式 | pass@1 受保护子进程执行 |
 
 
 ---

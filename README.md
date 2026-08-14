@@ -15,7 +15,7 @@ LLMEval is a comprehensive evaluation system for assessing Large Language Models
 - **Multiple Inference Backends**: Support for vLLM (GPU/NPU) and SGLang
 - **Flexible Evaluation Modes**: Online (API), offline (local), and MC (loglikelihood/generate)
 - **Rich Benchmark Coverage**: 14 benchmarks — AIME 2024/2025/2026, MATH-500, GSM8K, GPQA-Diamond, HMMT-25, HumanEval, MBPP, MMLU, MMLU-Pro, C-Eval
-- **Code Evaluation**: HumanEval / MBPP with sandbox execution and pass@k scoring
+- **Code Evaluation**: HumanEval / MBPP with guarded subprocess execution and pass@k scoring
 - **MC Scoring**: Answer-token or full-continuation loglikelihood accuracy, few-shot dedup
 - **One-Click Pipeline**: Shell scripts for end-to-end inference → scoring
 - **Resume Capability**: Automatically resume interrupted evaluations
@@ -174,7 +174,7 @@ python -m llmeval.inference.online \
     --max_workers 8
 ```
 
-Please refer to the [script](./examples/longcat-flash/online_infer.sh) for more details.
+Please refer to the [script](./examples/longcat-flash/math_infer.sh) for more details.
 
 **Note:** We apply repeated sampling to reduce evaluation variance, but it may take a long time to complete (more than 8 hours depending on your device).
 
@@ -227,8 +227,8 @@ N_SAMPLES=64 TEMPERATURE=0.2 bash examples/longcat-flash/code_infer.sh
 Or run each math step separately:
 
 ```bash
-bash examples/longcat-flash/online_infer.sh   # inference
-bash examples/longcat-flash/get_score.sh      # scoring
+bash examples/longcat-flash/math_infer.sh   # inference
+bash examples/longcat-flash/math_score.sh   # scoring
 ```
 
 ### Step 3: Scoring (CLI)
@@ -363,7 +363,7 @@ LLMEval/
 │   │   └── mc.py            #   MC inference
 │   ├── tasks/               # Task-specific scoring
 │   │   ├── code_eval/       #   Code (HumanEval / MBPP / pass@k)
-│   │   │   ├── execute.py   #     Sandbox execution
+│   │   │   ├── execute.py   #     Guarded subprocess execution
 │   │   │   └── code_score.py #    pass@k driver
 │   │   ├── math_eval/       #   Math (math-verify)
 │   │   │   ├── math_score.py
@@ -378,8 +378,8 @@ LLMEval/
 ├── examples/              # Model-specific evaluation pipelines
 │   ├── longcat-flash/     # One-click evaluation
 │   │   ├── run_all.sh
-│   │   ├── online_infer.sh  #   Math inference
-│   │   ├── get_score.sh     #   Math scoring
+│   │   ├── math_infer.sh    #   Math inference
+│   │   ├── math_score.sh    #   Math scoring
 │   │   ├── code_infer.sh    #   Code inference
 │   │   ├── code_score.sh    #   Code scoring
 │   │   ├── mc_infer.sh      #   MC inference

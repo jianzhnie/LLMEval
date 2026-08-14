@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts.data_process.filter_boxed_generations import load_and_validate_args
 from scripts.data_process.io_utils import atomic_output_path, has_valid_doc_ids
-from scripts.data_process.post_process import load_and_validate_args
 
 ROOT = Path(__file__).parents[1]
 
@@ -45,7 +45,7 @@ def test_has_valid_doc_ids_requires_non_empty_unique_ids(tmp_path: Path) -> None
     assert has_valid_doc_ids(path) is False
 
 
-def test_post_process_rejects_output_matched_by_input_glob(
+def test_filter_boxed_generations_rejects_output_matched_by_input_glob(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output = tmp_path / "output.jsonl"
@@ -54,7 +54,7 @@ def test_post_process_rejects_output_matched_by_input_glob(
         sys,
         "argv",
         [
-            "post_process.py",
+            "filter_boxed_generations.py",
             "--input_path",
             str(tmp_path / "*.jsonl"),
             "--output_file",

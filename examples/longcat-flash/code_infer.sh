@@ -6,16 +6,16 @@
 #
 # Usage:
 #   # 默认 (humaneval, pass@1)
-#   bash scripts/longcat-flash/code_infer.sh
+#   bash examples/longcat-flash/code_infer.sh
 #
 #   # 只跑 humaneval
-#   BENCHMARKS=humaneval bash scripts/longcat-flash/code_infer.sh
+#   BENCHMARKS=humaneval bash examples/longcat-flash/code_infer.sh
 #
 #   # 自定义 pass@N 采样数
-#   N_SAMPLES=64 bash scripts/longcat-flash/code_infer.sh
+#   N_SAMPLES=64 bash examples/longcat-flash/code_infer.sh
 #
 #   # 自定义服务地址
-#   BASE_URL=http://10.42.11.130:8200/v1 MODEL_NAME=longcat-flash bash scripts/longcat-flash/code_infer.sh
+#   BASE_URL=http://10.42.11.130:8200/v1 MODEL_NAME=longcat-flash bash examples/longcat-flash/code_infer.sh
 #
 # Data preparation:
 #   python scripts/data_process/prepare_code_benchmarks.py --benchmarks humaneval mbpp --output_dir ./data

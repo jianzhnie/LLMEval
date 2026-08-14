@@ -541,8 +541,9 @@ class TestScoreCode:
 
         assert result.metrics["pass@1"] == 0.0
         assert result.observations["pass@1"] == [0.0]
-        assert result.effective_sample_count == 2
+        assert result.effective_sample_count == 1
         assert result.failed_count == 1
+        assert result.excluded_count == 1
         assert result.details == {
             "complete_problem_count": 1,
             "incomplete_problem_count": 1,
@@ -567,8 +568,9 @@ class TestScoreCode:
             allow_unsafe_code=True,
         )
 
-        assert result.effective_sample_count == 1
+        assert result.effective_sample_count == 0
         assert result.failed_count == 0
+        assert result.excluded_count == 1
         assert result.metrics["pass@1"] == 0.0
         assert result.observations["pass@1"] == []
         assert result.details["incomplete_problem_count"] == 1

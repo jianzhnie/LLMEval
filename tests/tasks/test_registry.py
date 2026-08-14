@@ -224,3 +224,33 @@ def test_code_registry_preserves_scorer_failure_classification(tmp_path: Path) -
     assert result.metrics["pass@1"].value == 0.0
     assert result.failed_count == 0
     assert result.effective_sample_count == 1
+
+
+def test_code_registry_uses_problem_observations_for_metric_count(
+    tmp_path: Path,
+) -> None:
+    def scorer(**_: object) -> ScorerResult:
+        return ScorerResult(
+            metrics={"pass@1": 1.0},
+            observations={"pass@1": [1.0]},
+            sample_count=64,
+            effective_sample_count=64,
+        )
+
+    context = EvaluationContext(
+        eval_dataset=[{"answer": "tests", "gen": ["code"]}],
+        task_name="code_opensource/test",
+        label_key="answer",
+        response_key="gen",
+        result_path=tmp_path / "code.json",
+        max_workers=1,
+        timeout=1,
+        exec_timeout=1.0,
+        seed=1,
+        allow_unsafe_code=True,
+    )
+
+    result = CodeTask(scorer).score(context)
+
+    assert result.sample_count == 64
+    assert result.metrics["pass@1"].count == 1

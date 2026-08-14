@@ -1,4 +1,4 @@
-"""Code evaluation — sandbox execution and pass@k scoring.
+"""Code evaluation — guarded subprocess execution and pass@k scoring.
 
 Public API::
 

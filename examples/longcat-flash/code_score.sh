@@ -1,21 +1,21 @@
 #!/bin/bash
 # =============================================================================
-# LongCat-Flash-Chat — Code Scoring (pass@k via code execution sandbox)
+# LongCat-Flash-Chat — Code Scoring (pass@k via guarded subprocess execution)
 # =============================================================================
 # 对 code_infer.sh 产出的推理结果运行代码执行 + pass@k 评分.
 #
 # Usage:
 #   # 默认 (humaneval + mbpp, 使用 inference 输出目录)
-#   bash scripts/longcat-flash/code_score.sh
+#   bash examples/longcat-flash/code_score.sh
 #
 #   # 自定义输入目录
-#   INPUT_DIR=./output/longcat-flash bash scripts/longcat-flash/code_score.sh
+#   INPUT_DIR=./output/longcat-flash bash examples/longcat-flash/code_score.sh
 #
 #   # 只评 humaneval
-#   BENCHMARKS=humaneval bash scripts/longcat-flash/code_score.sh
+#   BENCHMARKS=humaneval bash examples/longcat-flash/code_score.sh
 #
 #   # 自定义执行超时和并发
-#   EXEC_TIMEOUT=10.0 MAX_WORKERS=16 bash scripts/longcat-flash/code_score.sh
+#   EXEC_TIMEOUT=10.0 MAX_WORKERS=16 bash examples/longcat-flash/code_score.sh
 #
 # =============================================================================
 set -euo pipefail

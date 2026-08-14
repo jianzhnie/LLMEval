@@ -2,23 +2,23 @@
 # =============================================================================
 # LongCat-Flash-Chat — 一键推理 + 评分
 # =============================================================================
-# 先跑推理 (online_infer.sh), 再跑评分 (get_score.sh), 最后汇总结果。
+# 先跑推理 (math_infer.sh), 再跑评分 (math_score.sh), 最后汇总结果。
 #
 # Usage:
 #   # 一键全流程 (准备数据 → 推理 → 评分)
-#   bash scripts/longcat-flash/run_all.sh
+#   bash examples/longcat-flash/run_all.sh
 #
 #   # 只推理
-#   STAGE=infer bash scripts/longcat-flash/run_all.sh
+#   STAGE=infer bash examples/longcat-flash/run_all.sh
 #
 #   # 只评分 (已有推理结果)
-#   STAGE=score bash scripts/longcat-flash/run_all.sh
+#   STAGE=score bash examples/longcat-flash/run_all.sh
 #
 #   # 快速验证 (gsm8k + math500, 样本少)
-#   BENCHMARKS=QUICK bash scripts/longcat-flash/run_all.sh
+#   BENCHMARKS=QUICK bash examples/longcat-flash/run_all.sh
 #
 #   # 自定义采样数
-#   N_SAMPLES=64 bash scripts/longcat-flash/run_all.sh
+#   N_SAMPLES=64 bash examples/longcat-flash/run_all.sh
 #
 # =============================================================================
 set -euo pipefail
@@ -100,7 +100,7 @@ if [[ "$STAGE" == "all" || "$STAGE" == "infer" ]]; then
     echo "----------------------------------------"
     echo "[STEP 2/3] 推理..."
     echo "----------------------------------------"
-    bash "${SCRIPT_DIR}/online_infer.sh"
+    bash "${SCRIPT_DIR}/math_infer.sh"
 fi
 
 # =============================================================================
@@ -111,7 +111,7 @@ if [[ "$STAGE" == "all" || "$STAGE" == "score" ]]; then
     echo "----------------------------------------"
     echo "[STEP 3/3] 评分..."
     echo "----------------------------------------"
-    bash "${SCRIPT_DIR}/get_score.sh"
+    bash "${SCRIPT_DIR}/math_score.sh"
 fi
 
 # =============================================================================

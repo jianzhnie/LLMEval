@@ -813,6 +813,11 @@ def score_code_result(
     excluded_problem_ids = [
         task_id for task_id in all_problem_ids if task_id not in completed_groups
     ]
+    excluded_problem_id_set = set(excluded_problem_ids)
+    excluded_count = sum(
+        status == "completed" and str(record["task_id"]) in excluded_problem_id_set
+        for record, status in zip(result.records, statuses, strict=True)
+    )
     return ScorerResult(
         metrics=metrics,
         observations=observations,
@@ -823,6 +828,7 @@ def score_code_result(
             "excluded_problem_task_ids": excluded_problem_ids,
         },
         sample_count=result.total,
-        effective_sample_count=result.total - failed_count,
+        effective_sample_count=result.total - failed_count - excluded_count,
         failed_count=failed_count,
+        excluded_count=excluded_count,
     )

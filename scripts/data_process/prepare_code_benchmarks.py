@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,54 @@ BENCHMARKS: dict[str, tuple[str, str | None, str]] = {
     "mbpp_plus": ("evalplus/mbppplus", None, "test"),
 }
 
+PROMPT_TEMPLATE = (
+    "You are an expert Python programmer.  Write a function that "
+    "satisfies the following description.\n\n{text}\n\n"
+    "Your code should pass these tests:\n\n{tests}\n\n[BEGIN]\n"
+)
+
+
+def _required_text(
+    item: dict[str, Any], field: str, benchmark_name: str, index: int
+) -> str:
+    value = item.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{benchmark_name} record {index} requires a non-empty string "
+            f"field {field!r}"
+        )
+    return value
+
+
+def _task_id(item: dict[str, Any], benchmark_name: str, index: int) -> str:
+    if "task_id" not in item or not str(item["task_id"]).strip():
+        raise ValueError(
+            f"{benchmark_name} record {index} requires a non-empty 'task_id'"
+        )
+    return str(item["task_id"])
+
+
+def _prepare_humaneval_records(
+    data: list[dict[str, Any]], benchmark_name: str, prompt_mode: str
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(data):
+        task_id = _task_id(item, benchmark_name, index)
+        prompt = _required_text(item, "prompt", benchmark_name, index)
+        test = _required_text(item, "test", benchmark_name, index)
+        entry_point = _required_text(item, "entry_point", benchmark_name, index)
+        test_harness = f"{test.rstrip()}\ncheck({entry_point})"
+        records.append(
+            {
+                "doc_id": f"{benchmark_name}:{task_id}",
+                "task_id": task_id,
+                "prompt": prompt,
+                "answer": "\n" + test_harness,
+                "prompt_mode": prompt_mode,
+            }
+        )
+    return records
+
 
 def prepare_humaneval(
     data: list[dict[str, Any]], benchmark_name: str = "humaneval"
@@ -47,20 +96,14 @@ def prepare_humaneval(
     Input fields: ``task_id``, ``prompt``, ``test``, ``entry_point``.
     Output fields: ``doc_id``, ``task_id``, ``prompt``, ``answer`` (test + check()).
     """
-    records: list[dict[str, Any]] = []
-    for index, item in enumerate(data):
-        task_id = str(item.get("task_id", index))
-        test_with_check = item["test"].rstrip() + f"\ncheck({item['entry_point']})"
-        records.append(
-            {
-                "doc_id": f"{benchmark_name}:{task_id}",
-                "task_id": task_id,
-                "prompt": item["prompt"],
-                "answer": "\n" + test_with_check,
-                "prompt_mode": "human_eval",
-            }
-        )
-    return records
+    return _prepare_humaneval_records(data, benchmark_name, "human_eval")
+
+
+def prepare_humaneval_plus(
+    data: list[dict[str, Any]], benchmark_name: str = "humaneval_plus"
+) -> list[dict[str, Any]]:
+    """Convert HumanEval+ data using its full ``check(candidate)`` harness."""
+    return _prepare_humaneval_records(data, benchmark_name, "human_eval_plus")
 
 
 def prepare_mbpp(
@@ -74,18 +117,26 @@ def prepare_mbpp(
     Input fields: ``task_id``, ``text``, ``test_list``, ``code``.
     Output fields: ``doc_id``, ``task_id``, ``prompt``, ``answer``.
     """
-    PROMPT_TEMPLATE = (
-        "You are an expert Python programmer.  Write a function that "
-        "satisfies the following description.\n\n{text}\n\n"
-        "Your code should pass these tests:\n\n{tests}\n\n[BEGIN]\n"
-    )
     records: list[dict[str, Any]] = []
     for index, item in enumerate(data):
-        task_id = str(item.get("task_id", index))
+        task_id = _task_id(item, benchmark_name, index)
         description = item.get("text", item.get("prompt"))
-        if description is None:
-            raise KeyError("MBPP record must contain either a 'text' or 'prompt' field")
-        tests = "\n".join(item["test_list"])
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError(
+                f"{benchmark_name} record {index} requires a non-empty string "
+                "field 'text' or 'prompt'"
+            )
+        test_list = item.get("test_list")
+        if (
+            not isinstance(test_list, list)
+            or not test_list
+            or any(not isinstance(test, str) or not test.strip() for test in test_list)
+        ):
+            raise ValueError(
+                f"{benchmark_name} record {index} requires a non-empty "
+                "'test_list' of non-empty strings"
+            )
+        tests = "\n".join(test_list)
         prompt = PROMPT_TEMPLATE.format(text=description, tests=tests)
         records.append(
             {
@@ -97,6 +148,40 @@ def prepare_mbpp(
             }
         )
     return records
+
+
+def prepare_mbpp_plus(
+    data: list[dict[str, Any]], benchmark_name: str = "mbpp_plus"
+) -> list[dict[str, Any]]:
+    """Convert MBPP+ using the complete enhanced harness in ``test``.
+
+    EvalPlus's ``test_list`` contains only the original MBPP assertions. The
+    ``test`` field carries the augmented inputs, expected results, imports,
+    and comparison logic required for MBPP+ evaluation.
+    """
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(data):
+        task_id = _task_id(item, benchmark_name, index)
+        prompt = _required_text(item, "prompt", benchmark_name, index)
+        test_harness = _required_text(item, "test", benchmark_name, index)
+        records.append(
+            {
+                "doc_id": f"{benchmark_name}:{task_id}",
+                "task_id": task_id,
+                "prompt": prompt,
+                "answer": "\n" + test_harness.rstrip(),
+                "prompt_mode": "mbpp_plus",
+            }
+        )
+    return records
+
+
+CONVERTERS: dict[str, Callable[[list[dict[str, Any]], str], list[dict[str, Any]]]] = {
+    "humaneval": prepare_humaneval,
+    "humaneval_plus": prepare_humaneval_plus,
+    "mbpp": prepare_mbpp,
+    "mbpp_plus": prepare_mbpp_plus,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -136,32 +221,23 @@ def main() -> int:
             f"[INFO] Downloading {name} from {hf_path} (config={hf_config}, split={hf_split}) ..."
         )
 
+        out_path = output_dir / f"{name}.jsonl"
         try:
             ds = load_dataset(hf_path, hf_config, split=hf_split)
+            data: list[dict[str, Any]] = [dict(item) for item in ds]
+            records = CONVERTERS[name](data, name)
+            with (
+                atomic_output_path(out_path) as temporary,
+                temporary.open("w", encoding="utf-8") as handle,
+            ):
+                for record in records:
+                    handle.write(
+                        json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
+                    )
         except Exception as exc:
-            print(f"[ERROR] Failed to load {name}: {exc}")
+            print(f"[ERROR] Failed to prepare {name}: {exc}")
             failures += 1
             continue
-
-        data: list[dict[str, Any]] = [dict(item) for item in ds]
-
-        if name.startswith("humaneval"):
-            records = prepare_humaneval(data, name)
-        elif name.startswith("mbpp"):
-            records = prepare_mbpp(data, name)
-        else:
-            print(f"[WARN]  No converter for {name}, skipping.")
-            continue
-
-        out_path = output_dir / f"{name}.jsonl"
-        with (
-            atomic_output_path(out_path) as temporary,
-            temporary.open("w", encoding="utf-8") as handle,
-        ):
-            for record in records:
-                handle.write(
-                    json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
-                )
 
         print(f"[OK]   {name}: {len(records)} items -> {out_path}")
 

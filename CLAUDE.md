@@ -16,10 +16,10 @@ pip install -e .
 pytest tests/
 
 # Run a single test file
-pytest tests/test_eval.py
+pytest tests/test_evaluator.py
 
 # Run a single test function
-pytest tests/test_eval.py::TestProcessItem::test_copies_and_adds_task -v
+pytest tests/test_evaluator.py::TestEvaluateTask::test_selects_task_specific_arguments -v
 
 # Lint (ruff format + ruff --fix via pre-commit)
 pre-commit run --all-files
@@ -91,7 +91,7 @@ Three task families, dispatched on the prefix before `/`:
 
 - **Math** (`math_opensource/*`, math-verify scoring): `math500`, `math`, `gsm8k`, `aime24`, `aime25`, `aime26`, `hmmt25`, `gpqa_diamond`, `hle_full`
 - **Multiple-choice** (`mc_opensource/*`, loglikelihood or generation scoring): `mmlu`, `mmlu_pro`, `ceval`
-- **Code** (`code_opensource/*`, sandboxed pass@1): `humaneval`, `mbpp`, `humaneval_plus`, `mbpp_plus`
+- **Code** (`code_opensource/*`, guarded-subprocess pass@k): `humaneval`, `mbpp`, `humaneval_plus`, `mbpp_plus`
 
 Task-family dispatch and supported task names are defined in `llmeval/tasks/registry.py`.
 

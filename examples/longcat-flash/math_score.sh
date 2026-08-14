@@ -2,20 +2,20 @@
 # =============================================================================
 # LongCat-Flash-Chat — 评分脚本 (math-verify)
 # =============================================================================
-# 对 online_infer.sh 产出的推理结果运行 math-verify 打分。
+# 对 math_infer.sh 产出的推理结果运行 math-verify 打分。
 #
 # Usage:
 #   # 默认 (aime24 + aime25, 使用 inference 输出目录)
-#   bash scripts/longcat-flash/get_score.sh
+#   bash examples/longcat-flash/math_score.sh
 #
 #   # 自定义输入目录和采样数
-#   INPUT_DIR=./output/longcat-flash N_SAMPLES=32 bash scripts/longcat-flash/get_score.sh
+#   INPUT_DIR=./output/longcat-flash N_SAMPLES=32 bash examples/longcat-flash/math_score.sh
 #
 #   # 只评单个 benchmark
-#   BENCHMARKS=aime24 bash scripts/longcat-flash/get_score.sh
+#   BENCHMARKS=aime24 bash examples/longcat-flash/math_score.sh
 #
 #   # 并行评分 (默认开启)
-#   PARALLEL=1 MAX_WORKERS=32 bash scripts/longcat-flash/get_score.sh
+#   PARALLEL=1 MAX_WORKERS=32 bash examples/longcat-flash/math_score.sh
 #
 # =============================================================================
 set -euo pipefail
@@ -42,7 +42,7 @@ EVAL_DIR="${EVAL_DIR:-${INPUT_DIR}/eval_score}"
 mkdir -p "$EVAL_DIR"
 
 # =============================================================================
-# Benchmarks 注册 (与 online_infer.sh 保持一致)
+# Benchmarks 注册 (与 math_infer.sh 保持一致)
 # =============================================================================
 BENCHMARKS="${BENCHMARKS:-ALL}"
 PARALLEL="${PARALLEL:-1}"           # 默认并行评分

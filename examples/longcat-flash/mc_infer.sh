@@ -7,10 +7,10 @@
 #   generate:      生成文本 → 提取答案字母 (更简单, 兼容性好)
 #
 # Usage:
-#   bash scripts/longcat-flash/mc_infer.sh                    # loglikelihood
-#   LOGLIKELIHOOD_MODE=continuation bash scripts/longcat-flash/mc_infer.sh
-#   MC_MODE=generate bash scripts/longcat-flash/mc_infer.sh   # generate
-#   BENCHMARKS=ceval bash scripts/longcat-flash/mc_infer.sh   # single benchmark
+#   bash examples/longcat-flash/mc_infer.sh                    # loglikelihood
+#   LOGLIKELIHOOD_MODE=continuation bash examples/longcat-flash/mc_infer.sh
+#   MC_MODE=generate bash examples/longcat-flash/mc_infer.sh   # generate
+#   BENCHMARKS=ceval bash examples/longcat-flash/mc_infer.sh   # single benchmark
 #
 # =============================================================================
 set -euo pipefail

@@ -769,7 +769,7 @@ class MCEvalArguments(ShareEvalArguments):
 
 @dataclass
 class CodeEvalArguments(ShareEvalArguments):
-    """CLI arguments for sandboxed code evaluation."""
+    """CLI arguments for guarded-subprocess code evaluation."""
 
     task_name: str = field(default="code_opensource/humaneval")
     allow_unsafe_code: bool = field(

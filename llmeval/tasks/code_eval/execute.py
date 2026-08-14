@@ -1,7 +1,6 @@
-"""Safe subprocess code execution for code-generation evaluation.
+"""Guarded subprocess code execution for code-generation evaluation.
 
-This module provides a self-contained code execution sandbox.  Generated code
-is run inside a separate process with:
+Generated code is run inside a separate process with:
 
 * **Timeout** — a signal-based timer and a process-level ``join(timeout)``
   double safety net.
@@ -13,9 +12,10 @@ is run inside a separate process with:
   process's streams.
 
 .. warning::
-    This is a **safety guard**, not a security sandbox.  It prevents accidental
+    This is a **safety guard**, not a security sandbox. It prevents accidental
     interference but does *not* protect against intentionally malicious code.
-    Only run on trusted model outputs.
+    Run generated code in an externally isolated container or virtual machine
+    with no network access and external filesystem and resource restrictions.
 """
 
 from __future__ import annotations

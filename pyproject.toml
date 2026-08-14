@@ -28,6 +28,7 @@ dependencies = [
     "datasets",
     "httpx",
     "math-verify",
+    "numpy",
     "openai>=2.0.0",
     "Pebble",
     "tqdm",
