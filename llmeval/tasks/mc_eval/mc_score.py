@@ -562,6 +562,12 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
         for record in result.records
         if record.get("evaluation_status") == "failed"
     )
+    excluded_count = sum(
+        _sample_weight(record)
+        for record in result.records
+        if record.get("evaluation_status", "completed") == "completed"
+        and not _record_is_metric_eligible(record)
+    )
     problem_completeness: dict[str, bool] = {}
     for index, record in enumerate(result.records):
         problem_id = str(record.get("doc_id", f"row:{index}"))
@@ -584,8 +590,9 @@ def _to_scorer_result(result: MCScoreResult) -> ScorerResult:
             "incomplete_problem_doc_ids": incomplete_problem_ids,
         },
         sample_count=sample_count,
-        effective_sample_count=sample_count - failed_count,
+        effective_sample_count=sample_count - failed_count - excluded_count,
         failed_count=failed_count,
+        excluded_count=excluded_count,
     )
 
 

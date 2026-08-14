@@ -183,7 +183,8 @@ class TestScoreGenerate:
         assert result.metrics["acc"] == 0.5
         assert result.sample_count == 2
 
-    def test_incomplete_samples_are_scored_and_reported(self) -> None:
+    @pytest.mark.parametrize("aggregation", ["majority_vote", "any_correct"])
+    def test_incomplete_samples_are_scored_and_reported(self, aggregation: str) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
         result = score_generate_result(
@@ -198,16 +199,22 @@ class TestScoreGenerate:
             ],
             "answer",
             "gen",
-            aggregation="majority_vote",
+            aggregation=aggregation,
         )
 
         assert result.metrics["acc"] == 0.0
         assert result.observations["acc"] == []
+        assert result.sample_count == 1
+        assert result.effective_sample_count == 0
         assert result.failed_count == 0
+        assert result.excluded_count == 1
         assert result.details["incomplete_problem_count"] == 1
         assert result.details["incomplete_problem_doc_ids"] == ["q0"]
 
-    def test_incomplete_problem_does_not_change_question_metric(self) -> None:
+    @pytest.mark.parametrize("aggregation", ["majority_vote", "any_correct"])
+    def test_incomplete_problem_does_not_change_question_metric(
+        self, aggregation: str
+    ) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
         result = score_generate_result(
@@ -229,21 +236,26 @@ class TestScoreGenerate:
             ],
             "answer",
             "gen",
-            aggregation="majority_vote",
+            aggregation=aggregation,
         )
 
         assert result.metrics["acc"] == 1.0
         assert result.observations["acc"] == [1.0]
+        assert result.sample_count == 2
+        assert result.effective_sample_count == 1
+        assert result.failed_count == 0
+        assert result.excluded_count == 1
 
     @pytest.mark.parametrize(
-        ("sample_index", "expected_acc", "observations"),
-        [(0, 1.0, [1.0]), (1, 0.0, [])],
+        ("sample_index", "expected_acc", "observations", "excluded_count"),
+        [(0, 1.0, [1.0], 0), (1, 0.0, [], 1)],
     )
     def test_first_requires_sample_zero(
         self,
         sample_index: int,
         expected_acc: float,
         observations: list[float],
+        excluded_count: int,
     ) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_generate_result
 
@@ -264,6 +276,10 @@ class TestScoreGenerate:
 
         assert result.metrics["acc"] == expected_acc
         assert result.observations["acc"] == observations
+        assert result.sample_count == 1
+        assert result.effective_sample_count == 1 - excluded_count
+        assert result.failed_count == 0
+        assert result.excluded_count == excluded_count
 
     def test_explicit_inference_error_is_excluded_per_sample(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_generate_result
@@ -349,6 +365,7 @@ class TestScoreGenerate:
         assert result.metrics["acc"] == 0.0
         assert result.effective_sample_count == 0
         assert result.failed_count == 1
+        assert result.excluded_count == 0
 
     def test_majority_vote_counts_unparseable_answers_as_wrong_votes(self) -> None:
         from llmeval.tasks.mc_eval.mc_score import score_generate_result

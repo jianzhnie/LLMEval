@@ -218,11 +218,12 @@ def evaluate_task_result(
             f"{metric.stderr:.6f}" if metric.stderr is not None else "N/A",
         )
     logger.info(
-        "Task %s counts: samples=%d effective=%d failed=%d",
+        "Task %s counts: samples=%d effective=%d failed=%d excluded=%d",
         task_name,
         result.sample_count,
         result.effective_sample_count,
         result.failed_count,
+        result.excluded_count,
     )
     return result
 

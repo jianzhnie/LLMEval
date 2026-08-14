@@ -26,8 +26,9 @@ def test_evaluation_result_summary_excludes_records(tmp_path: Path) -> None:
     result = EvaluationResult(
         task_name="mc_opensource/mmlu",
         metrics={"acc": MetricValue(1.0, 1)},
-        sample_count=1,
+        sample_count=2,
         effective_sample_count=1,
+        excluded_count=1,
         records=[{"prompt": "large generated content"}],
     )
 
@@ -38,6 +39,7 @@ def test_evaluation_result_summary_excludes_records(tmp_path: Path) -> None:
     assert "records" not in summary
     assert not any("version" in key for key in summary)
     assert summary["metrics"]["acc"]["value"] == 1.0
+    assert summary["excluded_count"] == 1
     assert "metric_values" not in summary
 
 
@@ -74,6 +76,65 @@ def test_scorer_result_rejects_non_integer_counts(count: object) -> None:
             observations={"accuracy": []},
             sample_count=count,  # type: ignore[arg-type]
             effective_sample_count=count,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("excluded_count", [1.5, True])
+def test_scorer_result_rejects_non_integer_excluded_count(
+    excluded_count: object,
+) -> None:
+    with pytest.raises(TypeError, match="counts must be integers"):
+        ScorerResult(
+            metrics={"accuracy": 0.0},
+            observations={"accuracy": [0.0]},
+            sample_count=1,
+            effective_sample_count=1,
+            excluded_count=excluded_count,  # type: ignore[arg-type]
+        )
+
+
+def test_scorer_result_accepts_failed_and_excluded_partition() -> None:
+    result = ScorerResult(
+        metrics={"accuracy": 1.0},
+        observations={"accuracy": [1.0]},
+        sample_count=3,
+        effective_sample_count=1,
+        failed_count=1,
+        excluded_count=1,
+    )
+
+    assert result.effective_sample_count == 1
+
+
+def test_scorer_result_rejects_negative_excluded_count() -> None:
+    with pytest.raises(ValueError, match="counts must be non-negative"):
+        ScorerResult(
+            metrics={"accuracy": 0.0},
+            observations={"accuracy": []},
+            excluded_count=-1,
+        )
+
+
+def test_scorer_result_rejects_failed_and_excluded_above_sample_count() -> None:
+    with pytest.raises(ValueError, match="cannot exceed sample count"):
+        ScorerResult(
+            metrics={"accuracy": 0.0},
+            observations={"accuracy": []},
+            sample_count=1,
+            effective_sample_count=0,
+            failed_count=1,
+            excluded_count=1,
+        )
+
+
+def test_scorer_result_requires_effective_count_to_exclude_all_non_metrics() -> None:
+    with pytest.raises(ValueError, match="excluded_count"):
+        ScorerResult(
+            metrics={"accuracy": 0.0},
+            observations={"accuracy": []},
+            sample_count=2,
+            effective_sample_count=2,
+            excluded_count=1,
         )
 
 

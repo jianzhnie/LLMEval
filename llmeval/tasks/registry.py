@@ -61,6 +61,7 @@ class EvaluationResult:
     records: list[dict[str, Any]] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
     primary_metric: str | None = None
+    excluded_count: int = 0
 
     @property
     def primary_value(self) -> float:
@@ -89,6 +90,7 @@ class EvaluationResult:
             "sample_count": self.sample_count,
             "effective_sample_count": self.effective_sample_count,
             "failed_count": self.failed_count,
+            "excluded_count": self.excluded_count,
             "details": self.details,
             "primary_metric": self.primary_metric,
         }
@@ -103,6 +105,8 @@ class ScorerResult:
     ``observations`` stores the denominator-level values used to recompute
     uncertainty in :class:`EvaluationResult`. Scorers also return their
     per-item records so adapters never need to read JSONL or summary files.
+    The total sample count is partitioned into effective, failed, and excluded
+    samples.
     """
 
     metrics: dict[str, float]
@@ -112,6 +116,7 @@ class ScorerResult:
     sample_count: int = 0
     effective_sample_count: int = 0
     failed_count: int = 0
+    excluded_count: int = 0
 
     def __post_init__(self) -> None:
         if any(not math.isfinite(float(value)) for value in self.metrics.values()):
@@ -120,18 +125,25 @@ class ScorerResult:
             self.sample_count,
             self.effective_sample_count,
             self.failed_count,
+            self.excluded_count,
         )
         if any(type(count) is not int for count in counts):
             raise TypeError("scorer result counts must be integers")
         if any(count < 0 for count in counts):
             raise ValueError("scorer result counts must be non-negative")
-        if self.failed_count > self.sample_count:
-            raise ValueError("failed sample count cannot exceed sample count")
+        if self.failed_count + self.excluded_count > self.sample_count:
+            raise ValueError(
+                "failed and excluded sample counts cannot exceed sample count"
+            )
         if self.effective_sample_count > self.sample_count:
             raise ValueError("effective sample count cannot exceed sample count")
-        if self.effective_sample_count != self.sample_count - self.failed_count:
+        expected_effective_count = (
+            self.sample_count - self.failed_count - self.excluded_count
+        )
+        if self.effective_sample_count != expected_effective_count:
             raise ValueError(
-                "effective sample count must equal sample_count minus failed_count"
+                "effective sample count must equal "
+                "sample_count - failed_count - excluded_count"
             )
         unknown = set(self.observations) - set(self.metrics)
         if unknown:
@@ -293,6 +305,7 @@ def _build_evaluation_result(
         sample_count=scored.sample_count,
         effective_sample_count=scored.effective_sample_count,
         failed_count=scored.failed_count,
+        excluded_count=scored.excluded_count,
         records=[dict(item) for item in scored.records],
         details=dict(scored.details),
         primary_metric=task.metric_specs[0].name if task.metric_specs else None,
